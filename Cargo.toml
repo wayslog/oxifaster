@@ -1,0 +1,46 @@
+[package]
+name = "faster-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["faster-rs contributors"]
+description = "A high-performance concurrent key-value store and log engine in Rust"
+license = "MIT"
+repository = "https://github.com/example/faster-rs"
+keywords = ["kv-store", "database", "concurrent", "log", "storage"]
+categories = ["database", "data-structures", "concurrency"]
+
+[features]
+default = []
+statistics = []
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+crossbeam = "0.8"
+crossbeam-utils = "0.8"
+parking_lot = "0.12"
+bytes = "1"
+thiserror = "1"
+tracing = "0.1"
+async-trait = "0.1"
+pin-project-lite = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+rand = "0.8"
+tokio-test = "0.4"
+
+[[bench]]
+name = "ycsb"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+lto = true
+codegen-units = 1
+
