@@ -1,4 +1,4 @@
-//! FASTER.rs - A high-performance concurrent key-value store and log engine
+//! oxifaster - A high-performance concurrent key-value store and log engine
 //!
 //! This is a Rust port of Microsoft's FASTER project, providing:
 //! - **FASTER KV**: A concurrent key-value store supporting data larger than memory
@@ -14,7 +14,7 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use faster_rs::{FasterKv, Status};
+//! use oxifaster::{FasterKv, Status};
 //!
 //! // Create a new store
 //! let store = FasterKv::new(config)?;

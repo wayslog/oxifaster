@@ -1,8 +1,8 @@
-//! Recovery tests for FASTER.rs
+//! Recovery tests for oxifaster
 //!
 //! This module contains tests for checkpoint and recovery functionality.
 
-use faster_rs::checkpoint::{CheckpointState, CheckpointType, IndexMetadata, LogMetadata, RecoveryStatus};
+use oxifaster::checkpoint::{CheckpointState, CheckpointType, IndexMetadata, LogMetadata, RecoveryStatus};
 
 #[test]
 fn test_checkpoint_state_creation() {

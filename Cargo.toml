@@ -1,11 +1,11 @@
 [package]
-name = "faster-rs"
+name = "oxifaster"
 version = "0.1.0"
 edition = "2021"
-authors = ["faster-rs contributors"]
+authors = ["oxifaster contributors"]
 description = "A high-performance concurrent key-value store and log engine in Rust"
 license = "MIT"
-repository = "https://github.com/example/faster-rs"
+repository = "https://github.com/wayslog/oxifaster"
 keywords = ["kv-store", "database", "concurrent", "log", "storage"]
 categories = ["database", "data-structures", "concurrency"]
 

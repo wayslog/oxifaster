@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use faster_rs::device::NullDisk;
-use faster_rs::status::Status;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 fn main() {
-    println!("=== FASTER.rs 基本 KV 存储示例 ===\n");
+    println!("=== oxifaster 基本 KV 存储示例 ===\n");
 
     // 1. 创建配置
     let config = FasterKvConfig {

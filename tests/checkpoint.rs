@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use faster_rs::device::NullDisk;
-use faster_rs::status::Status;
-use faster_rs::store::{FasterKv, FasterKvConfig, SystemPhase};
+use oxifaster::device::NullDisk;
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig, SystemPhase};
 
 fn create_test_config() -> FasterKvConfig {
     FasterKvConfig {

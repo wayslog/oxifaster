@@ -1,6 +1,6 @@
-# FASTER.rs
+# oxifaster
 
-FASTER.rs 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust 移植版本，提供高性能并发键值存储和日志引擎。
+oxifaster 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust 移植版本，提供高性能并发键值存储和日志引擎。
 
 ## 特性
 
@@ -18,15 +18,15 @@ FASTER.rs 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust
 
 ```toml
 [dependencies]
-faster-rs = { path = "path/to/faster-rs" }
+oxifaster = { path = "path/to/oxifaster" }
 ```
 
 ### 基本使用
 
 ```rust
 use std::sync::Arc;
-use faster_rs::device::NullDisk;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 fn main() {
     // 创建配置
@@ -58,7 +58,7 @@ fn main() {
 
 ## 实现状态与开发路线图
 
-本节详细说明 faster-rs 与原始 C++ FASTER 项目的功能对比，以及后续开发计划。
+本节详细说明 oxifaster 与原始 C++ FASTER 项目的功能对比，以及后续开发计划。
 
 ### 架构概览
 
@@ -214,7 +214,7 @@ let device = AzureBlobDevice::new(connection_string, container)?;
 
 ### 与 C++ FASTER 的主要差异
 
-| 方面 | C++ FASTER | faster-rs |
+| 方面 | C++ FASTER | oxifaster |
 |------|-----------|-----------|
 | **内存管理** | 手动内存管理 + RAII | Rust 所有权系统 |
 | **并发模型** | std::atomic + 手动同步 | std::sync::atomic + 类型安全 |
@@ -228,7 +228,7 @@ let device = AzureBlobDevice::new(connection_string, container)?;
 ## 模块结构
 
 ```
-faster-rs/
+oxifaster/
 ├── src/
 │   ├── lib.rs              # 库入口
 │   ├── address.rs          # 地址系统 (Address, AtomicAddress)
@@ -311,8 +311,8 @@ faster-rs/
 
 ```rust
 use std::sync::Arc;
-use faster_rs::device::NullDisk;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 // 创建存储
 let config = FasterKvConfig::default();
@@ -334,8 +334,8 @@ session.rmw(key, |v| { *v += 1; true });       // 读-改-写
 独立的高性能日志:
 
 ```rust
-use faster_rs::log::faster_log::{FasterLog, FasterLogConfig};
-use faster_rs::device::NullDisk;
+use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
+use oxifaster::device::NullDisk;
 
 let config = FasterLogConfig::default();
 let device = NullDisk::new();
@@ -361,7 +361,7 @@ for (addr, data) in log.scan_all() {
 ## 运行示例
 
 ```bash
-cd faster-rs
+cd oxifaster
 
 # 基本 KV 操作
 cargo run --example basic_kv
@@ -382,14 +382,14 @@ cargo run --example faster_log
 ## 运行测试
 
 ```bash
-cd faster-rs
+cd oxifaster
 cargo test
 ```
 
 ## 运行基准测试
 
 ```bash
-cd faster-rs
+cd oxifaster
 cargo bench
 ```
 

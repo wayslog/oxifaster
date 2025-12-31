@@ -7,10 +7,10 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use faster_rs::device::NullDisk;
-use faster_rs::record::{Key, Value};
-use faster_rs::status::Status;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::record::{Key, Value};
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 // 自定义键类型: 用户ID
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl Value for UserInfo {
 }
 
 fn main() {
-    println!("=== FASTER.rs 自定义类型示例 ===\n");
+    println!("=== oxifaster 自定义类型示例 ===\n");
 
     // 创建存储
     let config = FasterKvConfig {

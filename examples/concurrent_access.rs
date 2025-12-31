@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use faster_rs::device::NullDisk;
-use faster_rs::status::Status;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 fn main() {
-    println!("=== FASTER.rs 并发访问示例 ===\n");
+    println!("=== oxifaster 并发访问示例 ===\n");
 
     // 配置
     let num_threads = 4;

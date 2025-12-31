@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use faster_rs::epoch::{EpochGuard, LightEpoch};
+use oxifaster::epoch::{EpochGuard, LightEpoch};
 
 fn main() {
-    println!("=== FASTER.rs Epoch 保护机制示例 ===\n");
+    println!("=== oxifaster Epoch 保护机制示例 ===\n");
 
     // 创建 Epoch 实例
     let epoch = Arc::new(LightEpoch::new());

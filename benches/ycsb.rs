@@ -1,4 +1,4 @@
-//! YCSB-style benchmark for FASTER.rs
+//! YCSB-style benchmark for oxifaster
 //!
 //! This benchmark tests the performance of FasterKv under different workloads.
 
@@ -8,8 +8,8 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use rand::prelude::*;
 
-use faster_rs::device::NullDisk;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 /// Create a test store with the given configuration
 fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, NullDisk>> {

@@ -4,8 +4,8 @@
 //!
 //! 运行: cargo run --example faster_log
 
-use faster_rs::device::NullDisk;
-use faster_rs::log::{FasterLog, FasterLogConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::log::{FasterLog, FasterLogConfig};
 
 fn main() {
     println!("=== FASTER Log 示例 ===\n");

@@ -1,13 +1,13 @@
-//! Basic operation tests for FASTER.rs
+//! Basic operation tests for oxifaster
 //!
 //! This module contains integration tests for basic KV operations.
 
 use std::sync::Arc;
 use std::thread;
 
-use faster_rs::device::NullDisk;
-use faster_rs::status::Status;
-use faster_rs::store::{FasterKv, FasterKvConfig};
+use oxifaster::device::NullDisk;
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig};
 
 /// Create a test store
 fn create_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
