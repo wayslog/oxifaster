@@ -3,12 +3,16 @@
 //! This module provides the main hash index used by FasterKV to locate records
 //! in the hybrid log.
 
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::address::Address;
+use crate::checkpoint::IndexMetadata;
 use crate::constants::CACHE_LINE_BYTES;
 use crate::index::{
-    AtomicHashBucketEntry, HashBucket, HashBucketEntry,
+    AtomicHashBucketEntry, HashBucket, HashBucketEntry, HashBucketOverflowEntry,
     IndexHashBucketEntry, InternalHashTable, KeyHash,
 };
 use crate::status::Status;
@@ -387,6 +391,205 @@ impl MemHashIndex {
             load_factor: used_entries as f64 / total_entries as f64,
         }
     }
+
+    // ============ Checkpoint and Recovery Methods ============
+
+    /// Create a checkpoint of the hash index to disk
+    ///
+    /// This writes the hash table data to a file and returns metadata about the checkpoint.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory where checkpoint files will be written
+    /// * `token` - Unique token identifying this checkpoint
+    ///
+    /// # Returns
+    /// IndexMetadata containing information about the saved checkpoint
+    pub fn checkpoint(
+        &self,
+        checkpoint_dir: &Path,
+        token: crate::checkpoint::CheckpointToken,
+    ) -> io::Result<IndexMetadata> {
+        let version = self.version as usize;
+        let table_size = self.tables[version].size();
+
+        if !self.tables[version].is_initialized() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Hash index not initialized",
+            ));
+        }
+
+        // Count entries
+        let stats = self.dump_distribution();
+
+        // Create metadata
+        let metadata = IndexMetadata {
+            token,
+            table_size,
+            num_buckets: stats.buckets_with_entries,
+            num_entries: stats.used_entries,
+        };
+
+        // Write index data file
+        let data_path = checkpoint_dir.join("index.dat");
+        self.write_index_data(&data_path)?;
+
+        // Write metadata file
+        let meta_path = checkpoint_dir.join("index.meta");
+        metadata.write_to_file(&meta_path)?;
+
+        Ok(metadata)
+    }
+
+    /// Write the raw hash table data to a file
+    fn write_index_data(&self, path: &Path) -> io::Result<()> {
+        let version = self.version as usize;
+        let table_size = self.tables[version].size();
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
+
+        // Write header: table_size (8 bytes)
+        writer.write_all(&table_size.to_le_bytes())?;
+
+        // Write each bucket
+        for idx in 0..table_size {
+            let bucket = self.tables[version].bucket_at(idx);
+            
+            // Write each entry in the bucket (8 bytes each, 7 entries per bucket)
+            for i in 0..HashBucket::NUM_ENTRIES {
+                let entry = bucket.entries[i].load(Ordering::Relaxed);
+                writer.write_all(&entry.control().to_le_bytes())?;
+            }
+            
+            // Write overflow entry (8 bytes)
+            let overflow = bucket.overflow_entry.load(Ordering::Relaxed);
+            writer.write_all(&overflow.control().to_le_bytes())?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Recover the hash index from a checkpoint
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory containing checkpoint files
+    /// * `metadata` - Optional pre-loaded metadata; if None, reads from file
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error
+    pub fn recover(
+        &mut self,
+        checkpoint_dir: &Path,
+        metadata: Option<&IndexMetadata>,
+    ) -> io::Result<()> {
+        // Load metadata if not provided
+        let meta_path = checkpoint_dir.join("index.meta");
+        let loaded_metadata;
+        let metadata = match metadata {
+            Some(m) => m,
+            None => {
+                loaded_metadata = IndexMetadata::read_from_file(&meta_path)?;
+                &loaded_metadata
+            }
+        };
+
+        // Initialize the hash table with the correct size
+        let config = MemHashIndexConfig::new(metadata.table_size);
+        let status = self.initialize(&config);
+        if status != Status::Ok {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to initialize hash index: {:?}", status),
+            ));
+        }
+
+        // Read the index data
+        let data_path = checkpoint_dir.join("index.dat");
+        self.read_index_data(&data_path)?;
+
+        // Clear any tentative entries that might have been partially written
+        self.clear_tentative_entries();
+
+        Ok(())
+    }
+
+    /// Read the raw hash table data from a file
+    fn read_index_data(&mut self, path: &Path) -> io::Result<()> {
+        let version = self.version as usize;
+
+        let file = File::open(path)?;
+        let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MB buffer
+
+        // Read header: table_size (8 bytes)
+        let mut size_buf = [0u8; 8];
+        reader.read_exact(&mut size_buf)?;
+        let file_table_size = u64::from_le_bytes(size_buf);
+
+        if file_table_size != self.tables[version].size() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Table size mismatch: file has {}, index has {}",
+                    file_table_size,
+                    self.tables[version].size()
+                ),
+            ));
+        }
+
+        // Read each bucket
+        let mut entry_buf = [0u8; 8];
+        for idx in 0..file_table_size {
+            let bucket = self.tables[version].bucket_at(idx);
+            
+            // Read each entry in the bucket
+            for i in 0..HashBucket::NUM_ENTRIES {
+                reader.read_exact(&mut entry_buf)?;
+                let control = u64::from_le_bytes(entry_buf);
+                bucket.entries[i].store(HashBucketEntry::from_control(control), Ordering::Release);
+            }
+            
+            // Read overflow entry
+            reader.read_exact(&mut entry_buf)?;
+            let overflow_control = u64::from_le_bytes(entry_buf);
+            bucket
+                .overflow_entry
+                .store(HashBucketOverflowEntry::from_control(overflow_control), Ordering::Release);
+        }
+
+        Ok(())
+    }
+
+    /// Verify that the recovered index is consistent
+    pub fn verify_recovery(&self) -> io::Result<()> {
+        let version = self.version as usize;
+        let table_size = self.tables[version].size();
+        
+        let mut errors = 0u64;
+
+        for idx in 0..table_size {
+            let bucket = self.tables[version].bucket_at(idx);
+            
+            for i in 0..HashBucket::NUM_ENTRIES {
+                let entry = bucket.entries[i].load_index(Ordering::Relaxed);
+                
+                // Check for obviously corrupted entries
+                if entry.is_tentative() {
+                    errors += 1;
+                }
+            }
+        }
+
+        if errors > 0 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Found {} corrupted entries during recovery verification", errors),
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Default for MemHashIndex {
@@ -541,6 +744,148 @@ mod tests {
         let stats = index.dump_distribution();
         assert_eq!(stats.table_size, 1024);
         assert_eq!(stats.used_entries, 0);
+    }
+
+    // ============ Checkpoint and Recovery Tests ============
+
+    #[test]
+    fn test_checkpoint_empty_index() {
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+
+        let metadata = index.checkpoint(temp_dir.path(), token).unwrap();
+
+        assert_eq!(metadata.token, token);
+        assert_eq!(metadata.table_size, 256);
+        assert_eq!(metadata.num_entries, 0);
+    }
+
+    #[test]
+    fn test_checkpoint_and_recover() {
+        // Create and populate an index
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+
+        // Add some entries
+        let test_hashes: Vec<KeyHash> = (0..10).map(|i| KeyHash::new(i * 12345)).collect();
+        for (i, hash) in test_hashes.iter().enumerate() {
+            let result = index.find_or_create_entry(*hash);
+            if let Some(atomic_entry) = result.atomic_entry {
+                let addr = Address::new((i / 5) as u32, ((i % 5) * 100) as u32);
+                index.update_entry(atomic_entry, addr, hash.tag());
+            }
+        }
+
+        // Checkpoint
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        let metadata = index.checkpoint(temp_dir.path(), token).unwrap();
+
+        assert!(metadata.num_entries > 0);
+
+        // Create a new index and recover
+        let mut recovered_index = MemHashIndex::new();
+        recovered_index.recover(temp_dir.path(), Some(&metadata)).unwrap();
+
+        // Verify all entries are present
+        for hash in &test_hashes {
+            let original = index.find_entry(*hash);
+            let recovered = recovered_index.find_entry(*hash);
+
+            assert_eq!(original.found(), recovered.found());
+            if original.found() {
+                assert_eq!(original.entry.address(), recovered.entry.address());
+                assert_eq!(original.entry.tag(), recovered.entry.tag());
+            }
+        }
+    }
+
+    #[test]
+    fn test_recover_without_preloaded_metadata() {
+        // Create and populate an index
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(128);
+        index.initialize(&config);
+
+        let hash = KeyHash::new(99999);
+        let result = index.find_or_create_entry(hash);
+        if let Some(atomic_entry) = result.atomic_entry {
+            index.update_entry(atomic_entry, Address::new(5, 500), hash.tag());
+        }
+
+        // Checkpoint
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        index.checkpoint(temp_dir.path(), token).unwrap();
+
+        // Recover without providing metadata (should load from file)
+        let mut recovered_index = MemHashIndex::new();
+        recovered_index.recover(temp_dir.path(), None).unwrap();
+
+        // Verify
+        let recovered_result = recovered_index.find_entry(hash);
+        assert!(recovered_result.found());
+        assert_eq!(recovered_result.entry.address(), Address::new(5, 500));
+    }
+
+    #[test]
+    fn test_verify_recovery() {
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(128);
+        index.initialize(&config);
+
+        let hash = KeyHash::new(77777);
+        let result = index.find_or_create_entry(hash);
+        if let Some(atomic_entry) = result.atomic_entry {
+            index.update_entry(atomic_entry, Address::new(3, 300), hash.tag());
+        }
+
+        // Checkpoint and recover
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        index.checkpoint(temp_dir.path(), token).unwrap();
+
+        let mut recovered_index = MemHashIndex::new();
+        recovered_index.recover(temp_dir.path(), None).unwrap();
+
+        // Verify should pass
+        recovered_index.verify_recovery().unwrap();
+    }
+
+    #[test]
+    fn test_checkpoint_preserves_stats() {
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(512);
+        index.initialize(&config);
+
+        // Add entries
+        for i in 0..20u64 {
+            let hash = KeyHash::new(i * 7919); // Prime multiplier for spread
+            let result = index.find_or_create_entry(hash);
+            if let Some(atomic_entry) = result.atomic_entry {
+                index.update_entry(atomic_entry, Address::new(i as u32, 0), hash.tag());
+            }
+        }
+
+        let original_stats = index.dump_distribution();
+
+        // Checkpoint and recover
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        index.checkpoint(temp_dir.path(), token).unwrap();
+
+        let mut recovered_index = MemHashIndex::new();
+        recovered_index.recover(temp_dir.path(), None).unwrap();
+
+        let recovered_stats = recovered_index.dump_distribution();
+
+        assert_eq!(original_stats.table_size, recovered_stats.table_size);
+        assert_eq!(original_stats.used_entries, recovered_stats.used_entries);
     }
 }
 

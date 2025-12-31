@@ -7,7 +7,7 @@ mod faster_kv;
 mod session;
 mod contexts;
 
-pub use faster_kv::{FasterKv, FasterKvConfig};
+pub use faster_kv::{FasterKv, FasterKvConfig, SystemPhase, SystemState};
 pub use session::{Session, ThreadContext};
 pub use contexts::{
     ReadContext, UpsertContext, RmwContext, DeleteContext,

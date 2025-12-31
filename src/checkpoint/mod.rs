@@ -3,11 +3,17 @@
 //! This module provides checkpointing and recovery functionality
 //! for FasterKV stores.
 
-mod state;
 mod recovery;
+mod serialization;
+mod state;
 
+pub use recovery::{CheckpointInfo, RecoveryState, RecoveryStatus};
+pub use serialization::{
+    create_checkpoint_directory, index_data_path, index_metadata_path, log_metadata_path,
+    log_snapshot_path, SerializableCheckpointInfo, SerializableIndexMetadata,
+    SerializableLogMetadata,
+};
 pub use state::{CheckpointState, CheckpointType, IndexMetadata, LogMetadata};
-pub use recovery::RecoveryStatus;
 
 use uuid::Uuid;
 

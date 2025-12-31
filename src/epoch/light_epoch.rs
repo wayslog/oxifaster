@@ -223,20 +223,24 @@ impl LightEpoch {
         epoch
     }
 
-    /// Reentrant protection - only protects if not already protected
+    /// Reentrant protection - supports nested protection calls
     #[inline]
     pub fn reentrant_protect(&self, thread_id: usize) -> u64 {
         debug_assert!(thread_id < MAX_THREADS);
         let entry = &self.table[thread_id];
         
-        if entry.local_current_epoch.load(Ordering::Acquire) != UNPROTECTED {
-            return entry.local_current_epoch.load(Ordering::Acquire);
-        }
+        // Always increment the reentrant counter to track nesting depth
+        let current_count = entry.reentrant.fetch_add(1, Ordering::AcqRel);
         
-        let epoch = self.current_epoch.load(Ordering::Acquire);
-        entry.local_current_epoch.store(epoch, Ordering::Release);
-        entry.reentrant.fetch_add(1, Ordering::AcqRel);
-        epoch
+        // If this is the first protection call, set the epoch
+        if current_count == 0 {
+            let epoch = self.current_epoch.load(Ordering::Acquire);
+            entry.local_current_epoch.store(epoch, Ordering::Release);
+            epoch
+        } else {
+            // Already protected - return the current epoch
+            entry.local_current_epoch.load(Ordering::Acquire)
+        }
     }
 
     /// Check if the thread is currently protected

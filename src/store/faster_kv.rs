@@ -3,13 +3,19 @@
 //! This module provides the main FasterKV store implementation.
 
 use std::cell::UnsafeCell;
+use std::io;
 use std::marker::PhantomData;
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
+use crate::checkpoint::{
+    create_checkpoint_directory, CheckpointState, CheckpointToken, CheckpointType,
+    IndexMetadata, LogMetadata,
+};
 use crate::device::StorageDevice;
 use crate::epoch::LightEpoch;
 use crate::index::{KeyHash, MemHashIndex, MemHashIndexConfig};
@@ -525,6 +531,184 @@ where
         
         Status::Ok
     }
+
+    // ============ Checkpoint and Recovery Methods ============
+
+    /// Create a checkpoint of the store
+    ///
+    /// This saves both the hash index and hybrid log state to disk.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    ///
+    /// # Returns
+    /// The checkpoint token on success, or an error
+    pub fn checkpoint(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
+        // Generate a new checkpoint token
+        let token = uuid::Uuid::new_v4();
+        
+        // Create checkpoint directory
+        let cp_dir = create_checkpoint_directory(checkpoint_dir, token)?;
+        
+        // Get current version
+        let state = self.system_state.load(Ordering::Acquire);
+        let version = state.version;
+        
+        // Checkpoint the hash index
+        let _index_metadata = self.hash_index.checkpoint(&cp_dir, token)?;
+        
+        // Checkpoint the hybrid log
+        // SAFETY: checkpoint() is protected by the epoch system
+        let _log_metadata = unsafe {
+            (*self.hlog.get()).checkpoint(&cp_dir, token, version)?
+        };
+        
+        // Bump version
+        let new_state = SystemState {
+            version: version + 1,
+            phase: SystemPhase::Rest,
+        };
+        self.system_state.store(new_state, Ordering::Release);
+        
+        Ok(token)
+    }
+
+    /// Create a checkpoint with a specific type
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `checkpoint_type` - Type of checkpoint to create
+    ///
+    /// # Returns
+    /// The checkpoint token on success, or an error
+    pub fn checkpoint_with_type(
+        &self,
+        checkpoint_dir: &Path,
+        _checkpoint_type: CheckpointType,
+    ) -> io::Result<CheckpointToken> {
+        // For now, all checkpoints are the same type
+        self.checkpoint(checkpoint_dir)
+    }
+
+    /// Get information about an existing checkpoint
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to query
+    ///
+    /// # Returns
+    /// Tuple of (IndexMetadata, LogMetadata) on success
+    pub fn get_checkpoint_info(
+        checkpoint_dir: &Path,
+        token: CheckpointToken,
+    ) -> io::Result<(IndexMetadata, LogMetadata)> {
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        
+        let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
+        let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
+        
+        Ok((index_meta, log_meta))
+    }
+
+    /// Recover a store from a checkpoint
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to recover from
+    /// * `config` - Store configuration
+    /// * `device` - Storage device
+    ///
+    /// # Returns
+    /// A new FasterKv instance with recovered state
+    pub fn recover(
+        checkpoint_dir: &Path,
+        token: CheckpointToken,
+        config: FasterKvConfig,
+        device: D,
+    ) -> io::Result<Self> {
+        let device = Arc::new(device);
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        
+        // Initialize epoch
+        let epoch = Arc::new(LightEpoch::new());
+        
+        // Load checkpoint metadata
+        let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
+        let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
+        
+        // Recover hash index
+        let mut hash_index = MemHashIndex::new();
+        hash_index.recover(&cp_dir, Some(&index_meta))?;
+        
+        // Initialize hybrid log with recovered state
+        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
+        hlog.recover(&cp_dir, Some(&log_meta))?;
+        
+        // Set system state to recovered version
+        let system_state = AtomicSystemState::new(SystemState {
+            version: log_meta.version,
+            phase: SystemPhase::Rest,
+        });
+        
+        Ok(Self {
+            epoch,
+            system_state,
+            hash_index,
+            hlog: UnsafeCell::new(hlog),
+            device,
+            next_session_id: AtomicU32::new(0),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Check if a checkpoint exists
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to check
+    ///
+    /// # Returns
+    /// true if the checkpoint exists and is valid
+    pub fn checkpoint_exists(checkpoint_dir: &Path, token: CheckpointToken) -> bool {
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        cp_dir.join("index.meta").exists() && cp_dir.join("log.meta").exists()
+    }
+
+    /// List all checkpoint tokens in a directory
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    ///
+    /// # Returns
+    /// List of valid checkpoint tokens
+    pub fn list_checkpoints(checkpoint_dir: &Path) -> io::Result<Vec<CheckpointToken>> {
+        let mut tokens = Vec::new();
+        
+        if !checkpoint_dir.exists() {
+            return Ok(tokens);
+        }
+        
+        for entry in std::fs::read_dir(checkpoint_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                if let Some(name) = path.file_name() {
+                    if let Some(name_str) = name.to_str() {
+                        if let Ok(token) = uuid::Uuid::parse_str(name_str) {
+                            // Verify this is a valid checkpoint
+                            if Self::checkpoint_exists(checkpoint_dir, token) {
+                                tokens.push(token);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(tokens)
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +843,130 @@ mod tests {
         
         let stats = store.log_stats();
         assert!(stats.tail_address > Address::new(0, 0));
+    }
+
+    // ============ Checkpoint and Recovery Tests ============
+
+    fn create_test_config() -> FasterKvConfig {
+        FasterKvConfig {
+            table_size: 1024,
+            log_memory_size: 1 << 20, // 1 MB
+            page_size_bits: 12,       // 4 KB pages
+            mutable_fraction: 0.9,
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_empty_store() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let token = store.checkpoint(temp_dir.path()).unwrap();
+
+        // Verify checkpoint exists
+        assert!(FasterKv::<u64, u64, NullDisk>::checkpoint_exists(
+            temp_dir.path(),
+            token
+        ));
+    }
+
+    #[test]
+    fn test_checkpoint_with_data() {
+        let store = create_test_store();
+        let mut session = store.start_session();
+
+        // Insert some data
+        for i in 1u64..11 {
+            session.upsert(i, i * 100);
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = store.checkpoint(temp_dir.path()).unwrap();
+
+        // Verify checkpoint files exist
+        let cp_dir = temp_dir.path().join(token.to_string());
+        assert!(cp_dir.join("index.meta").exists());
+        assert!(cp_dir.join("index.dat").exists());
+        assert!(cp_dir.join("log.meta").exists());
+        assert!(cp_dir.join("log.snapshot").exists());
+    }
+
+    #[test]
+    fn test_get_checkpoint_info() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let token = store.checkpoint(temp_dir.path()).unwrap();
+
+        let (index_meta, log_meta) =
+            FasterKv::<u64, u64, NullDisk>::get_checkpoint_info(temp_dir.path(), token).unwrap();
+
+        assert_eq!(index_meta.token, token);
+        assert_eq!(log_meta.token, token);
+    }
+
+    #[test]
+    fn test_list_checkpoints() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create multiple checkpoints
+        let token1 = store.checkpoint(temp_dir.path()).unwrap();
+        let token2 = store.checkpoint(temp_dir.path()).unwrap();
+        let token3 = store.checkpoint(temp_dir.path()).unwrap();
+
+        let tokens =
+            FasterKv::<u64, u64, NullDisk>::list_checkpoints(temp_dir.path()).unwrap();
+
+        assert_eq!(tokens.len(), 3);
+        assert!(tokens.contains(&token1));
+        assert!(tokens.contains(&token2));
+        assert!(tokens.contains(&token3));
+    }
+
+    #[test]
+    fn test_recover_empty_store() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let token = store.checkpoint(temp_dir.path()).unwrap();
+        drop(store);
+
+        // Recover
+        let config = create_test_config();
+        let device = NullDisk::new();
+        let recovered: FasterKv<u64, u64, NullDisk> =
+            FasterKv::recover(temp_dir.path(), token, config, device).unwrap();
+
+        let state = recovered.system_state();
+        assert_eq!(state.phase, SystemPhase::Rest);
+    }
+
+    #[test]
+    fn test_checkpoint_increments_version() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let v0 = store.system_state().version;
+        store.checkpoint(temp_dir.path()).unwrap();
+        let v1 = store.system_state().version;
+        store.checkpoint(temp_dir.path()).unwrap();
+        let v2 = store.system_state().version;
+
+        assert_eq!(v0, 0);
+        assert_eq!(v1, 1);
+        assert_eq!(v2, 2);
+    }
+
+    #[test]
+    fn test_checkpoint_not_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_token = uuid::Uuid::new_v4();
+
+        assert!(!FasterKv::<u64, u64, NullDisk>::checkpoint_exists(
+            temp_dir.path(),
+            fake_token
+        ));
     }
 }
 

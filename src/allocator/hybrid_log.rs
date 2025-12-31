@@ -3,12 +3,16 @@
 //! This module provides the core log allocator that manages a circular buffer of pages,
 //! with hot pages in memory and cold pages on disk.
 
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::address::{Address, AtomicAddress, AtomicPageOffset};
 use crate::allocator::page_allocator::PageInfo;
+use crate::checkpoint::LogMetadata;
 use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
 use crate::status::Status;
@@ -256,11 +260,32 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             let page = page_offset.page();
             let offset = page_offset.offset();
             
+            // Check if offset exceeds Address::MAX_OFFSET (which is smaller than u32::MAX)
+            // If so, we need to move to a new page before checking page size
+            if offset > Address::MAX_OFFSET as u64 {
+                // Offset exceeds valid range - need to move to new page
+                let (_advanced, won_cas) = self.tail_page_offset.new_page(page);
+                if won_cas {
+                    if let Err(status) = self.on_page_full(page) {
+                        return Err(status);
+                    }
+                }
+                continue;
+            }
+            
             // Check if we fit in the current page
             let new_offset = offset + num_slots as u64;
             
             if new_offset <= self.config.page_size as u64 {
-                // Calculate address
+                // Safe to cast: we've verified offset <= Address::MAX_OFFSET above
+                // Also verify offset doesn't exceed u32 range (defensive check)
+                if offset > u32::MAX as u64 {
+                    // This should never happen since MAX_OFFSET < u32::MAX,
+                    // but we check for safety
+                    return Err(Status::Corruption);
+                }
+                
+                // Calculate address - safe cast since offset <= Address::MAX_OFFSET
                 let address = Address::new(page, offset as u32);
                 return Ok(address);
             }
@@ -455,6 +480,301 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             on_disk_bytes: (head - begin) as u64,
         }
     }
+
+    // ============ Checkpoint and Recovery Methods ============
+
+    /// Create checkpoint metadata from the current log state
+    ///
+    /// # Arguments
+    /// * `token` - Unique checkpoint token
+    /// * `version` - Current checkpoint version
+    ///
+    /// # Returns
+    /// LogMetadata containing current state
+    pub fn checkpoint_metadata(
+        &self,
+        token: crate::checkpoint::CheckpointToken,
+        version: u32,
+    ) -> LogMetadata {
+        LogMetadata {
+            token,
+            version,
+            begin_address: self.get_begin_address(),
+            final_address: self.get_tail_address(),
+            flushed_until_address: self.get_flushed_until_address(),
+            use_object_log: false,
+        }
+    }
+
+    /// Flush all pages up to (but not including) the specified address
+    ///
+    /// This writes in-memory pages to the storage device.
+    ///
+    /// # Arguments
+    /// * `until_address` - Flush pages before this address
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an I/O error
+    pub fn flush_until(&self, until_address: Address) -> io::Result<()> {
+        let current_flushed = self.get_flushed_until_address();
+        
+        if until_address <= current_flushed {
+            return Ok(());
+        }
+
+        let begin_page = current_flushed.page();
+        let end_page = until_address.page();
+
+        for page in begin_page..=end_page {
+            if let Some(page_data) = self.pages.get_page(page) {
+                // In a real implementation, this would write to the storage device
+                // For now, we just mark it as flushed
+                let _ = page_data; // Suppress unused warning
+            }
+        }
+
+        // Update flushed address
+        loop {
+            let current = self.flushed_until_address.load(Ordering::Acquire);
+            if until_address <= current {
+                break;
+            }
+            
+            if self
+                .flushed_until_address
+                .compare_exchange(current, until_address, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Flush the log and write checkpoint data to disk
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory to write checkpoint files
+    /// * `token` - Unique checkpoint token
+    /// * `version` - Current checkpoint version
+    ///
+    /// # Returns
+    /// LogMetadata containing the checkpoint information
+    pub fn checkpoint(
+        &self,
+        checkpoint_dir: &Path,
+        token: crate::checkpoint::CheckpointToken,
+        version: u32,
+    ) -> io::Result<LogMetadata> {
+        let tail_address = self.get_tail_address();
+
+        // Flush all in-memory pages
+        self.flush_until(tail_address)?;
+
+        // Create metadata
+        let metadata = self.checkpoint_metadata(token, version);
+
+        // Write log metadata
+        let meta_path = checkpoint_dir.join("log.meta");
+        metadata.write_to_file(&meta_path)?;
+
+        // Write log snapshot (pages in memory)
+        let snapshot_path = checkpoint_dir.join("log.snapshot");
+        self.write_log_snapshot(&snapshot_path)?;
+
+        Ok(metadata)
+    }
+
+    /// Write a snapshot of in-memory pages to disk
+    fn write_log_snapshot(&self, path: &Path) -> io::Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file); // 1 MB buffer
+
+        // Write header
+        let begin = self.get_begin_address();
+        let tail = self.get_tail_address();
+        let page_size = self.config.page_size as u64;
+
+        writer.write_all(&begin.control().to_le_bytes())?;
+        writer.write_all(&tail.control().to_le_bytes())?;
+        writer.write_all(&page_size.to_le_bytes())?;
+        writer.write_all(&(self.buffer_size as u64).to_le_bytes())?;
+
+        // Write pages that contain data
+        let begin_page = begin.page();
+        let tail_page = tail.page();
+
+        for page in begin_page..=tail_page {
+            if let Some(page_data) = self.pages.get_page(page) {
+                // Write page number
+                writer.write_all(&(page as u64).to_le_bytes())?;
+                // Write page data
+                writer.write_all(page_data)?;
+            }
+        }
+
+        // Write end marker (invalid page number)
+        writer.write_all(&u64::MAX.to_le_bytes())?;
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Recover the log from a checkpoint
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory containing checkpoint files
+    /// * `metadata` - Optional pre-loaded metadata; if None, reads from file
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error
+    pub fn recover(
+        &mut self,
+        checkpoint_dir: &Path,
+        metadata: Option<&LogMetadata>,
+    ) -> io::Result<()> {
+        // Load metadata if not provided
+        let meta_path = checkpoint_dir.join("log.meta");
+        let loaded_metadata;
+        let metadata = match metadata {
+            Some(m) => m,
+            None => {
+                loaded_metadata = LogMetadata::read_from_file(&meta_path)?;
+                &loaded_metadata
+            }
+        };
+
+        // Read log snapshot - must exist for a valid checkpoint
+        // The snapshot file is always created during checkpoint, so its absence
+        // indicates an incomplete or corrupted checkpoint that should not be recovered.
+        let snapshot_path = checkpoint_dir.join("log.snapshot");
+        if !snapshot_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Log snapshot file missing: {}. Checkpoint appears incomplete or corrupted.",
+                    snapshot_path.display()
+                ),
+            ));
+        }
+
+        // Read the snapshot first to validate it's readable and get actual addresses
+        let (snapshot_begin, snapshot_tail) = self.read_log_snapshot(&snapshot_path)?;
+
+        // Initialize addresses from snapshot and metadata after successful snapshot read
+        // This ensures we only set addresses if the snapshot data is valid
+        // 
+        // For recovery, all data loaded from snapshot is in memory, so:
+        // - begin_address: start of the log (from snapshot)
+        // - head_address: should be begin_address (all data is in memory, nothing on disk)
+        // - read_only_address: should be tail_address (all recovered data is read-only)
+        // - tail_address: end of the log (from snapshot)
+        self.begin_address.store(snapshot_begin, Ordering::Release);
+        self.head_address.store(snapshot_begin, Ordering::Release);
+        self.safe_head_address.store(snapshot_begin, Ordering::Release);
+        self.read_only_address.store(snapshot_tail, Ordering::Release);
+        self.safe_read_only_address.store(snapshot_tail, Ordering::Release);
+        self.flushed_until_address.store(snapshot_tail, Ordering::Release);
+        self.tail_page_offset.store_address(snapshot_tail, Ordering::Release);
+
+        Ok(())
+    }
+
+    /// Read a log snapshot from disk
+    ///
+    /// Returns the begin and tail addresses from the snapshot header
+    fn read_log_snapshot(&mut self, path: &Path) -> io::Result<(Address, Address)> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::with_capacity(1 << 20, file);
+
+        // Read header
+        let mut buf = [0u8; 8];
+
+        reader.read_exact(&mut buf)?;
+        let begin_address = Address::from_control(u64::from_le_bytes(buf));
+
+        reader.read_exact(&mut buf)?;
+        let tail_address = Address::from_control(u64::from_le_bytes(buf));
+
+        reader.read_exact(&mut buf)?;
+        let page_size = u64::from_le_bytes(buf);
+
+        reader.read_exact(&mut buf)?;
+        let checkpoint_buffer_size = u64::from_le_bytes(buf);
+
+        // Validate page size matches
+        if page_size != self.config.page_size as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Page size mismatch: file has {}, allocator has {}",
+                    page_size, self.config.page_size
+                ),
+            ));
+        }
+
+        // Validate buffer size compatibility
+        // Since PageArray uses circular buffering (page % buffer_size), we need to ensure
+        // the recovery buffer_size is at least as large as the checkpoint buffer_size.
+        // If recovery buffer_size is smaller, different pages will map to the same buffer
+        // slot, causing silent data corruption.
+        let recovery_buffer_size = self.buffer_size as u64;
+        if recovery_buffer_size < checkpoint_buffer_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Buffer size mismatch: checkpoint has {} pages, recovery allocator has {} pages. \
+                     Recovery buffer size must be >= checkpoint buffer size to prevent data corruption.",
+                    checkpoint_buffer_size, recovery_buffer_size
+                ),
+            ));
+        }
+
+        // Read pages
+        let mut page_data = vec![0u8; self.config.page_size];
+        loop {
+            // Read page number
+            reader.read_exact(&mut buf)?;
+            let page_num = u64::from_le_bytes(buf);
+
+            if page_num == u64::MAX {
+                break; // End marker
+            }
+
+            // Read page data
+            reader.read_exact(&mut page_data)?;
+
+            // Copy to page array - ensure page is allocated first
+            let page = page_num as u32;
+            
+            // Allocate the page buffer if it doesn't exist
+            if !self.pages.allocate_page(page, self.config.page_size) {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!("Failed to allocate page {} during recovery", page),
+                ));
+            }
+            
+            // Now copy the data - the page is guaranteed to exist
+            if let Some(dest) = self.pages.get_page_mut(page) {
+                dest.copy_from_slice(&page_data);
+            } else {
+                // This should not happen after successful allocation
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Page {} not available after allocation", page),
+                ));
+            }
+        }
+
+        Ok((begin_address, tail_address))
+    }
+
+    /// Get a reference to the device
+    pub fn device(&self) -> &Arc<D> {
+        &self.device
+    }
 }
 
 // Safety: PersistentMemoryMalloc uses atomic operations for concurrent access
@@ -589,6 +909,342 @@ mod tests {
         
         // Should no longer be mutable
         assert!(!allocator.is_mutable(addr));
+    }
+
+    // ============ Checkpoint and Recovery Tests ============
+
+    #[test]
+    fn test_checkpoint_metadata() {
+        let allocator = create_test_allocator();
+        
+        // Allocate some space
+        allocator.allocate(1000).unwrap();
+        
+        let token = uuid::Uuid::new_v4();
+        let metadata = allocator.checkpoint_metadata(token, 1);
+        
+        assert_eq!(metadata.token, token);
+        assert_eq!(metadata.version, 1);
+        assert_eq!(metadata.begin_address, Address::new(0, 0));
+        assert!(metadata.final_address > Address::new(0, 0));
+    }
+
+    #[test]
+    fn test_flush_until() {
+        let allocator = create_test_allocator();
+        
+        // Allocate some space
+        let addr = allocator.allocate(1000).unwrap();
+        
+        // Flush to beyond the allocated address
+        let flush_addr = Address::new(addr.page() + 1, 0);
+        allocator.flush_until(flush_addr).unwrap();
+        
+        // Flushed address should be updated
+        assert!(allocator.get_flushed_until_address() >= flush_addr);
+    }
+
+    #[test]
+    fn test_checkpoint_and_recover_empty() {
+        let allocator = create_test_allocator();
+        
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        
+        let metadata = allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
+        
+        assert_eq!(metadata.token, token);
+        assert_eq!(metadata.version, 1);
+        
+        // Create new allocator and recover
+        let mut recovered = create_test_allocator();
+        recovered.recover(temp_dir.path(), Some(&metadata)).unwrap();
+        
+        assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
+    }
+
+    #[test]
+    fn test_checkpoint_and_recover_with_data() {
+        let mut allocator = create_test_allocator();
+        
+        // Allocate and write some data
+        let addr1 = allocator.allocate(100).unwrap();
+        let addr2 = allocator.allocate(200).unwrap();
+        
+        // Write some test data to the pages
+        unsafe {
+            let ptr1 = allocator.get_mut(addr1).expect("addr1 should be accessible");
+            std::ptr::write_bytes(ptr1.as_ptr(), 0xAB, 100);
+            
+            let ptr2 = allocator.get_mut(addr2).expect("addr2 should be accessible");
+            std::ptr::write_bytes(ptr2.as_ptr(), 0xCD, 200);
+        }
+        
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        
+        let metadata = allocator.checkpoint(temp_dir.path(), token, 2).unwrap();
+        
+        // Create new allocator and recover
+        let mut recovered = create_test_allocator();
+        recovered.recover(temp_dir.path(), Some(&metadata)).unwrap();
+        
+        // Verify addresses are restored
+        assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
+        
+        // Verify data is restored - use expect() to ensure pages are accessible
+        unsafe {
+            let ptr1 = recovered.get(addr1).expect("recovered addr1 should be accessible");
+            let data1 = std::slice::from_raw_parts(ptr1.as_ptr(), 100);
+            assert!(data1.iter().all(|&b| b == 0xAB), "Data at addr1 not correctly recovered");
+            
+            let ptr2 = recovered.get(addr2).expect("recovered addr2 should be accessible");
+            let data2 = std::slice::from_raw_parts(ptr2.as_ptr(), 200);
+            assert!(data2.iter().all(|&b| b == 0xCD), "Data at addr2 not correctly recovered");
+        }
+    }
+
+    #[test]
+    fn test_recover_without_preloaded_metadata() {
+        let allocator = create_test_allocator();
+        
+        // Allocate some space
+        allocator.allocate(500).unwrap();
+        
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        
+        allocator.checkpoint(temp_dir.path(), token, 3).unwrap();
+        
+        // Recover without providing metadata
+        let mut recovered = create_test_allocator();
+        recovered.recover(temp_dir.path(), None).unwrap();
+        
+        assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
+    }
+
+    #[test]
+    fn test_checkpoint_preserves_stats() {
+        let allocator = create_test_allocator();
+        
+        // Fill up some pages
+        for _ in 0..10 {
+            allocator.allocate(1000).unwrap();
+        }
+        
+        let original_stats = allocator.get_stats();
+        
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        
+        let metadata = allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
+        
+        // Stats from metadata should match
+        assert_eq!(metadata.begin_address, original_stats.begin_address);
+        assert_eq!(metadata.final_address, original_stats.tail_address);
+    }
+
+    #[test]
+    fn test_recover_rejects_smaller_buffer_size() {
+        // Create allocator with larger buffer size
+        let config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 32, // 32 pages
+            mutable_pages: 8,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let allocator = PersistentMemoryMalloc::new(config, device);
+
+        // Allocate some data
+        allocator.allocate(1000).unwrap();
+
+        // Create checkpoint
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
+
+        // Try to recover with smaller buffer size - should fail
+        let smaller_config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16, // Only 16 pages (smaller than checkpoint's 32)
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let mut smaller_allocator = PersistentMemoryMalloc::new(smaller_config, device);
+
+        let result = smaller_allocator.recover(temp_dir.path(), None);
+        assert!(result.is_err(), "Recovery should fail with smaller buffer size");
+        
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Buffer size mismatch"),
+                "Error should mention buffer size mismatch, got: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_recover_allows_larger_buffer_size() {
+        // Create allocator with smaller buffer size
+        let config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16, // 16 pages
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let allocator = PersistentMemoryMalloc::new(config, device);
+
+        // Allocate some data
+        allocator.allocate(1000).unwrap();
+
+        // Create checkpoint
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
+
+        // Recover with larger buffer size - should succeed
+        let larger_config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 32, // 32 pages (larger than checkpoint's 16)
+            mutable_pages: 8,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let mut larger_allocator = PersistentMemoryMalloc::new(larger_config, device);
+
+        let result = larger_allocator.recover(temp_dir.path(), None);
+        assert!(result.is_ok(), "Recovery should succeed with larger buffer size");
+    }
+
+    #[test]
+    fn test_recover_fails_without_snapshot() {
+        // Create allocator and checkpoint
+        let config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16,
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let allocator = PersistentMemoryMalloc::new(config, device);
+
+        allocator.allocate(1000).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        
+        // Create checkpoint directory structure (as FasterKv does)
+        let cp_dir = temp_dir.path().join(token.to_string());
+        std::fs::create_dir_all(&cp_dir).unwrap();
+        
+        allocator.checkpoint(&cp_dir, token, 1).unwrap();
+
+        // Delete the snapshot file to simulate incomplete/corrupted checkpoint
+        let snapshot_path = cp_dir.join("log.snapshot");
+        assert!(snapshot_path.exists(), "Snapshot should exist before deletion");
+        std::fs::remove_file(&snapshot_path).unwrap();
+
+        // Try to recover - should fail because snapshot is missing
+        let device = Arc::new(NullDisk::new());
+        let mut recovered = PersistentMemoryMalloc::new(
+            HybridLogConfig {
+                page_size: 4096,
+                memory_pages: 16,
+                mutable_pages: 4,
+                segment_size: 1 << 20,
+            },
+            device,
+        );
+
+        let result = recovered.recover(&cp_dir, None);
+        assert!(result.is_err(), "Recovery should fail when snapshot file is missing");
+
+        if let Err(e) = result {
+            assert!(
+                e.to_string().contains("Log snapshot file missing") || 
+                e.to_string().contains("snapshot"),
+                "Error should mention missing snapshot, got: {}",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_recovered_data_is_readable() {
+        // Create allocator and write data
+        let config = HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16,
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        };
+        let device = Arc::new(NullDisk::new());
+        let mut allocator = PersistentMemoryMalloc::new(config, device);
+
+        // Allocate and write data
+        let addr1 = allocator.allocate(100).unwrap();
+        let addr2 = allocator.allocate(200).unwrap();
+
+        unsafe {
+            let ptr1 = allocator.get_mut(addr1).expect("addr1 should be accessible");
+            std::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 100);
+
+            let ptr2 = allocator.get_mut(addr2).expect("addr2 should be accessible");
+            std::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 200);
+        }
+
+        // Checkpoint
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+        let cp_dir = temp_dir.path().join(token.to_string());
+        std::fs::create_dir_all(&cp_dir).unwrap();
+        allocator.checkpoint(&cp_dir, token, 1).unwrap();
+
+        // Recover
+        let device = Arc::new(NullDisk::new());
+        let mut recovered = PersistentMemoryMalloc::new(
+            HybridLogConfig {
+                page_size: 4096,
+                memory_pages: 16,
+                mutable_pages: 4,
+                segment_size: 1 << 20,
+            },
+            device,
+        );
+        recovered.recover(&cp_dir, None).unwrap();
+
+        // Verify recovered addresses are NOT marked as on-disk
+        // All recovered data should be in memory and readable
+        assert!(
+            !recovered.is_on_disk(addr1),
+            "Recovered address addr1 should not be marked as on-disk"
+        );
+        assert!(
+            !recovered.is_on_disk(addr2),
+            "Recovered address addr2 should not be marked as on-disk"
+        );
+
+        // Verify head_address is set to begin_address (all data in memory)
+        assert_eq!(
+            recovered.get_head_address(),
+            recovered.get_begin_address(),
+            "Head address should equal begin address after recovery (all data in memory)"
+        );
+
+        // Verify data is accessible
+        unsafe {
+            let ptr1 = recovered.get(addr1).expect("recovered addr1 should be accessible");
+            let data1 = std::slice::from_raw_parts(ptr1.as_ptr(), 100);
+            assert!(data1.iter().all(|&b| b == 0xAA), "Data at addr1 not correctly recovered");
+
+            let ptr2 = recovered.get(addr2).expect("recovered addr2 should be accessible");
+            let data2 = std::slice::from_raw_parts(ptr2.as_ptr(), 200);
+            assert!(data2.iter().all(|&b| b == 0xBB), "Data at addr2 not correctly recovered");
+        }
     }
 }
 

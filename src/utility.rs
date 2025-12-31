@@ -106,7 +106,8 @@ impl AlignedBuffer {
 
     /// Get a pointer to the buffer
     pub fn as_ptr(&self) -> *const u8 {
-        self.ptr.as_ptr()
+        // Explicitly cast from *mut to *const for const correctness
+        self.ptr.as_ptr() as *const u8
     }
 
     /// Get a mutable pointer to the buffer
