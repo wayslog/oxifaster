@@ -46,6 +46,9 @@ impl Address {
     /// Read cache bit mask (bit 47)
     pub const READ_CACHE_MASK: u64 = 1 << (Self::ADDRESS_BITS - 1);
 
+    /// Read cache bit (alias for READ_CACHE_MASK)
+    pub const READCACHE_BIT: u64 = Self::READ_CACHE_MASK;
+
     /// Create a new address from page and offset
     #[inline]
     pub const fn new(page: u32, offset: u32) -> Self {
@@ -84,10 +87,22 @@ impl Address {
         (self.0 & Self::READ_CACHE_MASK) != 0
     }
 
+    /// Check if this address is in the read cache (alias)
+    #[inline]
+    pub const fn in_readcache(&self) -> bool {
+        self.in_read_cache()
+    }
+
     /// Get the address with read cache bit cleared
     #[inline]
     pub const fn read_cache_address(&self) -> Self {
         Self(self.0 & !Self::READ_CACHE_MASK)
+    }
+
+    /// Get the address with read cache bit cleared (alias)
+    #[inline]
+    pub const fn readcache_address(&self) -> Self {
+        self.read_cache_address()
     }
 
     /// Check if this is an invalid address

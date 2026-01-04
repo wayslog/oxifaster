@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use oxifaster::device::NullDisk;
 use oxifaster::status::Status;
-use oxifaster::store::{FasterKv, FasterKvConfig, SystemPhase};
+use oxifaster::store::{FasterKv, FasterKvConfig, Phase};
 
 fn create_test_config() -> FasterKvConfig {
     FasterKvConfig {
@@ -88,7 +88,7 @@ fn test_checkpoint_and_recover_data() {
         
         // Verify recovery completed and store is operational
         let state = recovered.system_state();
-        assert_eq!(state.phase, SystemPhase::Rest);
+        assert_eq!(state.phase, Phase::Rest);
     }
 }
 

@@ -22,6 +22,10 @@ pub enum Status {
     Corruption = 5,
     /// Operation was aborted
     Aborted = 6,
+    /// Invalid argument provided
+    InvalidArgument = 7,
+    /// Invalid operation in current state
+    InvalidOperation = 8,
 }
 
 impl Status {
@@ -49,6 +53,7 @@ impl Status {
         matches!(
             self,
             Status::OutOfMemory | Status::IoError | Status::Corruption | Status::Aborted
+            | Status::InvalidArgument | Status::InvalidOperation
         )
     }
 
@@ -62,6 +67,8 @@ impl Status {
             Status::IoError => "IoError",
             Status::Corruption => "Corruption",
             Status::Aborted => "Aborted",
+            Status::InvalidArgument => "InvalidArgument",
+            Status::InvalidOperation => "InvalidOperation",
         }
     }
 }

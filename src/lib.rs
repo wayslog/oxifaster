@@ -32,12 +32,17 @@
 
 pub mod address;
 pub mod allocator;
+pub mod cache;
 pub mod checkpoint;
+pub mod compaction;
 pub mod device;
 pub mod epoch;
+pub mod f2;
 pub mod index;
 pub mod log;
 pub mod record;
+pub mod scan;
+pub mod stats;
 pub mod status;
 pub mod store;
 mod utility;

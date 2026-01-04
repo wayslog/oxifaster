@@ -3,16 +3,21 @@
 //! This module provides the hash index implementation used by FasterKV
 //! to quickly locate records in the hybrid log.
 
+mod grow;
 mod hash_bucket;
 mod hash_table;
 mod mem_index;
 
+pub use grow::{
+    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
+    HASH_TABLE_CHUNK_SIZE,
+};
 pub use hash_bucket::{
     AtomicHashBucketEntry, HashBucket, HashBucketEntry, HashBucketOverflowEntry,
     IndexHashBucketEntry,
 };
 pub use hash_table::InternalHashTable;
-pub use mem_index::{MemHashIndex, MemHashIndexConfig, IndexStats};
+pub use mem_index::{IndexStats, MemHashIndex, MemHashIndexConfig};
 
 /// Key hash type for index operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

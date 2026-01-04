@@ -1,12 +1,22 @@
 //! Recovery functionality for FASTER
 //!
 //! This module provides recovery from checkpoints.
+//!
+//! Recovery process:
+//! 1. Find valid checkpoint(s) in the checkpoint directory
+//! 2. Load index and log metadata from the checkpoint
+//! 3. Recover the hash index from the checkpoint data
+//! 4. Recover the hybrid log from the checkpoint snapshot
+//! 5. Restore session states for continuation
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use uuid::Uuid;
+
 use crate::address::Address;
-use crate::checkpoint::{CheckpointToken, IndexMetadata, LogMetadata};
+use crate::checkpoint::{CheckpointToken, IndexMetadata, LogMetadata, SessionState};
 use crate::status::Status;
 
 /// Status of a recovery operation
@@ -14,8 +24,14 @@ use crate::status::Status;
 pub enum RecoveryStatus {
     /// Recovery not started
     NotStarted,
-    /// Recovery in progress
-    InProgress,
+    /// Recovery in progress - loading metadata
+    LoadingMetadata,
+    /// Recovery in progress - recovering index
+    RecoveringIndex,
+    /// Recovery in progress - recovering log
+    RecoveringLog,
+    /// Recovery in progress - restoring sessions
+    RestoringSessions,
     /// Recovery completed successfully
     Completed,
     /// Recovery failed
@@ -25,6 +41,19 @@ pub enum RecoveryStatus {
 impl Default for RecoveryStatus {
     fn default() -> Self {
         RecoveryStatus::NotStarted
+    }
+}
+
+impl RecoveryStatus {
+    /// Check if recovery is in progress
+    pub fn is_in_progress(&self) -> bool {
+        matches!(
+            self,
+            RecoveryStatus::LoadingMetadata
+                | RecoveryStatus::RecoveringIndex
+                | RecoveryStatus::RecoveringLog
+                | RecoveryStatus::RestoringSessions
+        )
     }
 }
 
@@ -39,6 +68,8 @@ pub struct CheckpointInfo {
     pub log_metadata: Option<LogMetadata>,
     /// Checkpoint directory
     pub directory: PathBuf,
+    /// Creation time (from metadata file mtime)
+    pub created_at: Option<std::time::SystemTime>,
 }
 
 impl CheckpointInfo {
@@ -49,6 +80,7 @@ impl CheckpointInfo {
             index_metadata: None,
             log_metadata: None,
             directory,
+            created_at: None,
         }
     }
 
@@ -57,15 +89,18 @@ impl CheckpointInfo {
         // Load index metadata
         let index_path = self.directory.join("index.meta");
         if index_path.exists() {
-            // In a full implementation, we would deserialize from the file
-            self.index_metadata = Some(IndexMetadata::with_token(self.token));
+            self.index_metadata = Some(IndexMetadata::read_from_file(&index_path)?);
+            
+            // Get file modification time
+            if let Ok(metadata) = fs::metadata(&index_path) {
+                self.created_at = metadata.modified().ok();
+            }
         }
 
         // Load log metadata
         let log_path = self.directory.join("log.meta");
         if log_path.exists() {
-            // In a full implementation, we would deserialize from the file
-            self.log_metadata = Some(LogMetadata::with_token(self.token));
+            self.log_metadata = Some(LogMetadata::read_from_file(&log_path)?);
         }
 
         Ok(())
@@ -74,6 +109,27 @@ impl CheckpointInfo {
     /// Check if the checkpoint is valid
     pub fn is_valid(&self) -> bool {
         self.index_metadata.is_some() && self.log_metadata.is_some()
+    }
+
+    /// Check if all checkpoint files exist
+    pub fn files_exist(&self) -> bool {
+        self.directory.join("index.meta").exists()
+            && self.directory.join("index.dat").exists()
+            && self.directory.join("log.meta").exists()
+            && self.directory.join("log.snapshot").exists()
+    }
+
+    /// Get the checkpoint version
+    pub fn version(&self) -> Option<u32> {
+        self.log_metadata.as_ref().map(|m| m.version)
+    }
+
+    /// Get session states from the checkpoint
+    pub fn session_states(&self) -> &[SessionState] {
+        self.log_metadata
+            .as_ref()
+            .map(|m| m.session_states.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -86,8 +142,14 @@ pub struct RecoveryState {
     checkpoint_info: Option<CheckpointInfo>,
     /// Recovered begin address
     begin_address: Address,
-    /// Recovered head address
+    /// Recovered head address  
     head_address: Address,
+    /// Recovered tail address
+    tail_address: Address,
+    /// Recovered version
+    version: u32,
+    /// Error message if recovery failed
+    error_message: Option<String>,
 }
 
 impl RecoveryState {
@@ -98,6 +160,9 @@ impl RecoveryState {
             checkpoint_info: None,
             begin_address: Address::INVALID,
             head_address: Address::INVALID,
+            tail_address: Address::INVALID,
+            version: 0,
+            error_message: None,
         }
     }
 
@@ -116,45 +181,103 @@ impl RecoveryState {
         self.head_address
     }
 
+    /// Get the recovered tail address
+    pub fn tail_address(&self) -> Address {
+        self.tail_address
+    }
+
+    /// Get the recovered version
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Get the checkpoint info
+    pub fn checkpoint_info(&self) -> Option<&CheckpointInfo> {
+        self.checkpoint_info.as_ref()
+    }
+
+    /// Get the error message if recovery failed
+    pub fn error_message(&self) -> Option<&str> {
+        self.error_message.as_deref()
+    }
+
     /// Start recovery from a checkpoint
     pub fn start_recovery(&mut self, checkpoint_dir: &Path, token: CheckpointToken) -> Status {
-        if self.status == RecoveryStatus::InProgress {
+        if self.status.is_in_progress() {
             return Status::Aborted;
         }
 
-        self.status = RecoveryStatus::InProgress;
+        self.status = RecoveryStatus::LoadingMetadata;
+        self.error_message = None;
 
         // Load checkpoint info
-        let mut info = CheckpointInfo::new(token, checkpoint_dir.to_path_buf());
-        if let Err(_) = info.load() {
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        let mut info = CheckpointInfo::new(token, cp_dir);
+        
+        if let Err(e) = info.load() {
             self.status = RecoveryStatus::Failed;
+            self.error_message = Some(format!("Failed to load checkpoint metadata: {}", e));
             return Status::IoError;
         }
 
         if !info.is_valid() {
             self.status = RecoveryStatus::Failed;
+            self.error_message = Some("Checkpoint metadata is incomplete".to_string());
             return Status::Corruption;
         }
 
-        // Extract recovery information
+        if !info.files_exist() {
+            self.status = RecoveryStatus::Failed;
+            self.error_message = Some("Checkpoint files are missing".to_string());
+            return Status::Corruption;
+        }
+
+        // Extract recovery information from log metadata
         if let Some(ref log_meta) = info.log_metadata {
             self.begin_address = log_meta.begin_address;
-            self.head_address = log_meta.final_address;
+            self.head_address = log_meta.begin_address; // All data will be in memory after recovery
+            self.tail_address = log_meta.final_address;
+            self.version = log_meta.version;
         }
 
         self.checkpoint_info = Some(info);
+        self.status = RecoveryStatus::RecoveringIndex;
 
+        Status::Ok
+    }
+
+    /// Mark index recovery as complete and move to log recovery
+    pub fn index_recovered(&mut self) -> Status {
+        if self.status != RecoveryStatus::RecoveringIndex {
+            return Status::Aborted;
+        }
+        self.status = RecoveryStatus::RecoveringLog;
+        Status::Ok
+    }
+
+    /// Mark log recovery as complete and move to session restoration
+    pub fn log_recovered(&mut self) -> Status {
+        if self.status != RecoveryStatus::RecoveringLog {
+            return Status::Aborted;
+        }
+        self.status = RecoveryStatus::RestoringSessions;
         Status::Ok
     }
 
     /// Complete recovery
     pub fn complete_recovery(&mut self) -> Status {
-        if self.status != RecoveryStatus::InProgress {
+        if !self.status.is_in_progress() && self.status != RecoveryStatus::RestoringSessions {
             return Status::Aborted;
         }
 
         self.status = RecoveryStatus::Completed;
         Status::Ok
+    }
+
+    /// Mark recovery as failed
+    pub fn fail_recovery(&mut self, message: &str) {
+        self.status = RecoveryStatus::Failed;
+        self.error_message = Some(message.to_string());
     }
 
     /// Reset recovery state
@@ -163,6 +286,9 @@ impl RecoveryState {
         self.checkpoint_info = None;
         self.begin_address = Address::INVALID;
         self.head_address = Address::INVALID;
+        self.tail_address = Address::INVALID;
+        self.version = 0;
+        self.error_message = None;
     }
 }
 
@@ -173,28 +299,93 @@ impl Default for RecoveryState {
 }
 
 /// Find the latest checkpoint in a directory
+/// 
+/// Scans the base directory for valid checkpoint subdirectories
+/// and returns the one with the highest version number.
 pub fn find_latest_checkpoint(base_dir: &Path) -> Option<CheckpointInfo> {
-    // In a full implementation, we would scan the directory for checkpoint folders
-    // and find the one with the latest timestamp or sequence number.
+    let checkpoints = list_checkpoints(base_dir);
     
-    // For now, just return None
-    None
+    // Find checkpoint with highest version
+    checkpoints.into_iter()
+        .filter(|c| c.is_valid())
+        .max_by_key(|c| c.version().unwrap_or(0))
 }
 
 /// List all checkpoints in a directory
+/// 
+/// Scans the base directory for valid checkpoint subdirectories
+/// (those with UUID names that contain valid checkpoint files).
 pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
-    // In a full implementation, we would scan the directory and return all checkpoints
-    Vec::new()
+    let mut checkpoints = Vec::new();
+
+    if !base_dir.exists() {
+        return checkpoints;
+    }
+
+    let entries = match fs::read_dir(base_dir) {
+        Ok(entries) => entries,
+        Err(_) => return checkpoints,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Try to parse directory name as UUID
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if let Ok(token) = Uuid::parse_str(name) {
+                let mut info = CheckpointInfo::new(token, path);
+                
+                // Try to load metadata (ignore errors - invalid checkpoints are filtered)
+                if info.load().is_ok() && info.is_valid() {
+                    checkpoints.push(info);
+                }
+            }
+        }
+    }
+
+    // Sort by version (newest first)
+    checkpoints.sort_by(|a, b| {
+        b.version().unwrap_or(0).cmp(&a.version().unwrap_or(0))
+    });
+
+    checkpoints
+}
+
+/// Validate that a checkpoint directory contains all required files
+pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
+    let required_files = ["index.meta", "index.dat", "log.meta", "log.snapshot"];
+    
+    for file in &required_files {
+        let path = checkpoint_dir.join(file);
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Missing checkpoint file: {}", file),
+            ));
+        }
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     #[test]
     fn test_recovery_status() {
         assert_eq!(RecoveryStatus::default(), RecoveryStatus::NotStarted);
+        assert!(!RecoveryStatus::NotStarted.is_in_progress());
+        assert!(RecoveryStatus::LoadingMetadata.is_in_progress());
+        assert!(RecoveryStatus::RecoveringIndex.is_in_progress());
+        assert!(RecoveryStatus::RecoveringLog.is_in_progress());
+        assert!(RecoveryStatus::RestoringSessions.is_in_progress());
+        assert!(!RecoveryStatus::Completed.is_in_progress());
+        assert!(!RecoveryStatus::Failed.is_in_progress());
     }
 
     #[test]
@@ -203,6 +394,9 @@ mod tests {
         assert_eq!(state.status(), RecoveryStatus::NotStarted);
         assert!(state.begin_address().is_invalid());
         assert!(state.head_address().is_invalid());
+        assert!(state.tail_address().is_invalid());
+        assert_eq!(state.version(), 0);
+        assert!(state.error_message().is_none());
     }
 
     #[test]
@@ -212,6 +406,56 @@ mod tests {
         
         assert_eq!(info.token, token);
         assert!(!info.is_valid()); // No metadata loaded
+        assert!(info.session_states().is_empty());
+        assert!(info.version().is_none());
+    }
+
+    #[test]
+    fn test_recovery_state_lifecycle() {
+        let mut state = RecoveryState::new();
+        
+        // Cannot progress from NotStarted without starting
+        assert_eq!(state.index_recovered(), Status::Aborted);
+        
+        // Reset works from any state
+        state.reset();
+        assert_eq!(state.status(), RecoveryStatus::NotStarted);
+    }
+
+    #[test]
+    fn test_recovery_state_failure() {
+        let mut state = RecoveryState::new();
+        state.fail_recovery("Test error");
+        
+        assert_eq!(state.status(), RecoveryStatus::Failed);
+        assert_eq!(state.error_message(), Some("Test error"));
+    }
+
+    #[test]
+    fn test_list_checkpoints_empty_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let checkpoints = list_checkpoints(temp_dir.path());
+        assert!(checkpoints.is_empty());
+    }
+
+    #[test]
+    fn test_list_checkpoints_nonexistent_dir() {
+        let checkpoints = list_checkpoints(Path::new("/nonexistent/path"));
+        assert!(checkpoints.is_empty());
+    }
+
+    #[test]
+    fn test_find_latest_checkpoint_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let latest = find_latest_checkpoint(temp_dir.path());
+        assert!(latest.is_none());
+    }
+
+    #[test]
+    fn test_validate_checkpoint_missing_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = validate_checkpoint(temp_dir.path());
+        assert!(result.is_err());
     }
 }
 

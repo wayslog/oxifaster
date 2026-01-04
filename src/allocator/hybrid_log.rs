@@ -488,6 +488,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// # Arguments
     /// * `token` - Unique checkpoint token
     /// * `version` - Current checkpoint version
+    /// * `use_snapshot` - Whether to use snapshot file (vs fold-over)
     ///
     /// # Returns
     /// LogMetadata containing current state
@@ -495,15 +496,16 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         &self,
         token: crate::checkpoint::CheckpointToken,
         version: u32,
+        use_snapshot: bool,
     ) -> LogMetadata {
-        LogMetadata {
-            token,
-            version,
-            begin_address: self.get_begin_address(),
-            final_address: self.get_tail_address(),
-            flushed_until_address: self.get_flushed_until_address(),
-            use_object_log: false,
-        }
+        let mut metadata = LogMetadata::with_token(token);
+        metadata.use_snapshot_file = use_snapshot;
+        metadata.version = version;
+        metadata.begin_address = self.get_begin_address();
+        metadata.final_address = self.get_tail_address();
+        metadata.flushed_until_address = self.get_flushed_until_address();
+        metadata.use_object_log = false;
+        metadata
     }
 
     /// Flush all pages up to (but not including) the specified address
@@ -554,6 +556,11 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
     /// Flush the log and write checkpoint data to disk
     ///
+    /// This is a convenience method that uses snapshot mode by default.
+    /// Snapshot mode creates a complete point-in-time copy of the log,
+    /// which is generally preferred for durability and simpler recovery.
+    /// Use `checkpoint_with_options` for fold-over mode if needed.
+    ///
     /// # Arguments
     /// * `checkpoint_dir` - Directory to write checkpoint files
     /// * `token` - Unique checkpoint token
@@ -567,13 +574,34 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         token: crate::checkpoint::CheckpointToken,
         version: u32,
     ) -> io::Result<LogMetadata> {
+        // Default to snapshot mode for simpler and safer checkpointing
+        self.checkpoint_with_options(checkpoint_dir, token, version, true)
+    }
+
+    /// Flush the log and write checkpoint data to disk with options
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory to write checkpoint files
+    /// * `token` - Unique checkpoint token
+    /// * `version` - Current checkpoint version
+    /// * `use_snapshot` - Whether to use snapshot file (vs fold-over)
+    ///
+    /// # Returns
+    /// LogMetadata containing the checkpoint information
+    pub fn checkpoint_with_options(
+        &self,
+        checkpoint_dir: &Path,
+        token: crate::checkpoint::CheckpointToken,
+        version: u32,
+        use_snapshot: bool,
+    ) -> io::Result<LogMetadata> {
         let tail_address = self.get_tail_address();
 
         // Flush all in-memory pages
         self.flush_until(tail_address)?;
 
         // Create metadata
-        let metadata = self.checkpoint_metadata(token, version);
+        let metadata = self.checkpoint_metadata(token, version, use_snapshot);
 
         // Write log metadata
         let meta_path = checkpoint_dir.join("log.meta");
@@ -921,12 +949,13 @@ mod tests {
         allocator.allocate(1000).unwrap();
         
         let token = uuid::Uuid::new_v4();
-        let metadata = allocator.checkpoint_metadata(token, 1);
+        let metadata = allocator.checkpoint_metadata(token, 1, true);
         
         assert_eq!(metadata.token, token);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.begin_address, Address::new(0, 0));
         assert!(metadata.final_address > Address::new(0, 0));
+        assert!(metadata.use_snapshot_file);
     }
 
     #[test]

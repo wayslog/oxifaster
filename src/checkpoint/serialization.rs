@@ -17,12 +17,27 @@ use crate::checkpoint::CheckpointToken;
 pub struct SerializableIndexMetadata {
     /// Checkpoint token (UUID as string)
     pub token: String,
+    /// Index version
+    #[serde(default)]
+    pub version: u32,
     /// Hash table size
     pub table_size: u64,
+    /// Number of bytes in the hash table
+    #[serde(default)]
+    pub num_ht_bytes: u64,
+    /// Number of bytes in overflow buckets
+    #[serde(default)]
+    pub num_ofb_bytes: u64,
     /// Number of overflow buckets
     pub num_buckets: u64,
-    /// Number of overflow entries
+    /// Number of entries
     pub num_entries: u64,
+    /// Log begin address (as u64)
+    #[serde(default)]
+    pub log_begin_address: u64,
+    /// Checkpoint start address (as u64)
+    #[serde(default)]
+    pub checkpoint_start_address: u64,
 }
 
 impl SerializableIndexMetadata {
@@ -30,9 +45,14 @@ impl SerializableIndexMetadata {
     pub fn from_metadata(meta: &super::IndexMetadata) -> Self {
         Self {
             token: meta.token.to_string(),
+            version: meta.version,
             table_size: meta.table_size,
+            num_ht_bytes: meta.num_ht_bytes,
+            num_ofb_bytes: meta.num_ofb_bytes,
             num_buckets: meta.num_buckets,
             num_entries: meta.num_entries,
+            log_begin_address: meta.log_begin_address.control(),
+            checkpoint_start_address: meta.checkpoint_start_address.control(),
         }
     }
 
@@ -44,10 +64,42 @@ impl SerializableIndexMetadata {
         
         Ok(super::IndexMetadata {
             token,
+            version: self.version,
             table_size: self.table_size,
+            num_ht_bytes: self.num_ht_bytes,
+            num_ofb_bytes: self.num_ofb_bytes,
             num_buckets: self.num_buckets,
             num_entries: self.num_entries,
+            log_begin_address: Address::from_control(self.log_begin_address),
+            checkpoint_start_address: Address::from_control(self.checkpoint_start_address),
         })
+    }
+}
+
+/// Serializable version of SessionState
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableSessionState {
+    /// Session GUID (as string)
+    pub guid: String,
+    /// Monotonic serial number
+    pub serial_num: u64,
+}
+
+impl SerializableSessionState {
+    /// Create from SessionState
+    pub fn from_state(state: &super::SessionState) -> Self {
+        Self {
+            guid: state.guid.to_string(),
+            serial_num: state.serial_num,
+        }
+    }
+
+    /// Convert to SessionState
+    pub fn to_state(&self) -> io::Result<super::SessionState> {
+        let guid = self.guid.parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
+        })?;
+        Ok(super::SessionState::new(guid, self.serial_num))
     }
 }
 
@@ -56,8 +108,14 @@ impl SerializableIndexMetadata {
 pub struct SerializableLogMetadata {
     /// Checkpoint token (UUID as string)
     pub token: String,
+    /// Whether to use snapshot file
+    #[serde(default)]
+    pub use_snapshot_file: bool,
     /// Version at checkpoint
     pub version: u32,
+    /// Number of active threads
+    #[serde(default)]
+    pub num_threads: u32,
     /// Begin address (as u64)
     pub begin_address: u64,
     /// Final address at checkpoint (as u64)
@@ -66,6 +124,9 @@ pub struct SerializableLogMetadata {
     pub flushed_until_address: u64,
     /// Object log exists
     pub use_object_log: bool,
+    /// Session states
+    #[serde(default)]
+    pub session_states: Vec<SerializableSessionState>,
 }
 
 impl SerializableLogMetadata {
@@ -73,11 +134,16 @@ impl SerializableLogMetadata {
     pub fn from_metadata(meta: &super::LogMetadata) -> Self {
         Self {
             token: meta.token.to_string(),
+            use_snapshot_file: meta.use_snapshot_file,
             version: meta.version,
+            num_threads: meta.num_threads,
             begin_address: meta.begin_address.control(),
             final_address: meta.final_address.control(),
             flushed_until_address: meta.flushed_until_address.control(),
             use_object_log: meta.use_object_log,
+            session_states: meta.session_states.iter()
+                .map(SerializableSessionState::from_state)
+                .collect(),
         }
     }
 
@@ -87,13 +153,21 @@ impl SerializableLogMetadata {
             io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
         })?;
         
+        let session_states: Result<Vec<_>, _> = self.session_states
+            .iter()
+            .map(|s| s.to_state())
+            .collect();
+        
         Ok(super::LogMetadata {
             token,
+            use_snapshot_file: self.use_snapshot_file,
             version: self.version,
+            num_threads: self.num_threads,
             begin_address: Address::from_control(self.begin_address),
             final_address: Address::from_control(self.final_address),
             flushed_until_address: Address::from_control(self.flushed_until_address),
             use_object_log: self.use_object_log,
+            session_states: session_states?,
         })
     }
 }
@@ -235,17 +309,18 @@ pub fn log_snapshot_path(checkpoint_dir: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{IndexMetadata, LogMetadata};
+    use crate::checkpoint::{IndexMetadata, LogMetadata, SessionState};
     use uuid::Uuid;
 
     #[test]
     fn test_index_metadata_json_serialization() {
-        let meta = IndexMetadata {
-            token: Uuid::new_v4(),
-            table_size: 1024,
-            num_buckets: 100,
-            num_entries: 500,
-        };
+        let mut meta = IndexMetadata::with_token(Uuid::new_v4());
+        meta.table_size = 1024;
+        meta.num_buckets = 100;
+        meta.num_entries = 500;
+        meta.version = 1;
+        meta.log_begin_address = Address::new(0, 0);
+        meta.checkpoint_start_address = Address::new(5, 100);
 
         let json = meta.serialize_json().unwrap();
         let restored = IndexMetadata::deserialize_json(&json).unwrap();
@@ -254,16 +329,17 @@ mod tests {
         assert_eq!(meta.table_size, restored.table_size);
         assert_eq!(meta.num_buckets, restored.num_buckets);
         assert_eq!(meta.num_entries, restored.num_entries);
+        assert_eq!(meta.version, restored.version);
+        assert_eq!(meta.log_begin_address, restored.log_begin_address);
+        assert_eq!(meta.checkpoint_start_address, restored.checkpoint_start_address);
     }
 
     #[test]
     fn test_index_metadata_binary_serialization() {
-        let meta = IndexMetadata {
-            token: Uuid::new_v4(),
-            table_size: 2048,
-            num_buckets: 200,
-            num_entries: 1000,
-        };
+        let mut meta = IndexMetadata::with_token(Uuid::new_v4());
+        meta.table_size = 2048;
+        meta.num_buckets = 200;
+        meta.num_entries = 1000;
 
         let binary = meta.serialize_binary().unwrap();
         let restored = IndexMetadata::deserialize_binary(&binary).unwrap();
@@ -276,14 +352,15 @@ mod tests {
 
     #[test]
     fn test_log_metadata_json_serialization() {
-        let meta = LogMetadata {
-            token: Uuid::new_v4(),
-            version: 5,
-            begin_address: Address::new(0, 0),
-            final_address: Address::new(10, 1024),
-            flushed_until_address: Address::new(8, 512),
-            use_object_log: false,
-        };
+        let mut meta = LogMetadata::with_token(Uuid::new_v4());
+        meta.version = 5;
+        meta.begin_address = Address::new(0, 0);
+        meta.final_address = Address::new(10, 1024);
+        meta.flushed_until_address = Address::new(8, 512);
+        meta.use_object_log = false;
+        meta.use_snapshot_file = true;
+        meta.add_session(Uuid::new_v4(), 100);
+        meta.add_session(Uuid::new_v4(), 200);
 
         let json = meta.serialize_json().unwrap();
         let restored = LogMetadata::deserialize_json(&json).unwrap();
@@ -294,18 +371,19 @@ mod tests {
         assert_eq!(meta.final_address, restored.final_address);
         assert_eq!(meta.flushed_until_address, restored.flushed_until_address);
         assert_eq!(meta.use_object_log, restored.use_object_log);
+        assert_eq!(meta.use_snapshot_file, restored.use_snapshot_file);
+        assert_eq!(meta.num_threads, restored.num_threads);
+        assert_eq!(meta.session_states.len(), restored.session_states.len());
     }
 
     #[test]
     fn test_log_metadata_binary_serialization() {
-        let meta = LogMetadata {
-            token: Uuid::new_v4(),
-            version: 10,
-            begin_address: Address::new(1, 100),
-            final_address: Address::new(20, 2048),
-            flushed_until_address: Address::new(15, 1024),
-            use_object_log: true,
-        };
+        let mut meta = LogMetadata::with_token(Uuid::new_v4());
+        meta.version = 10;
+        meta.begin_address = Address::new(1, 100);
+        meta.final_address = Address::new(20, 2048);
+        meta.flushed_until_address = Address::new(15, 1024);
+        meta.use_object_log = true;
 
         let binary = meta.serialize_binary().unwrap();
         let restored = LogMetadata::deserialize_binary(&binary).unwrap();
@@ -323,12 +401,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let file_path = temp_dir.path().join("index.meta");
 
-        let meta = IndexMetadata {
-            token: Uuid::new_v4(),
-            table_size: 4096,
-            num_buckets: 50,
-            num_entries: 250,
-        };
+        let mut meta = IndexMetadata::with_token(Uuid::new_v4());
+        meta.table_size = 4096;
+        meta.num_buckets = 50;
+        meta.num_entries = 250;
 
         meta.write_to_file(&file_path).unwrap();
         let restored = IndexMetadata::read_from_file(&file_path).unwrap();
@@ -342,14 +418,12 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let file_path = temp_dir.path().join("log.meta");
 
-        let meta = LogMetadata {
-            token: Uuid::new_v4(),
-            version: 3,
-            begin_address: Address::new(0, 0),
-            final_address: Address::new(5, 512),
-            flushed_until_address: Address::new(4, 256),
-            use_object_log: false,
-        };
+        let mut meta = LogMetadata::with_token(Uuid::new_v4());
+        meta.version = 3;
+        meta.begin_address = Address::new(0, 0);
+        meta.final_address = Address::new(5, 512);
+        meta.flushed_until_address = Address::new(4, 256);
+        meta.use_object_log = false;
 
         meta.write_to_file(&file_path).unwrap();
         let restored = LogMetadata::read_from_file(&file_path).unwrap();

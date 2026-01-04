@@ -300,6 +300,58 @@ impl MemHashIndex {
         false
     }
 
+    /// Try to update the address of an entry atomically by hash
+    ///
+    /// This is useful during compaction when we need to update the index
+    /// to point to a record's new location.
+    ///
+    /// # Arguments
+    /// * `hash` - The key hash to look up
+    /// * `old_address` - The expected current address
+    /// * `new_address` - The new address to set
+    ///
+    /// # Returns
+    /// `Status::Ok` if the update succeeded, `Status::NotFound` if the entry
+    /// wasn't found or the address didn't match.
+    pub fn try_update_address(
+        &self,
+        hash: KeyHash,
+        old_address: Address,
+        new_address: Address,
+    ) -> Status {
+        let result = self.find_entry(hash);
+        
+        if !result.found() {
+            return Status::NotFound;
+        }
+        
+        // Check if the current address matches what we expect
+        if result.entry.address() != old_address {
+            return Status::NotFound;
+        }
+        
+        // Try to atomically update the entry
+        if let Some(atomic_entry) = result.atomic_entry {
+            let expected = result.entry.to_hash_bucket_entry();
+            let new_entry = IndexHashBucketEntry::new(new_address, hash.tag(), false);
+            
+            // SAFETY: atomic_entry points to a valid bucket entry
+            let atomic_ref = unsafe { &*atomic_entry };
+            
+            match atomic_ref.compare_exchange(
+                expected,
+                new_entry.to_hash_bucket_entry(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => Status::Ok,
+                Err(_) => Status::Aborted, // Concurrent modification
+            }
+        } else {
+            Status::NotFound
+        }
+    }
+
     /// Garbage collect entries pointing to addresses before the given address
     pub fn garbage_collect(&self, new_begin_address: Address) -> u64 {
         let version = self.version as usize;
@@ -423,12 +475,13 @@ impl MemHashIndex {
         let stats = self.dump_distribution();
 
         // Create metadata
-        let metadata = IndexMetadata {
-            token,
-            table_size,
-            num_buckets: stats.buckets_with_entries,
-            num_entries: stats.used_entries,
-        };
+        let mut metadata = IndexMetadata::with_token(token);
+        metadata.version = self.version as u32;
+        metadata.table_size = table_size;
+        metadata.num_buckets = stats.buckets_with_entries;
+        metadata.num_entries = stats.used_entries;
+        // num_ht_bytes: table_size * entries_per_bucket * 8 bytes per entry
+        metadata.num_ht_bytes = table_size * crate::index::HashBucket::NUM_ENTRIES as u64 * 8;
 
         // Write index data file
         let data_path = checkpoint_dir.join("index.dat");

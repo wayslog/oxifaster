@@ -18,7 +18,7 @@ oxifaster 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust
 
 ```toml
 [dependencies]
-oxifaster = { path = "path/to/oxifaster" }
+oxifaster = { path = "oxifaster" }
 ```
 
 ### 基本使用
