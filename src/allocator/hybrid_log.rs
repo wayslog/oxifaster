@@ -614,6 +614,55 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         Ok(metadata)
     }
 
+    /// Flush the log and write checkpoint data to disk with session states
+    ///
+    /// This is the primary checkpoint method that includes session persistence
+    /// for Concurrent Prefix Recovery (CPR).
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory to write checkpoint files
+    /// * `token` - Unique checkpoint token
+    /// * `version` - Current checkpoint version
+    /// * `session_states` - Active session states to persist
+    ///
+    /// # Returns
+    /// LogMetadata containing the checkpoint information
+    pub fn checkpoint_with_sessions(
+        &self,
+        checkpoint_dir: &Path,
+        token: crate::checkpoint::CheckpointToken,
+        version: u32,
+        session_states: Vec<crate::checkpoint::SessionState>,
+    ) -> io::Result<LogMetadata> {
+        let tail_address = self.get_tail_address();
+
+        // Flush all in-memory pages
+        self.flush_until(tail_address)?;
+
+        // Create metadata with session states
+        let mut metadata = self.checkpoint_metadata(token, version, true);
+        metadata.session_states = session_states;
+        metadata.num_threads = metadata.session_states.len() as u32;
+
+        // Write log metadata
+        let meta_path = checkpoint_dir.join("log.meta");
+        metadata.write_to_file(&meta_path)?;
+
+        // Write log snapshot (pages in memory)
+        let snapshot_path = checkpoint_dir.join("log.snapshot");
+        self.write_log_snapshot(&snapshot_path)?;
+
+        Ok(metadata)
+    }
+
+    /// Flush all dirty pages to disk
+    ///
+    /// This method ensures all in-memory data is persisted to the storage device.
+    pub fn flush_to_disk(&self) -> io::Result<()> {
+        let tail = self.get_tail_address();
+        self.flush_until(tail)
+    }
+
     /// Write a snapshot of in-memory pages to disk
     fn write_log_snapshot(&self, path: &Path) -> io::Result<()> {
         let file = File::create(path)?;

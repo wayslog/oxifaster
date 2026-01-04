@@ -26,6 +26,8 @@ pub enum Status {
     InvalidArgument = 7,
     /// Invalid operation in current state
     InvalidOperation = 8,
+    /// Feature or operation not supported
+    NotSupported = 9,
 }
 
 impl Status {
@@ -52,8 +54,13 @@ impl Status {
     pub const fn is_error(&self) -> bool {
         matches!(
             self,
-            Status::OutOfMemory | Status::IoError | Status::Corruption | Status::Aborted
-            | Status::InvalidArgument | Status::InvalidOperation
+            Status::OutOfMemory
+                | Status::IoError
+                | Status::Corruption
+                | Status::Aborted
+                | Status::InvalidArgument
+                | Status::InvalidOperation
+                | Status::NotSupported
         )
     }
 
@@ -69,6 +76,7 @@ impl Status {
             Status::Aborted => "Aborted",
             Status::InvalidArgument => "InvalidArgument",
             Status::InvalidOperation => "InvalidOperation",
+            Status::NotSupported => "NotSupported",
         }
     }
 }

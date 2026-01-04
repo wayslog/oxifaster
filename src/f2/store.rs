@@ -4,25 +4,22 @@
 //! automatic hot-cold data separation.
 
 use std::cell::UnsafeCell;
-use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use uuid::Uuid;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
-use crate::checkpoint::CheckpointToken;
 use crate::compaction::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
 use crate::device::StorageDevice;
 use crate::epoch::LightEpoch;
-use crate::f2::config::{F2Config, F2CompactionConfig};
+use crate::f2::config::{F2CompactionConfig, F2Config};
 use crate::f2::state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
 use crate::index::{KeyHash, MemHashIndex, MemHashIndexConfig};
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::{Key, RecordInfo, Value};
 use crate::status::Status;
 
 /// Store type identifier for internal operations
@@ -89,14 +86,14 @@ impl<D: StorageDevice> InternalStore<D> {
     ) -> Self {
         let device = Arc::new(device);
         let epoch = Arc::new(LightEpoch::new());
-        
+
         let mut hash_index = MemHashIndex::new();
         let index_config = MemHashIndexConfig::new(table_size);
         hash_index.initialize(&index_config);
-        
+
         let log_config = HybridLogConfig::new(log_mem_size, page_size_bits as u32);
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
-        
+
         Self {
             epoch,
             hash_index,
@@ -106,18 +103,18 @@ impl<D: StorageDevice> InternalStore<D> {
             max_hlog_size: AtomicU64::new(u64::MAX),
         }
     }
-    
+
     /// Get mutable reference to hlog (unsafe)
     #[allow(clippy::mut_from_ref)]
     unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
         &mut *self.hlog.get()
     }
-    
+
     /// Get immutable reference to hlog
     fn hlog(&self) -> &PersistentMemoryMalloc<D> {
         unsafe { &*self.hlog.get() }
     }
-    
+
     /// Get the current log size
     fn size(&self) -> u64 {
         let hlog = self.hlog();
@@ -125,17 +122,17 @@ impl<D: StorageDevice> InternalStore<D> {
         let begin = hlog.get_begin_address().control();
         tail.saturating_sub(begin)
     }
-    
+
     /// Get tail address
     fn tail_address(&self) -> Address {
         self.hlog().get_tail_address()
     }
-    
+
     /// Get begin address
     fn begin_address(&self) -> Address {
         self.hlog().get_begin_address()
     }
-    
+
     /// Get safe read-only address
     fn safe_read_only_address(&self) -> Address {
         self.hlog().get_safe_read_only_address()
@@ -187,7 +184,7 @@ where
     /// Create a new F2 key-value store with the given configuration
     pub fn new(config: F2Config, hot_device: D, cold_device: D) -> Result<Self, String> {
         config.validate()?;
-        
+
         // Create hot store
         let hot_store = InternalStore::new(
             config.hot_store.index_size,
@@ -196,13 +193,12 @@ where
             hot_device,
             StoreType::Hot,
         );
-        
+
         // Set max log size for hot store
-        hot_store.max_hlog_size.store(
-            config.compaction.hot_log_size_budget,
-            Ordering::Release,
-        );
-        
+        hot_store
+            .max_hlog_size
+            .store(config.compaction.hot_log_size_budget, Ordering::Release);
+
         // Create cold store
         let cold_store = InternalStore::new(
             config.cold_store.index_size,
@@ -211,18 +207,17 @@ where
             cold_device,
             StoreType::Cold,
         );
-        
+
         // Set max log size for cold store
-        cold_store.max_hlog_size.store(
-            config.compaction.cold_log_size_budget,
-            Ordering::Release,
-        );
-        
+        cold_store
+            .max_hlog_size
+            .store(config.compaction.cold_log_size_budget, Ordering::Release);
+
         // Create compactors
         let hot_compaction_config = CompactionConfig::new()
             .with_max_compact_bytes(config.compaction.max_compact_size)
             .with_num_threads(config.compaction.num_threads);
-        
+
         let cold_compaction_config = CompactionConfig::new()
             .with_max_compact_bytes(config.compaction.max_compact_size)
             .with_num_threads(config.compaction.num_threads);
@@ -254,16 +249,16 @@ where
         if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
             return Err(Status::Aborted);
         }
-        
+
         let guid = Uuid::new_v4();
-        
+
         // Protect epoch on both stores
         // Use thread_id 0 for simplicity; in production, use actual thread IDs
         self.hot_store.epoch.protect(0);
         self.cold_store.epoch.protect(0);
-        
+
         self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
-        
+
         Ok(guid)
     }
 
@@ -278,13 +273,13 @@ where
         if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
             return Err(Status::Aborted);
         }
-        
+
         // Protect epoch on both stores
         self.hot_store.epoch.protect(0);
         self.cold_store.epoch.protect(0);
-        
+
         self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
-        
+
         Ok(0)
     }
 
@@ -294,11 +289,11 @@ where
         while self.checkpoint.is_in_progress() {
             std::hint::spin_loop();
         }
-        
+
         // Release epoch on both stores
         self.hot_store.epoch.unprotect(0);
         self.cold_store.epoch.unprotect(0);
-        
+
         self.num_active_sessions.fetch_sub(1, Ordering::AcqRel);
     }
 
@@ -307,7 +302,7 @@ where
         if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
             self.heavy_enter();
         }
-        
+
         // Bump epoch on both stores
         self.hot_store.epoch.bump_current_epoch();
         self.cold_store.epoch.bump_current_epoch();
@@ -318,35 +313,39 @@ where
     /// The read operation first checks the hot store, then the cold store.
     pub fn read(&self, key: &K) -> Result<Option<V>, Status> {
         let key_hash = KeyHash::new(key.get_hash());
-        
+
         // Stage 1: Read from hot store
         if let Some(value) = self.internal_read(&self.hot_store, key_hash)? {
             return Ok(Some(value));
         }
-        
+
         // Stage 2: Read from cold store
         if let Some(value) = self.internal_read(&self.cold_store, key_hash)? {
             // TODO: Optionally insert into read cache
             return Ok(Some(value));
         }
-        
+
         Ok(None)
     }
-    
+
     /// Internal read from a specific store
-    fn internal_read(&self, store: &InternalStore<D>, key_hash: KeyHash) -> Result<Option<V>, Status> {
+    fn internal_read(
+        &self,
+        store: &InternalStore<D>,
+        key_hash: KeyHash,
+    ) -> Result<Option<V>, Status> {
         // Find entry in hash index
         let find_result = store.hash_index.find_entry(key_hash);
-        
+
         if find_result.entry.is_unused() {
             return Ok(None);
         }
-        
+
         let address = find_result.entry.address();
         if address == Address::INVALID {
             return Ok(None);
         }
-        
+
         // NOTE: Full implementation would read record from log and deserialize
         // For now, we return None as we don't have the record serialization infrastructure
         Ok(None)
@@ -357,7 +356,7 @@ where
     /// Always writes to the hot store.
     pub fn upsert(&self, key: K, value: V) -> Result<(), Status> {
         let key_hash = KeyHash::new(key.get_hash());
-        
+
         // Check if we need to throttle due to log size
         let hot_size = self.hot_store.size();
         let max_size = self.hot_store.max_hlog_size.load(Ordering::Acquire);
@@ -368,14 +367,15 @@ where
                 std::hint::spin_loop();
             }
         }
-        
+
         // Allocate record in hot log
-        let record_size = std::mem::size_of::<RecordInfo>() + key.size() as usize + value.size() as usize;
+        let record_size =
+            std::mem::size_of::<RecordInfo>() + key.size() as usize + value.size() as usize;
         let record_size = (record_size + 7) & !7; // Align to 8 bytes
-        
+
         // SAFETY: We have epoch protection
         let address = unsafe { self.hot_store.hlog_mut().allocate(record_size as u32) };
-        
+
         match address {
             Ok(addr) if addr.is_valid() => {
                 // Update hash index
@@ -397,33 +397,36 @@ where
         V: Default,
     {
         let key_hash = KeyHash::new(key.get_hash());
-        
+
         // Stage 1: Try RMW in hot store
         if self.internal_rmw_in_place(&self.hot_store, key_hash)? {
             return Ok(());
         }
-        
+
         // Stage 2: Read from cold store
         if let Some(mut value) = self.internal_read(&self.cold_store, key_hash)? {
             // Apply modification
             modify(&mut value);
-            
+
             // Insert to hot store (conditional)
             self.upsert(key, value)?;
             return Ok(());
         }
-        
+
         // Key not found - create new with default value
         let mut value = V::default();
         modify(&mut value);
         self.upsert(key, value)?;
-        
+
         Ok(())
     }
-    
+
     /// Internal RMW in place (returns true if successful)
-    fn internal_rmw_in_place(&self, _store: &InternalStore<D>, _key_hash: KeyHash) -> Result<bool, Status>
-    {
+    fn internal_rmw_in_place(
+        &self,
+        _store: &InternalStore<D>,
+        _key_hash: KeyHash,
+    ) -> Result<bool, Status> {
         // Simplified: always return false to force read-modify-write path
         // Full implementation would try to modify record in place if in mutable region
         Ok(false)
@@ -434,14 +437,14 @@ where
     /// Writes a tombstone to the hot store.
     pub fn delete(&self, key: &K) -> Result<(), Status> {
         let key_hash = KeyHash::new(key.get_hash());
-        
+
         // Allocate tombstone record in hot log
         let record_size = std::mem::size_of::<RecordInfo>() + key.size() as usize;
         let record_size = (record_size + 7) & !7;
-        
+
         // SAFETY: We have epoch protection
         let address = unsafe { self.hot_store.hlog_mut().allocate(record_size as u32) };
-        
+
         match address {
             Ok(addr) if addr.is_valid() => {
                 // Update hash index with tombstone address
@@ -461,17 +464,13 @@ where
     /// # Returns
     /// true if all operations are complete
     pub fn complete_pending(&self, wait: bool) -> bool {
-        loop {
-            // Refresh to process any pending epoch actions
-            self.refresh();
-            
-            // In this simplified implementation, operations are synchronous
-            if !wait {
-                return true;
-            }
-            
-            return true;
-        }
+        // Refresh to process any pending epoch actions.
+        self.refresh();
+
+        // In this simplified implementation, operations are synchronous.
+        // `wait` is kept for API compatibility.
+        let _ = wait;
+        true
     }
 
     /// Wait for pending compactions to complete
@@ -507,10 +506,12 @@ where
         let token = Uuid::new_v4();
         let num_sessions = self.num_active_sessions.load(Ordering::Acquire) as u32;
         self.checkpoint.initialize(token, num_sessions.max(1));
-        
+
         // Request hot store checkpoint
-        self.checkpoint.hot_store_status.store(StoreCheckpointStatus::Requested, Ordering::Release);
-        
+        self.checkpoint
+            .hot_store_status
+            .store(StoreCheckpointStatus::Requested, Ordering::Release);
+
         let _ = lazy; // Used by background worker
 
         Ok(token)
@@ -535,9 +536,11 @@ where
 
         // TODO: Recover hot store
         // TODO: Recover cold store
-        
+
         // Move back to REST phase
-        self.checkpoint.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
+        self.checkpoint
+            .phase
+            .store(F2CheckpointPhase::Rest, Ordering::Release);
 
         Ok(0) // Return version
     }
@@ -555,25 +558,30 @@ where
     pub fn compact_cold_log(&self, until_address: Address) -> Result<CompactionResult, Status> {
         self.compact_log(StoreType::Cold, until_address, true)
     }
-    
+
     /// Internal log compaction
-    fn compact_log(&self, store_type: StoreType, until_address: Address, shift_begin_address: bool) -> Result<CompactionResult, Status> {
+    fn compact_log(
+        &self,
+        store_type: StoreType,
+        until_address: Address,
+        shift_begin_address: bool,
+    ) -> Result<CompactionResult, Status> {
         let (store, compactor) = match store_type {
             StoreType::Hot => (&self.hot_store, &self.hot_compactor),
             StoreType::Cold => (&self.cold_store, &self.cold_compactor),
         };
-        
+
         // Validate until_address
         let safe_ro = store.safe_read_only_address();
         if until_address.control() > safe_ro.control() {
             return Err(Status::InvalidArgument);
         }
-        
+
         // Try to start compaction
         if compactor.try_start().is_err() {
             return Err(Status::Aborted);
         }
-        
+
         // Create compaction stats
         let begin_addr = store.begin_address();
         let bytes_to_compact = until_address.control().saturating_sub(begin_addr.control());
@@ -587,56 +595,56 @@ where
             bytes_reclaimed: bytes_to_compact,
             duration_ms: 0,
         };
-        
+
         if shift_begin_address {
             // Shift begin address
             unsafe { store.hlog_mut().shift_begin_address(until_address) };
-            
+
             // Garbage collect hash index
             store.hash_index.garbage_collect(until_address);
         }
-        
+
         compactor.complete();
-        
+
         Ok(CompactionResult::success(until_address, stats))
     }
-    
+
     /// Check if hot log should be compacted
     pub fn should_compact_hot_log(&self) -> Option<Address> {
         self.should_compact_log(StoreType::Hot)
     }
-    
+
     /// Check if cold log should be compacted
     pub fn should_compact_cold_log(&self) -> Option<Address> {
         self.should_compact_log(StoreType::Cold)
     }
-    
+
     /// Internal check for compaction need
     fn should_compact_log(&self, store_type: StoreType) -> Option<Address> {
         let (store, compaction_enabled, log_size_budget) = match store_type {
             StoreType::Hot => (
-                &self.hot_store, 
+                &self.hot_store,
                 self.config.compaction.hot_store_enabled,
                 self.config.compaction.hot_log_size_budget,
             ),
             StoreType::Cold => (
-                &self.cold_store, 
+                &self.cold_store,
                 self.config.compaction.cold_store_enabled,
                 self.config.compaction.cold_log_size_budget,
             ),
         };
-        
+
         if !compaction_enabled {
             return None;
         }
-        
-        let hlog_size_threshold = (log_size_budget as f64 
-            * self.config.compaction.trigger_percentage) as u64;
-        
+
+        let hlog_size_threshold =
+            (log_size_budget as f64 * self.config.compaction.trigger_percentage) as u64;
+
         if store.size() < hlog_size_threshold {
             return None;
         }
-        
+
         // Check checkpoint phase
         let phase = self.checkpoint.phase.load(Ordering::Acquire);
         match phase {
@@ -645,7 +653,9 @@ where
                 return None; // Can't compact hot store during hot checkpoint
             }
             F2CheckpointPhase::ColdStoreCheckpoint => {
-                if self.checkpoint.cold_store_status.load(Ordering::Acquire) == StoreCheckpointStatus::Active {
+                if self.checkpoint.cold_store_status.load(Ordering::Acquire)
+                    == StoreCheckpointStatus::Active
+                {
                     return None; // Can't compact during active cold checkpoint
                 }
             }
@@ -654,23 +664,23 @@ where
             }
             _ => {}
         }
-        
+
         // Calculate until address
         let begin_address = store.begin_address().control();
         let compact_size = (store.size() as f64 * self.config.compaction.compact_percentage) as u64;
         let mut until_address = begin_address + compact_size;
-        
+
         // Respect max compacted size
         until_address = until_address.min(begin_address + self.config.compaction.max_compact_size);
-        
+
         // Don't compact in-memory regions
         let safe_head = store.safe_read_only_address().control();
         until_address = until_address.min(safe_head);
-        
+
         if until_address <= begin_address {
             return None;
         }
-        
+
         Some(Address::from_control(until_address))
     }
 
@@ -678,12 +688,12 @@ where
     pub fn size(&self) -> u64 {
         self.hot_store.size() + self.cold_store.size()
     }
-    
+
     /// Get the hot store size
     pub fn hot_store_size(&self) -> u64 {
         self.hot_store.size()
     }
-    
+
     /// Get the cold store size
     pub fn cold_store_size(&self) -> u64 {
         self.cold_store.size()
@@ -702,13 +712,13 @@ where
     /// Handle heavy enter for checkpoint phases
     fn heavy_enter(&self) {
         let phase = self.checkpoint.phase.load(Ordering::Acquire);
-        
+
         if phase == F2CheckpointPhase::ColdStoreCheckpoint {
             let status = self.checkpoint.cold_store_status.load(Ordering::Acquire);
             if !status.is_done() {
                 return;
             }
-            
+
             // All done - can move to REST
             // Note: Full implementation would issue callbacks here
         }
@@ -716,9 +726,11 @@ where
 
     /// Start the background worker thread
     pub fn start_background_worker(self: &Arc<Self>) {
-        if self.background_worker_active.compare_exchange(
-            false, true, Ordering::AcqRel, Ordering::Acquire
-        ).is_err() {
+        if self
+            .background_worker_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return; // Already running
         }
 
@@ -727,47 +739,65 @@ where
             f2.background_worker_loop();
         });
     }
-    
+
     /// Background worker loop
     fn background_worker_loop(&self) {
         let check_interval = self.config.compaction.check_interval;
-        
+
         while self.background_worker_active.load(Ordering::Acquire) {
             self.compaction_scheduled.store(true, Ordering::Release);
-            
+
             // Check hot store checkpoint
-            if self.checkpoint.hot_store_status.load(Ordering::Acquire) == StoreCheckpointStatus::Requested {
+            if self.checkpoint.hot_store_status.load(Ordering::Acquire)
+                == StoreCheckpointStatus::Requested
+            {
                 // Issue hot store checkpoint
-                self.checkpoint.hot_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
+                self.checkpoint
+                    .hot_store_status
+                    .store(StoreCheckpointStatus::Active, Ordering::Release);
                 // TODO: Actually checkpoint hot store
-                self.checkpoint.hot_store_status.store(StoreCheckpointStatus::Finished, Ordering::Release);
-                
+                self.checkpoint
+                    .hot_store_status
+                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
+
                 // Move to cold store checkpoint phase
-                self.checkpoint.phase.store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
-                self.checkpoint.cold_store_status.store(StoreCheckpointStatus::Requested, Ordering::Release);
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
+                self.checkpoint
+                    .cold_store_status
+                    .store(StoreCheckpointStatus::Requested, Ordering::Release);
             }
-            
+
             // Check cold store checkpoint
-            if self.checkpoint.cold_store_status.load(Ordering::Acquire) == StoreCheckpointStatus::Requested {
+            if self.checkpoint.cold_store_status.load(Ordering::Acquire)
+                == StoreCheckpointStatus::Requested
+            {
                 // Issue cold store checkpoint
-                self.checkpoint.cold_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
+                self.checkpoint
+                    .cold_store_status
+                    .store(StoreCheckpointStatus::Active, Ordering::Release);
                 // TODO: Actually checkpoint cold store
-                self.checkpoint.cold_store_status.store(StoreCheckpointStatus::Finished, Ordering::Release);
-                
+                self.checkpoint
+                    .cold_store_status
+                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
+
                 // Move back to REST
-                self.checkpoint.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
             }
-            
+
             // Hot-cold compaction
             if let Some(until_addr) = self.should_compact_hot_log() {
                 let _ = self.compact_hot_log(until_addr);
             }
-            
+
             // Cold-cold compaction
             if let Some(until_addr) = self.should_compact_cold_log() {
                 let _ = self.compact_cold_log(until_addr);
             }
-            
+
             self.compaction_scheduled.store(false, Ordering::Release);
             thread::sleep(check_interval);
         }
@@ -775,14 +805,15 @@ where
 
     /// Stop the background worker thread
     pub fn stop_background_worker(&self) {
-        self.background_worker_active.store(false, Ordering::Release);
+        self.background_worker_active
+            .store(false, Ordering::Release);
     }
-    
+
     /// Get compaction configuration
     pub fn compaction_config(&self) -> &F2CompactionConfig {
         &self.config.compaction
     }
-    
+
     /// Get hot store statistics
     pub fn hot_store_stats(&self) -> StoreStats {
         StoreStats {
@@ -792,7 +823,7 @@ where
             safe_read_only_address: self.hot_store.safe_read_only_address(),
         }
     }
-    
+
     /// Get cold store statistics
     pub fn cold_store_stats(&self) -> StoreStats {
         StoreStats {
@@ -828,7 +859,7 @@ where
         while self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
             std::hint::spin_loop();
         }
-        
+
         // Stop background worker
         self.stop_background_worker();
     }
@@ -841,12 +872,12 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
     struct TestKey(u64);
-    
+
     impl Key for TestKey {
         fn size(&self) -> u32 {
             std::mem::size_of::<Self>() as u32
         }
-        
+
         fn get_hash(&self) -> u64 {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -857,7 +888,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Default)]
     struct TestValue(u64);
-    
+
     impl Value for TestValue {
         fn size(&self) -> u32 {
             std::mem::size_of::<Self>() as u32
@@ -878,12 +909,13 @@ mod tests {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         // Start session
         let session = f2.start_session();
         assert!(session.is_ok());
-        
+
         // Stop session
         f2.stop_session();
     }
@@ -893,12 +925,13 @@ mod tests {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let mut f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         // Start checkpoint
         let token = f2.checkpoint(false);
         assert!(token.is_ok());
-        
+
         // Reset for next test
         f2.checkpoint.reset();
     }
@@ -910,71 +943,78 @@ mod tests {
 
     #[test]
     fn test_operation_stages() {
-        assert_ne!(ReadOperationStage::HotLogRead, ReadOperationStage::ColdLogRead);
+        assert_ne!(
+            ReadOperationStage::HotLogRead,
+            ReadOperationStage::ColdLogRead
+        );
         assert_ne!(RmwOperationStage::HotLogRmw, RmwOperationStage::ColdLogRead);
     }
-    
+
     #[test]
     fn test_f2_size() {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         // Initial size should be 0
         assert_eq!(f2.size(), 0);
         assert_eq!(f2.hot_store_size(), 0);
         assert_eq!(f2.cold_store_size(), 0);
     }
-    
+
     #[test]
     fn test_f2_stats() {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         let hot_stats = f2.hot_store_stats();
         let cold_stats = f2.cold_store_stats();
-        
+
         assert_eq!(hot_stats.size, 0);
         assert_eq!(cold_stats.size, 0);
     }
-    
+
     #[test]
     fn test_f2_read_write() {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         // Start session
         let _session = f2.start_session().unwrap();
-        
+
         // Read non-existent key
         let result = f2.read(&TestKey(1));
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
-        
+
         // Upsert
         let result = f2.upsert(TestKey(1), TestValue(100));
         assert!(result.is_ok());
-        
+
         // Delete
         let result = f2.delete(&TestKey(1));
         assert!(result.is_ok());
-        
+
         // Stop session
         f2.stop_session();
     }
-    
+
     #[test]
     fn test_f2_compaction_check() {
         let config = F2Config::default();
         let hot_device = NullDisk::new();
         let cold_device = NullDisk::new();
-        let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
-        
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
         // Should not need compaction with empty stores
         assert!(f2.should_compact_hot_log().is_none());
         assert!(f2.should_compact_cold_log().is_none());

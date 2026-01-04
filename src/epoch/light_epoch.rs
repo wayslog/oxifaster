@@ -4,11 +4,41 @@
 //! to safely reclaim memory in lock-free data structures.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use crate::constants::{CACHE_LINE_BYTES, MAX_THREADS};
+
+// ============ Thread ID Allocation ============
+
+/// Global counter for allocating thread-local IDs
+static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// Thread-local ID for epoch table indexing
+    /// Each thread gets a unique ID (0..MAX_THREADS-1) on first access
+    static THREAD_ID: usize = {
+        let id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        // Note: In production, we should handle thread ID exhaustion more gracefully
+        // For now, we rely on debug_assert in protect/unprotect to catch overflow
+        id
+    };
+}
+
+/// Get the current thread's ID for epoch protection
+///
+/// This returns a stable ID for the current thread that can be used
+/// as an index into the epoch table. The ID is allocated on first call
+/// and remains constant for the thread's lifetime.
+///
+/// # Panics
+///
+/// Debug builds will panic in `protect`/`unprotect` if the ID >= MAX_THREADS.
+#[inline]
+pub fn get_thread_id() -> usize {
+    THREAD_ID.with(|id| *id)
+}
 
 /// Special epoch value indicating the thread is not protected
 pub const UNPROTECTED: u64 = 0;

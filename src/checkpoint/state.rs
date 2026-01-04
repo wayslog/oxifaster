@@ -213,18 +213,31 @@ impl LogMetadata {
 }
 
 /// Checkpoint type
+///
+/// Note: The discriminant values are part of the on-disk format.
+/// FoldOver=0 and Snapshot=1 are the original values and must be preserved
+/// for backward compatibility with existing checkpoint files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CheckpointType {
-    /// Fold-over checkpoint
+    /// Fold-over checkpoint (no snapshot file, original default)
+    /// Preserved as 0 for backward compatibility
     FoldOver = 0,
-    /// Snapshot checkpoint
+    /// Snapshot checkpoint (uses snapshot file)
+    /// Preserved as 1 for backward compatibility
     Snapshot = 1,
+    /// Full checkpoint (index + hybrid log), equivalent to Snapshot
+    Full = 2,
+    /// Index-only checkpoint
+    IndexOnly = 3,
+    /// HybridLog-only checkpoint
+    HybridLogOnly = 4,
 }
 
 impl Default for CheckpointType {
     fn default() -> Self {
-        CheckpointType::FoldOver
+        // Default to Snapshot (Full) for new checkpoints
+        CheckpointType::Snapshot
     }
 }
 
@@ -332,7 +345,7 @@ impl CheckpointState {
 
 impl Default for CheckpointState {
     fn default() -> Self {
-        Self::new(CheckpointType::FoldOver)
+        Self::new(CheckpointType::Full)
     }
 }
 
@@ -416,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_state() {
-        let state = CheckpointState::new(CheckpointType::FoldOver);
+        let state = CheckpointState::new(CheckpointType::Full);
         assert!(!state.is_complete());
         
         // Start and complete index checkpoint
@@ -433,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_pending_persistence() {
-        let state = CheckpointState::new(CheckpointType::Snapshot);
+        let state = CheckpointState::new(CheckpointType::Full);
         
         assert!(!state.has_pending());
         

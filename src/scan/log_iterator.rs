@@ -7,11 +7,10 @@
 //! - Double buffering: Prefetches next page while scanning current (better performance)
 //! - Concurrent: Multiple threads can scan different pages simultaneously
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::ptr::NonNull;
 
 use crate::address::Address;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::{Key, Record, Value};
 use crate::utility::AlignedBuffer;
 
 /// Status of a log page buffer

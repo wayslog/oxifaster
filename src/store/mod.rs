@@ -9,8 +9,8 @@ mod session;
 mod state_transitions;
 
 pub use contexts::{DeleteContext, PendingContext, ReadContext, RmwContext, UpsertContext};
-pub use faster_kv::{FasterKv, FasterKvConfig};
-pub use session::{Session, ThreadContext};
+pub use faster_kv::{CheckpointKind, FasterKv, FasterKvConfig};
+pub use session::{Session, SessionBuilder, ThreadContext};
 pub use state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 
 /// Callback type for async operations

@@ -3,28 +3,32 @@
 //! This module provides the main FasterKV store implementation.
 
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
+
+use uuid::Uuid;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
 use crate::cache::{ReadCache, ReadCacheConfig};
 use crate::checkpoint::{
     create_checkpoint_directory, CheckpointToken, CheckpointType, IndexMetadata, LogMetadata,
+    RecoveryState, SessionState,
 };
 use crate::compaction::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
 use crate::device::StorageDevice;
-use crate::epoch::LightEpoch;
-use crate::index::{KeyHash, MemHashIndex, MemHashIndexConfig, GrowState, GrowResult};
+use crate::epoch::{get_thread_id, LightEpoch};
+use crate::index::{GrowResult, GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
 use crate::record::{Key, Record, RecordInfo, Value};
-use crate::stats::{StatsCollector, StatsConfig, StoreStats as StatsStoreStats};
+use crate::stats::StatsCollector;
 use crate::status::Status;
-use crate::store::state_transitions::{AtomicSystemState, Phase, SystemState};
+use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 use crate::store::{Session, ThreadContext};
 
 /// Configuration for FasterKV
@@ -57,7 +61,7 @@ impl Default for FasterKvConfig {
         Self {
             table_size: 1 << 20,      // 1M buckets
             log_memory_size: 1 << 29, // 512 MB
-            page_size_bits: 22,        // 4 MB pages
+            page_size_bits: 22,       // 4 MB pages
             mutable_fraction: 0.9,
         }
     }
@@ -73,6 +77,7 @@ impl Default for FasterKvConfig {
 /// - Compaction for space reclamation
 /// - Index growth for dynamic resizing
 /// - Statistics collection
+/// - Session persistence for checkpoint/recovery
 pub struct FasterKv<K, V, D>
 where
     K: Key,
@@ -101,6 +106,9 @@ where
     grow_state: UnsafeCell<Option<GrowState>>,
     /// Statistics collector
     stats_collector: StatsCollector,
+    /// Active session states registry
+    /// Maps session GUID to session state for checkpoint persistence
+    session_registry: RwLock<HashMap<Uuid, SessionState>>,
     /// Type markers
     _marker: PhantomData<(K, V)>,
 }
@@ -135,13 +143,26 @@ where
     }
 
     /// Create a new FasterKV store with custom compaction configuration
-    pub fn with_compaction_config(config: FasterKvConfig, device: D, compaction_config: CompactionConfig) -> Self {
+    pub fn with_compaction_config(
+        config: FasterKvConfig,
+        device: D,
+        compaction_config: CompactionConfig,
+    ) -> Self {
         Self::with_full_config(config, device, compaction_config, None)
     }
 
     /// Create a new FasterKV store with read cache
-    pub fn with_read_cache(config: FasterKvConfig, device: D, cache_config: ReadCacheConfig) -> Self {
-        Self::with_full_config(config, device, CompactionConfig::default(), Some(cache_config))
+    pub fn with_read_cache(
+        config: FasterKvConfig,
+        device: D,
+        cache_config: ReadCacheConfig,
+    ) -> Self {
+        Self::with_full_config(
+            config,
+            device,
+            CompactionConfig::default(),
+            Some(cache_config),
+        )
     }
 
     /// Create a new FasterKV store with full configuration
@@ -152,25 +173,25 @@ where
         cache_config: Option<ReadCacheConfig>,
     ) -> Self {
         let device = Arc::new(device);
-        
+
         // Initialize epoch
         let epoch = Arc::new(LightEpoch::new());
-        
+
         // Initialize hash index
         let mut hash_index = MemHashIndex::new();
         let index_config = MemHashIndexConfig::new(config.table_size);
         hash_index.initialize(&index_config);
-        
+
         // Initialize hybrid log
         let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
-        
+
         // Initialize compactor
         let compactor = Compactor::with_config(compaction_config);
-        
+
         // Initialize read cache if configured
         let read_cache = cache_config.map(ReadCache::new);
-        
+
         Self {
             epoch,
             system_state: AtomicSystemState::default(),
@@ -182,6 +203,7 @@ where
             compactor,
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
+            session_registry: RwLock::new(HashMap::new()),
             _marker: PhantomData,
         }
     }
@@ -260,7 +282,7 @@ where
     }
 
     /// Get a reference to the hybrid log
-    /// 
+    ///
     /// # Safety
     /// The caller must ensure no mutable access to the same region
     /// is occurring concurrently.
@@ -270,7 +292,7 @@ where
     }
 
     /// Get a mutable reference to the hybrid log
-    /// 
+    ///
     /// # Safety
     /// The caller must ensure exclusive access to the region being modified.
     /// This is typically guaranteed by epoch protection.
@@ -280,44 +302,141 @@ where
         &mut *self.hlog.get()
     }
 
+    // ============ Session Management API ============
+
     /// Start a new session
+    ///
+    /// Creates a new session bound to the current thread. The session uses the
+    /// thread's ID for epoch protection, ensuring correct memory safety guarantees.
+    ///
+    /// # Note
+    ///
+    /// Sessions are not thread-safe and should only be used from the thread that
+    /// created them. Each thread should have at most one active session.
     pub fn start_session(self: &Arc<Self>) -> Session<K, V, D> {
-        let session_id = self.next_session_id.fetch_add(1, Ordering::AcqRel) as usize;
-        let mut session = Session::new(self.clone(), session_id);
+        // Increment session counter for tracking purposes
+        let _session_id = self.next_session_id.fetch_add(1, Ordering::AcqRel);
+        // Use the thread-local ID for epoch protection, not the session counter
+        let thread_id = get_thread_id();
+        let mut session = Session::new(self.clone(), thread_id);
         session.start();
+
+        // Register session in the registry
+        self.register_session(&session.to_session_state());
+
         session
+    }
+
+    /// Continue a session from a saved state (for recovery)
+    ///
+    /// Restores a session using the GUID and serial number from a previous checkpoint.
+    /// The session is bound to the current thread for epoch protection.
+    ///
+    /// # Note
+    ///
+    /// The restored session should be used from the same thread that calls this method.
+    pub fn continue_session(self: &Arc<Self>, state: SessionState) -> Session<K, V, D> {
+        // Increment session counter for tracking purposes
+        let _session_id = self.next_session_id.fetch_add(1, Ordering::AcqRel);
+        // Use the thread-local ID for epoch protection
+        let thread_id = get_thread_id();
+        let mut session = Session::from_state(self.clone(), thread_id, &state);
+        session.start();
+
+        // Register restored session
+        self.register_session(&session.to_session_state());
+
+        session
+    }
+
+    /// Register a session state in the registry
+    ///
+    /// Called when a session starts or updates its state.
+    pub fn register_session(&self, state: &SessionState) {
+        if let Ok(mut registry) = self.session_registry.write() {
+            registry.insert(state.guid, state.clone());
+        }
+    }
+
+    /// Update a session's state in the registry
+    ///
+    /// Should be called periodically by sessions to keep checkpoint state current.
+    pub fn update_session(&self, state: &SessionState) {
+        if let Ok(mut registry) = self.session_registry.write() {
+            if let Some(entry) = registry.get_mut(&state.guid) {
+                entry.serial_num = state.serial_num;
+            }
+        }
+    }
+
+    /// Unregister a session from the registry
+    ///
+    /// Called when a session ends.
+    pub fn unregister_session(&self, guid: Uuid) {
+        if let Ok(mut registry) = self.session_registry.write() {
+            registry.remove(&guid);
+        }
+    }
+
+    /// Get all active session states (for checkpointing)
+    ///
+    /// Returns a snapshot of all registered session states.
+    pub fn get_session_states(&self) -> Vec<SessionState> {
+        if let Ok(registry) = self.session_registry.read() {
+            registry.values().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get the number of active sessions
+    pub fn active_session_count(&self) -> usize {
+        if let Ok(registry) = self.session_registry.read() {
+            registry.len()
+        } else {
+            0
+        }
+    }
+
+    /// Get a specific session state by GUID
+    pub fn get_session_state(&self, guid: Uuid) -> Option<SessionState> {
+        if let Ok(registry) = self.session_registry.read() {
+            registry.get(&guid).cloned()
+        } else {
+            None
+        }
     }
 
     /// Synchronous read operation
     pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
         let hash = KeyHash::new(key.get_hash());
-        
+
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
-        
+
         if !result.found() {
             return Ok(None);
         }
-        
+
         let mut address = result.entry.address();
-        
+
         // Traverse the chain to find the key
         while address.is_valid() {
             // SAFETY: These are read-only accesses to log metadata
             let read_only_address = unsafe { self.hlog().get_read_only_address() };
-            
+
             if address < unsafe { self.hlog().get_head_address() } {
                 // Record is on disk - need async I/O
                 return Err(Status::Pending);
             }
-            
+
             // Get record from log
             // SAFETY: Address is valid and within memory range
             let record_ptr = unsafe { self.hlog().get(address) };
-            
+
             if let Some(ptr) = record_ptr {
                 let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
-                
+
                 // Check if this is our key
                 let record_key = unsafe { record.key() };
                 if record_key == key {
@@ -325,68 +444,69 @@ where
                     if record.header.is_tombstone() {
                         return Ok(None);
                     }
-                    
+
                     // Return value
                     let value = unsafe { record.value() };
                     return Ok(Some(value.clone()));
                 }
-                
+
                 // Follow chain
                 address = record.header.previous_address();
             } else {
                 break;
             }
         }
-        
+
         Ok(None)
     }
 
     /// Synchronous upsert operation
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
         let hash = KeyHash::new(key.get_hash());
-        
+
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
-        
+
         if result.atomic_entry.is_none() {
             return Status::OutOfMemory;
         }
-        
+
         let atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
-        
+
         // Calculate record size
         let record_size = Record::<K, V>::size();
-        
+
         // Allocate space in the log
         // SAFETY: Allocation is protected by epoch and internal synchronization
         let address = match unsafe { self.hlog_mut().allocate(record_size as u32) } {
             Ok(addr) => addr,
             Err(status) => return status,
         };
-        
+
         // Get pointer to the allocated space
         // SAFETY: We just allocated this space, and access is protected by epoch
         let record_ptr = unsafe { self.hlog_mut().get_mut(address) };
-        
+
         if let Some(ptr) = record_ptr {
             // Initialize the record
             unsafe {
                 let record = ptr.as_ptr() as *mut Record<K, V>;
-                
+
                 // Initialize header
                 let header = RecordInfo::new(old_address, ctx.version as u16, false, false, false);
                 ptr::write(&mut (*record).header, header);
-                
+
                 // Write key
                 let key_ptr = (ptr.as_ptr() as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
                 ptr::write(key_ptr, key);
-                
+
                 // Write value
-                let value_ptr = (ptr.as_ptr() as *mut u8).add(Record::<K, V>::value_offset()) as *mut V;
+                let value_ptr =
+                    (ptr.as_ptr() as *mut u8).add(Record::<K, V>::value_offset()) as *mut V;
                 ptr::write(value_ptr, value);
             }
-            
+
             // Update hash index
             let status = self.hash_index.try_update_entry(
                 atomic_entry,
@@ -395,12 +515,12 @@ where
                 hash.tag(),
                 false,
             );
-            
+
             if status != Status::Ok {
                 // CAS failed - another thread updated, need to retry
                 // For now, just return success since the record is in the log
             }
-            
+
             Status::Ok
         } else {
             Status::OutOfMemory
@@ -410,44 +530,44 @@ where
     /// Synchronous delete operation
     pub(crate) fn delete_sync(&self, ctx: &mut ThreadContext, key: &K) -> Status {
         let hash = KeyHash::new(key.get_hash());
-        
+
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
-        
+
         if !result.found() {
             return Status::NotFound;
         }
-        
+
         let atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
-        
+
         // Calculate record size (tombstone record)
         let record_size = Record::<K, V>::size();
-        
+
         // Allocate space in the log
         // SAFETY: Allocation is protected by epoch and internal synchronization
         let address = match unsafe { self.hlog_mut().allocate(record_size as u32) } {
             Ok(addr) => addr,
             Err(status) => return status,
         };
-        
+
         // Get pointer to the allocated space
         // SAFETY: We just allocated this space, and access is protected by epoch
         let record_ptr = unsafe { self.hlog_mut().get_mut(address) };
-        
+
         if let Some(ptr) = record_ptr {
             unsafe {
                 let record = ptr.as_ptr() as *mut Record<K, V>;
-                
+
                 // Initialize header with tombstone flag
                 let header = RecordInfo::new(old_address, ctx.version as u16, false, true, false);
                 ptr::write(&mut (*record).header, header);
-                
+
                 // Write key
                 let key_ptr = (ptr.as_ptr() as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
                 ptr::write(key_ptr, key.clone());
             }
-            
+
             // Update hash index
             let _ = self.hash_index.try_update_entry(
                 atomic_entry,
@@ -456,7 +576,7 @@ where
                 hash.tag(),
                 false,
             );
-            
+
             Status::Ok
         } else {
             Status::OutOfMemory
@@ -469,29 +589,29 @@ where
         F: FnMut(&mut V) -> bool,
     {
         let hash = KeyHash::new(key.get_hash());
-        
+
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
-        
+
         if result.atomic_entry.is_none() {
             return Status::OutOfMemory;
         }
-        
+
         let atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
-        
+
         // Try to find existing record for in-place update
         // SAFETY: Read-only access to log metadata
         if old_address.is_valid() && old_address >= unsafe { self.hlog().get_read_only_address() } {
             // Record is in mutable region - can try in-place update
             // SAFETY: Address is in mutable region, access is protected by epoch
             let record_ptr = unsafe { self.hlog_mut().get_mut(old_address) };
-            
+
             if let Some(ptr) = record_ptr {
                 unsafe {
                     let record = ptr.as_ptr() as *mut Record<K, V>;
                     let record_key = (*record).key();
-                    
+
                     if record_key == &key && !(*record).header.is_tombstone() {
                         // Try in-place update
                         let value = (*record).value_mut();
@@ -503,7 +623,7 @@ where
                 }
             }
         }
-        
+
         // Need to create new record
         // First, read old value if exists
         let old_value: Option<V> = if old_address.is_valid() {
@@ -514,7 +634,7 @@ where
         } else {
             None
         };
-        
+
         // Create new value
         let new_value = if let Some(mut v) = old_value {
             // Check modifier return value - if false, operation is aborted
@@ -526,7 +646,7 @@ where
             // Use default value
             return Status::NotFound;
         };
-        
+
         // Upsert the new value
         self.upsert_sync(ctx, key, new_value)
     }
@@ -536,10 +656,10 @@ where
         // Update head address
         // SAFETY: shift_head_address is protected by epoch
         unsafe { self.hlog_mut().shift_head_address(until_address) };
-        
+
         // Garbage collect hash index
         self.hash_index.garbage_collect(until_address);
-        
+
         Status::Ok
     }
 
@@ -580,19 +700,23 @@ where
         }
 
         let start_time = Instant::now();
-        
+
         // SAFETY: These are read-only accesses
         let begin_address = unsafe { self.hlog().get_begin_address() };
         let head_address = unsafe { self.hlog().get_head_address() };
 
         // Calculate scan range
-        let scan_range = match self.compactor.calculate_scan_range(begin_address, head_address, target_address) {
-            Some(range) => range,
-            None => {
-                self.compactor.complete();
-                return CompactionResult::success(begin_address, CompactionStats::default());
-            }
-        };
+        let scan_range =
+            match self
+                .compactor
+                .calculate_scan_range(begin_address, head_address, target_address)
+            {
+                Some(range) => range,
+                None => {
+                    self.compactor.complete();
+                    return CompactionResult::success(begin_address, CompactionStats::default());
+                }
+            };
 
         // Create compaction context
         let _context = self.compactor.create_context(scan_range.clone());
@@ -610,11 +734,11 @@ where
         while current_address < scan_range.end {
             // SAFETY: Address is within the valid range
             let record_ptr = unsafe { self.hlog().get(current_address) };
-            
+
             if let Some(ptr) = record_ptr {
                 let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
                 let record_size = Record::<K, V>::size() as u64;
-                
+
                 stats.records_scanned += 1;
                 stats.bytes_scanned += record_size;
 
@@ -632,9 +756,13 @@ where
 
                 if index_result.found() {
                     let index_address = index_result.entry.address();
-                    
+
                     // Check if record should be compacted (moved to tail)
-                    if self.compactor.should_compact_record(current_address, index_address, is_tombstone) {
+                    if self.compactor.should_compact_record(
+                        current_address,
+                        index_address,
+                        is_tombstone,
+                    ) {
                         // This record is still live - MUST copy to tail before reclaiming
                         if !is_tombstone {
                             // Copy live record to the tail of the log
@@ -647,7 +775,7 @@ where
                                         current_address,
                                         new_addr,
                                     );
-                                    
+
                                     if update_result == Status::Ok {
                                         // Index successfully updated to point to new location
                                         stats.records_compacted += 1;
@@ -657,7 +785,7 @@ where
                                         // CRITICAL: We copied the record but couldn't update the index.
                                         // The index might still point to the old address, OR another
                                         // thread might have updated it to point elsewhere.
-                                        // 
+                                        //
                                         // For safety, we must preserve the original record because:
                                         // - If index still points to old address, reclaiming would corrupt data
                                         // - The new copy at new_addr becomes a "garbage" record that will
@@ -675,7 +803,7 @@ where
                                 Err(_) => {
                                     // Failed to copy - cannot reclaim this record
                                     // CRITICAL: Adjust new_begin_address to preserve this record
-                                    // 
+                                    //
                                     // We only need to record the FIRST failure's address because:
                                     // 1. Records are scanned in ascending address order
                                     // 2. shift_begin_address(X) only reclaims addresses < X
@@ -722,12 +850,12 @@ where
         // Now safe to shift begin address - all live records before new_begin_address
         // have either been copied or the address has been adjusted to preserve them
         unsafe { self.hlog_mut().shift_begin_address(new_begin_address) };
-        
+
         // Garbage collect index entries pointing to reclaimed region
         self.hash_index.garbage_collect(new_begin_address);
 
         stats.duration_ms = start_time.elapsed().as_millis() as u64;
-        
+
         self.compactor.complete();
         CompactionResult::success(new_begin_address, stats)
     }
@@ -743,39 +871,40 @@ where
     /// The new address of the copied record, or an error
     fn copy_record_to_tail(&self, key: &K, value: &V, _hash: KeyHash) -> Result<Address, Status> {
         let record_size = Record::<K, V>::size();
-        
+
         // Allocate space at tail
         // SAFETY: Allocation is protected by epoch
-        let new_address = unsafe {
-            self.hlog_mut().allocate(record_size as u32)?
-        };
-        
+        let new_address = unsafe { self.hlog_mut().allocate(record_size as u32)? };
+
         if new_address == Address::INVALID {
             return Err(Status::OutOfMemory);
         }
-        
+
         // Get pointer to new location
         // SAFETY: Address was just allocated and is valid
         let new_ptr = unsafe { self.hlog().get(new_address) };
-        
+
         if let Some(ptr) = new_ptr {
             // Initialize the new record
             let new_record: &mut Record<K, V> = unsafe { &mut *(ptr.as_ptr() as *mut _) };
-            
+
             // Copy key and value using ptr::write to avoid dropping uninitialized memory
             unsafe {
                 ptr::write(new_record.key_mut(), key.clone());
                 ptr::write(new_record.value_mut(), value.clone());
             }
-            
+
             // Initialize header (not a tombstone, valid record)
             new_record.header = RecordInfo::default();
-            
+
             // Record stats
             if self.stats_collector.is_enabled() {
-                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+                self.stats_collector
+                    .store_stats
+                    .hybrid_log
+                    .record_allocation(record_size as u64);
             }
-            
+
             Ok(new_address)
         } else {
             Err(Status::Corruption)
@@ -797,13 +926,13 @@ where
     }
 
     /// Estimated liveness ratio for on-disk records.
-    /// 
+    ///
     /// This is a heuristic that assumes approximately 70% of on-disk records
     /// are still live (not superseded by newer versions). In practice, this
     /// depends on workload characteristics:
     /// - Update-heavy workloads may have lower liveness (more dead records)
     /// - Insert-heavy workloads may have higher liveness (fewer updates)
-    /// 
+    ///
     /// This value is used in `log_utilization()` to estimate space efficiency.
     const ESTIMATED_ON_DISK_LIVENESS: f64 = 0.7;
 
@@ -815,7 +944,7 @@ where
     ///
     /// # Returns
     /// Utilization ratio between 0.0 and 1.0
-    /// 
+    ///
     /// # Note
     /// This is an estimate. For accurate utilization, perform a full log scan
     /// using the compaction infrastructure.
@@ -825,8 +954,12 @@ where
         let tail_address = unsafe { self.hlog().get_tail_address() };
         let head_address = unsafe { self.hlog().get_head_address() };
 
-        let total_size = tail_address.control().saturating_sub(begin_address.control());
-        let on_disk_size = head_address.control().saturating_sub(begin_address.control());
+        let total_size = tail_address
+            .control()
+            .saturating_sub(begin_address.control());
+        let on_disk_size = head_address
+            .control()
+            .saturating_sub(begin_address.control());
 
         if total_size == 0 {
             return 1.0;
@@ -835,7 +968,8 @@ where
         // In-memory records are assumed 100% live (mutable region)
         // On-disk records use the estimated liveness ratio
         let in_memory_size = total_size.saturating_sub(on_disk_size);
-        (in_memory_size as f64 + on_disk_size as f64 * Self::ESTIMATED_ON_DISK_LIVENESS) / total_size as f64
+        (in_memory_size as f64 + on_disk_size as f64 * Self::ESTIMATED_ON_DISK_LIVENESS)
+            / total_size as f64
     }
 
     /// Check if compaction is recommended based on configuration
@@ -870,7 +1004,7 @@ where
         }
 
         let current_size = self.index_size();
-        
+
         // Validate new size
         if new_size <= current_size {
             return Err(Status::InvalidArgument);
@@ -881,7 +1015,7 @@ where
 
         // Calculate number of chunks for growth
         let num_chunks = crate::index::calculate_num_chunks(current_size);
-        
+
         // Create grow state and initialize
         let mut state = GrowState::new();
         state.initialize(0, num_chunks);
@@ -900,7 +1034,7 @@ where
     pub fn complete_grow(&self) -> GrowResult {
         // SAFETY: Access to grow_state
         let state = unsafe { (*self.grow_state.get()).take() };
-        
+
         match state {
             Some(grow_state) => grow_state.complete(),
             None => GrowResult::failure(Status::InvalidOperation),
@@ -911,9 +1045,9 @@ where
     pub fn grow_progress(&self) -> Option<(u64, u64)> {
         // SAFETY: Read-only access
         unsafe {
-            (*self.grow_state.get()).as_ref().map(|s| {
-                (s.progress().0, s.progress().1)
-            })
+            (*self.grow_state.get())
+                .as_ref()
+                .map(|s| (s.progress().0, s.progress().1))
         }
     }
 
@@ -952,7 +1086,12 @@ where
     }
 
     /// Try to insert into read cache
-    fn try_insert_into_cache(&self, key: &K, value: &V, previous_address: Address) -> Option<Address> {
+    fn try_insert_into_cache(
+        &self,
+        key: &K,
+        value: &V,
+        previous_address: Address,
+    ) -> Option<Address> {
         if let Some(ref rc) = self.read_cache {
             rc.try_insert(key, value, previous_address, false).ok()
         } else {
@@ -971,9 +1110,21 @@ where
 
     // ============ Checkpoint and Recovery Methods ============
 
-    /// Create a checkpoint of the store
+    /// Create a checkpoint of the store using the CPR (Concurrent Prefix Recovery) protocol
     ///
     /// This saves both the hash index and hybrid log state to disk.
+    /// The checkpoint uses the CPR state machine to ensure consistent
+    /// concurrent access during checkpointing.
+    ///
+    /// # CPR Protocol Phases
+    /// 1. PrepIndexChkpt - Prepare index checkpoint, synchronize threads
+    /// 2. IndexChkpt - Write index to disk
+    /// 3. Prepare - Prepare HybridLog checkpoint
+    /// 4. InProgress - Increment version, mark checkpoint in progress
+    /// 5. WaitPending - Wait for pending operations
+    /// 6. WaitFlush - Wait for log flush
+    /// 7. PersistenceCallback - Invoke persistence callback
+    /// 8. Rest - Return to rest state
     ///
     /// # Arguments
     /// * `checkpoint_dir` - Base directory for checkpoints
@@ -981,33 +1132,225 @@ where
     /// # Returns
     /// The checkpoint token on success, or an error
     pub fn checkpoint(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
-        // Generate a new checkpoint token
-        let token = uuid::Uuid::new_v4();
-        
-        // Create checkpoint directory
-        let cp_dir = create_checkpoint_directory(checkpoint_dir, token)?;
-        
-        // Get current version
-        let state = self.system_state.load(Ordering::Acquire);
-        let version = state.version;
-        
-        // Checkpoint the hash index
-        let _index_metadata = self.hash_index.checkpoint(&cp_dir, token)?;
-        
-        // Checkpoint the hybrid log
-        // SAFETY: checkpoint() is protected by the epoch system
-        let _log_metadata = unsafe {
-            (*self.hlog.get()).checkpoint(&cp_dir, token, version)?
-        };
-        
-        // Bump version and return to rest state
-        let new_state = SystemState::rest(version + 1);
-        self.system_state.store(new_state, Ordering::Release);
-        
-        Ok(token)
+        self.checkpoint_with_action(checkpoint_dir, Action::CheckpointFull)
     }
 
-    /// Create a checkpoint with a specific type
+    /// Create an index-only checkpoint
+    pub fn checkpoint_index(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
+        self.checkpoint_with_action(checkpoint_dir, Action::CheckpointIndex)
+    }
+
+    /// Create a hybrid log-only checkpoint
+    pub fn checkpoint_hybrid_log(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
+        self.checkpoint_with_action(checkpoint_dir, Action::CheckpointHybridLog)
+    }
+
+    /// Create a checkpoint with a specific action
+    fn checkpoint_with_action(
+        &self,
+        checkpoint_dir: &Path,
+        action: Action,
+    ) -> io::Result<CheckpointToken> {
+        let token = Uuid::new_v4();
+        self.checkpoint_with_action_internal(checkpoint_dir, action, token)
+    }
+
+    fn checkpoint_with_action_internal(
+        &self,
+        checkpoint_dir: &Path,
+        action: Action,
+        token: CheckpointToken,
+    ) -> io::Result<CheckpointToken> {
+        // Try to start the checkpoint action
+        let start_result = self.system_state.try_start_action(action);
+        let start_state = match start_result {
+            Ok(prev) => prev,
+            Err(current_state) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "Cannot start checkpoint: action {:?} phase {:?} already in progress",
+                        current_state.action, current_state.phase
+                    ),
+                ));
+            }
+        };
+        let start_version = start_state.version;
+
+        // Create checkpoint directory
+        let result = create_checkpoint_directory(checkpoint_dir, token)
+            .and_then(|cp_dir| self.execute_checkpoint_state_machine(&cp_dir, token, action));
+
+        // 失败时必须回滚到 checkpoint 开始前的版本，避免 CPR 版本被错误递增。
+        if result.is_err() {
+            self.system_state
+                .store(SystemState::rest(start_version), Ordering::Release);
+        }
+
+        result.map(|_| token)
+    }
+
+    /// Execute the checkpoint state machine
+    fn execute_checkpoint_state_machine(
+        &self,
+        cp_dir: &Path,
+        token: CheckpointToken,
+        action: Action,
+    ) -> io::Result<()> {
+        let mut index_metadata: Option<IndexMetadata> = None;
+        let mut log_metadata: Option<LogMetadata> = None;
+
+        loop {
+            let current_state = self.system_state.load(Ordering::Acquire);
+
+            // Handle current phase
+            match current_state.phase {
+                Phase::PrepIndexChkpt => {
+                    // Phase 1: Prepare index checkpoint
+                    // In a full implementation, this would synchronize all threads
+                    // For now, we just advance to the next phase
+                    self.handle_prep_index_checkpoint()?;
+                }
+
+                Phase::IndexChkpt => {
+                    // Phase 2: Write index to disk
+                    index_metadata = Some(self.handle_index_checkpoint(cp_dir, token)?);
+                }
+
+                Phase::Prepare => {
+                    // Phase 3: Prepare hybrid log checkpoint
+                    self.handle_prepare_checkpoint()?;
+                }
+
+                Phase::InProgress => {
+                    // Phase 4: Checkpoint in progress
+                    // Version is already incremented by state machine
+                    log_metadata = Some(self.handle_in_progress_checkpoint(
+                        cp_dir,
+                        token,
+                        current_state.version,
+                    )?);
+                }
+
+                Phase::WaitPending => {
+                    // Phase 5: Wait for pending operations
+                    self.handle_wait_pending()?;
+                }
+
+                Phase::WaitFlush => {
+                    // Phase 6: Wait for flush to complete
+                    self.handle_wait_flush()?;
+                }
+
+                Phase::PersistenceCallback => {
+                    // Phase 7: Invoke persistence callback
+                    self.handle_persistence_callback(
+                        cp_dir,
+                        token,
+                        index_metadata.as_ref(),
+                        log_metadata.as_ref(),
+                    )?;
+                }
+
+                Phase::Rest => {
+                    // Phase 8: Back to rest state - checkpoint complete
+                    return Ok(());
+                }
+
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Unexpected phase {:?} during checkpoint",
+                            current_state.phase
+                        ),
+                    ));
+                }
+            }
+
+            // Advance to the next phase
+            if let Err(err_state) = self.system_state.try_advance() {
+                // If we can't advance and we're in rest state, we're done
+                if err_state.phase == Phase::Rest {
+                    return Ok(());
+                }
+                // Otherwise, retry (another thread may have advanced)
+            }
+        }
+    }
+
+    /// Handle PREP_INDEX_CHKPT phase
+    fn handle_prep_index_checkpoint(&self) -> io::Result<()> {
+        // In a multi-threaded implementation, this would:
+        // 1. Signal all threads that index checkpoint is starting
+        // 2. Wait for threads to reach a safe point
+        // For now, we assume single-threaded checkpoint
+        Ok(())
+    }
+
+    /// Handle INDEX_CHKPT phase
+    fn handle_index_checkpoint(
+        &self,
+        cp_dir: &Path,
+        token: CheckpointToken,
+    ) -> io::Result<IndexMetadata> {
+        self.hash_index.checkpoint(cp_dir, token)
+    }
+
+    /// Handle PREPARE phase
+    fn handle_prepare_checkpoint(&self) -> io::Result<()> {
+        // Prepare for hybrid log checkpoint
+        // Get flushed addresses, etc.
+        Ok(())
+    }
+
+    /// Handle IN_PROGRESS phase - checkpoint the hybrid log
+    fn handle_in_progress_checkpoint(
+        &self,
+        cp_dir: &Path,
+        token: CheckpointToken,
+        version: u32,
+    ) -> io::Result<LogMetadata> {
+        // Collect session states for persistence
+        let session_states = self.get_session_states();
+
+        // SAFETY: checkpoint() is protected by the epoch system
+        unsafe {
+            (*self.hlog.get()).checkpoint_with_sessions(cp_dir, token, version, session_states)
+        }
+    }
+
+    /// Handle WAIT_PENDING phase
+    fn handle_wait_pending(&self) -> io::Result<()> {
+        // Wait for all pending operations to complete
+        // In async implementation, this would drain pending I/Os
+        Ok(())
+    }
+
+    /// Handle WAIT_FLUSH phase
+    fn handle_wait_flush(&self) -> io::Result<()> {
+        // Wait for log flush to complete
+        // SAFETY: Flush is protected by epoch
+        unsafe {
+            (*self.hlog.get()).flush_to_disk()?;
+        }
+        Ok(())
+    }
+
+    /// Handle PERSISTENCE_CALLBACK phase
+    fn handle_persistence_callback(
+        &self,
+        _cp_dir: &Path,
+        _token: CheckpointToken,
+        _index_metadata: Option<&IndexMetadata>,
+        _log_metadata: Option<&LogMetadata>,
+    ) -> io::Result<()> {
+        // Invoke user persistence callback if registered
+        // For now, this is a no-op
+        Ok(())
+    }
+
+    /// Create a checkpoint with a specific type (deprecated, use checkpoint_index or checkpoint_hybrid_log)
     ///
     /// # Arguments
     /// * `checkpoint_dir` - Base directory for checkpoints
@@ -1018,10 +1361,17 @@ where
     pub fn checkpoint_with_type(
         &self,
         checkpoint_dir: &Path,
-        _checkpoint_type: CheckpointType,
+        checkpoint_type: CheckpointType,
     ) -> io::Result<CheckpointToken> {
-        // For now, all checkpoints are the same type
-        self.checkpoint(checkpoint_dir)
+        let action = match checkpoint_type {
+            // FoldOver and Snapshot are both full checkpoints, just with different snapshot modes
+            CheckpointType::Full | CheckpointType::Snapshot | CheckpointType::FoldOver => {
+                Action::CheckpointFull
+            }
+            CheckpointType::IndexOnly => Action::CheckpointIndex,
+            CheckpointType::HybridLogOnly => Action::CheckpointHybridLog,
+        };
+        self.checkpoint_with_action(checkpoint_dir, action)
     }
 
     /// Get information about an existing checkpoint
@@ -1037,10 +1387,10 @@ where
         token: CheckpointToken,
     ) -> io::Result<(IndexMetadata, LogMetadata)> {
         let cp_dir = checkpoint_dir.join(token.to_string());
-        
+
         let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
         let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
-        
+
         Ok((index_meta, log_meta))
     }
 
@@ -1060,7 +1410,13 @@ where
         config: FasterKvConfig,
         device: D,
     ) -> io::Result<Self> {
-        Self::recover_with_compaction_config(checkpoint_dir, token, config, device, CompactionConfig::default())
+        Self::recover_with_compaction_config(
+            checkpoint_dir,
+            token,
+            config,
+            device,
+            CompactionConfig::default(),
+        )
     }
 
     /// Recover a store from a checkpoint with custom compaction configuration
@@ -1081,7 +1437,14 @@ where
         device: D,
         compaction_config: CompactionConfig,
     ) -> io::Result<Self> {
-        Self::recover_with_full_config(checkpoint_dir, token, config, device, compaction_config, None)
+        Self::recover_with_full_config(
+            checkpoint_dir,
+            token,
+            config,
+            device,
+            compaction_config,
+            None,
+        )
     }
 
     /// Recover a store from a checkpoint with read cache
@@ -1092,10 +1455,20 @@ where
         device: D,
         cache_config: ReadCacheConfig,
     ) -> io::Result<Self> {
-        Self::recover_with_full_config(checkpoint_dir, token, config, device, CompactionConfig::default(), Some(cache_config))
+        Self::recover_with_full_config(
+            checkpoint_dir,
+            token,
+            config,
+            device,
+            CompactionConfig::default(),
+            Some(cache_config),
+        )
     }
 
     /// Recover a store from a checkpoint with full configuration
+    ///
+    /// Uses RecoveryState to track recovery progress and restores session states
+    /// for continuation with Concurrent Prefix Recovery (CPR).
     pub fn recover_with_full_config(
         checkpoint_dir: &Path,
         token: CheckpointToken,
@@ -1106,32 +1479,56 @@ where
     ) -> io::Result<Self> {
         let device = Arc::new(device);
         let cp_dir = checkpoint_dir.join(token.to_string());
-        
+
+        // Initialize recovery state tracker
+        let mut recovery_state = RecoveryState::new();
+        let status = recovery_state.start_recovery(checkpoint_dir, token);
+        if status != crate::Status::Ok {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                recovery_state
+                    .error_message()
+                    .unwrap_or("Unknown recovery error"),
+            ));
+        }
+
         // Initialize epoch
         let epoch = Arc::new(LightEpoch::new());
-        
-        // Load checkpoint metadata
+
+        // Load checkpoint metadata (recovery_state already validated these exist)
         let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
         let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
-        
-        // Recover hash index
+
+        // Phase 2: Recover hash index
         let mut hash_index = MemHashIndex::new();
         hash_index.recover(&cp_dir, Some(&index_meta))?;
-        
-        // Initialize hybrid log with recovered state
+        recovery_state.index_recovered();
+
+        // Phase 3: Recover hybrid log
         let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
         hlog.recover(&cp_dir, Some(&log_meta))?;
-        
+        recovery_state.log_recovered();
+
         // Set system state to recovered version (rest state)
         let system_state = AtomicSystemState::new(SystemState::rest(log_meta.version));
-        
+
         // Initialize compactor
         let compactor = Compactor::with_config(compaction_config);
-        
+
         // Initialize read cache if configured
         let read_cache = cache_config.map(ReadCache::new);
-        
+
+        // Phase 4: Build session registry from recovered session states
+        let mut session_registry = HashMap::new();
+        for session_state in &log_meta.session_states {
+            session_registry.insert(session_state.guid, session_state.clone());
+        }
+        // Set next session ID based on number of recovered sessions
+        let next_session_id = log_meta.num_threads;
+
+        recovery_state.complete_recovery();
+
         Ok(Self {
             epoch,
             system_state,
@@ -1139,51 +1536,112 @@ where
             hlog: UnsafeCell::new(hlog),
             read_cache,
             device,
-            next_session_id: AtomicU32::new(0),
+            next_session_id: AtomicU32::new(next_session_id),
             compactor,
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
+            session_registry: RwLock::new(session_registry),
             _marker: PhantomData,
         })
     }
 
-    /// Check if a checkpoint exists
+    /// Get recovered session states from a checkpoint
+    ///
+    /// This can be used to restore sessions after recovery.
+    /// Call `continue_session()` with each state to restore sessions.
+    pub fn get_recovered_sessions(&self) -> Vec<SessionState> {
+        self.get_session_states()
+    }
+
+    /// Check if a full checkpoint exists (both index and log)
     ///
     /// # Arguments
     /// * `checkpoint_dir` - Base directory for checkpoints
     /// * `token` - Checkpoint token to check
     ///
     /// # Returns
-    /// true if the checkpoint exists and is valid
+    /// true if a complete checkpoint (both index.meta and log.meta) exists
     pub fn checkpoint_exists(checkpoint_dir: &Path, token: CheckpointToken) -> bool {
-        let cp_dir = checkpoint_dir.join(token.to_string());
-        cp_dir.join("index.meta").exists() && cp_dir.join("log.meta").exists()
+        Self::get_checkpoint_kind(checkpoint_dir, token) == CheckpointKind::Full
     }
 
-    /// List all checkpoint tokens in a directory
+    /// Get the kind of checkpoint that exists
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to check
+    ///
+    /// # Returns
+    /// The kind of checkpoint (Full, IndexOnly, LogOnly, or None)
+    pub fn get_checkpoint_kind(checkpoint_dir: &Path, token: CheckpointToken) -> CheckpointKind {
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        let has_index = cp_dir.join("index.meta").exists();
+        let has_log = cp_dir.join("log.meta").exists();
+
+        match (has_index, has_log) {
+            (true, true) => CheckpointKind::Full,
+            (true, false) => CheckpointKind::IndexOnly,
+            (false, true) => CheckpointKind::LogOnly,
+            (false, false) => CheckpointKind::None,
+        }
+    }
+
+    /// Check if any checkpoint (full or partial) exists
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to check
+    ///
+    /// # Returns
+    /// true if any checkpoint files exist
+    pub fn any_checkpoint_exists(checkpoint_dir: &Path, token: CheckpointToken) -> bool {
+        Self::get_checkpoint_kind(checkpoint_dir, token) != CheckpointKind::None
+    }
+
+    /// List all checkpoint tokens in a directory (full checkpoints only)
     ///
     /// # Arguments
     /// * `checkpoint_dir` - Base directory for checkpoints
     ///
     /// # Returns
-    /// List of valid checkpoint tokens
+    /// List of valid full checkpoint tokens
     pub fn list_checkpoints(checkpoint_dir: &Path) -> io::Result<Vec<CheckpointToken>> {
+        Self::list_checkpoints_by_kind(checkpoint_dir, Some(CheckpointKind::Full))
+    }
+
+    /// List all checkpoint tokens of a specific kind
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `kind` - If Some, only list checkpoints of this kind; if None, list all
+    ///
+    /// # Returns
+    /// List of checkpoint tokens matching the criteria
+    pub fn list_checkpoints_by_kind(
+        checkpoint_dir: &Path,
+        kind: Option<CheckpointKind>,
+    ) -> io::Result<Vec<CheckpointToken>> {
         let mut tokens = Vec::new();
-        
+
         if !checkpoint_dir.exists() {
             return Ok(tokens);
         }
-        
+
         for entry in std::fs::read_dir(checkpoint_dir)? {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_dir() {
                 if let Some(name) = path.file_name() {
                     if let Some(name_str) = name.to_str() {
                         if let Ok(token) = uuid::Uuid::parse_str(name_str) {
-                            // Verify this is a valid checkpoint
-                            if Self::checkpoint_exists(checkpoint_dir, token) {
+                            let cp_kind = Self::get_checkpoint_kind(checkpoint_dir, token);
+                            // Include if kind matches or if no filter specified (and not None)
+                            let include = match kind {
+                                Some(k) => cp_kind == k,
+                                None => cp_kind != CheckpointKind::None,
+                            };
+                            if include {
                                 tokens.push(token);
                             }
                         }
@@ -1191,9 +1649,164 @@ where
                 }
             }
         }
-        
+
         Ok(tokens)
     }
+
+    /// Recover only the hash index from a checkpoint
+    ///
+    /// This is useful for index-only checkpoints or when you want to
+    /// recover the index separately from the log.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to recover from
+    /// * `config` - Store configuration
+    /// * `device` - Storage device
+    ///
+    /// # Returns
+    /// A new FasterKv instance with recovered index (log starts empty)
+    pub fn recover_index_only(
+        checkpoint_dir: &Path,
+        token: CheckpointToken,
+        config: FasterKvConfig,
+        device: D,
+    ) -> io::Result<Self> {
+        let device = Arc::new(device);
+        let cp_dir = checkpoint_dir.join(token.to_string());
+
+        // Check that index checkpoint exists
+        let kind = Self::get_checkpoint_kind(checkpoint_dir, token);
+        if kind != CheckpointKind::Full && kind != CheckpointKind::IndexOnly {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Index checkpoint not found",
+            ));
+        }
+
+        // Initialize epoch
+        let epoch = Arc::new(LightEpoch::new());
+
+        // Load index metadata
+        let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
+
+        // Recover hash index
+        let mut hash_index = MemHashIndex::new();
+        hash_index.recover(&cp_dir, Some(&index_meta))?;
+
+        // Initialize fresh hybrid log (no recovery)
+        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
+
+        // Set system state to recovered version
+        let system_state = AtomicSystemState::new(SystemState::rest(index_meta.version));
+
+        // Initialize compactor
+        let compactor = Compactor::with_config(CompactionConfig::default());
+
+        Ok(Self {
+            epoch,
+            system_state,
+            hash_index,
+            hlog: UnsafeCell::new(hlog),
+            read_cache: None,
+            device,
+            next_session_id: AtomicU32::new(0),
+            compactor,
+            grow_state: UnsafeCell::new(None),
+            stats_collector: StatsCollector::with_defaults(),
+            session_registry: RwLock::new(HashMap::new()),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Recover only the hybrid log from a checkpoint
+    ///
+    /// This is useful for log-only checkpoints. Note that the hash index
+    /// will be empty/fresh, so lookups won't work until the index is rebuilt.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    /// * `token` - Checkpoint token to recover from
+    /// * `config` - Store configuration
+    /// * `device` - Storage device
+    ///
+    /// # Returns
+    /// A new FasterKv instance with recovered log (index is fresh/empty)
+    pub fn recover_log_only(
+        checkpoint_dir: &Path,
+        token: CheckpointToken,
+        config: FasterKvConfig,
+        device: D,
+    ) -> io::Result<Self> {
+        let device = Arc::new(device);
+        let cp_dir = checkpoint_dir.join(token.to_string());
+
+        // Check that log checkpoint exists
+        let kind = Self::get_checkpoint_kind(checkpoint_dir, token);
+        if kind != CheckpointKind::Full && kind != CheckpointKind::LogOnly {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Log checkpoint not found",
+            ));
+        }
+
+        // Initialize epoch
+        let epoch = Arc::new(LightEpoch::new());
+
+        // Initialize fresh hash index (no recovery)
+        let mut hash_index = MemHashIndex::new();
+        let index_config = MemHashIndexConfig::new(config.table_size);
+        hash_index.initialize(&index_config);
+
+        // Load log metadata
+        let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
+
+        // Recover hybrid log
+        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
+        hlog.recover(&cp_dir, Some(&log_meta))?;
+
+        // Set system state to recovered version
+        let system_state = AtomicSystemState::new(SystemState::rest(log_meta.version));
+
+        // Initialize compactor
+        let compactor = Compactor::with_config(CompactionConfig::default());
+
+        // Restore session states
+        let mut session_registry = HashMap::new();
+        for session_state in &log_meta.session_states {
+            session_registry.insert(session_state.guid, session_state.clone());
+        }
+
+        Ok(Self {
+            epoch,
+            system_state,
+            hash_index,
+            hlog: UnsafeCell::new(hlog),
+            read_cache: None,
+            device,
+            next_session_id: AtomicU32::new(log_meta.num_threads),
+            compactor,
+            grow_state: UnsafeCell::new(None),
+            stats_collector: StatsCollector::with_defaults(),
+            session_registry: RwLock::new(session_registry),
+            _marker: PhantomData,
+        })
+    }
+}
+
+/// Kind of checkpoint that exists
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointKind {
+    /// No checkpoint exists
+    None,
+    /// Full checkpoint (both index and log)
+    Full,
+    /// Index-only checkpoint
+    IndexOnly,
+    /// Log-only checkpoint
+    LogOnly,
 }
 
 #[cfg(test)]
@@ -1224,11 +1837,11 @@ mod tests {
     fn test_upsert_and_read() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Upsert
         let status = session.upsert(42u64, 100u64);
         assert_eq!(status, Status::Ok);
-        
+
         // Read
         let result = session.read(&42u64);
         assert!(result.is_ok());
@@ -1239,7 +1852,7 @@ mod tests {
     fn test_read_not_found() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         let result = session.read(&999u64);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
@@ -1249,18 +1862,18 @@ mod tests {
     fn test_delete() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert
         session.upsert(42u64, 100u64);
-        
+
         // Verify it exists
         let result = session.read(&42u64);
         assert_eq!(result.unwrap(), Some(100u64));
-        
+
         // Delete
         let status = session.delete(&42u64);
         assert_eq!(status, Status::Ok);
-        
+
         // Verify it's gone
         let result = session.read(&42u64);
         assert_eq!(result.unwrap(), None);
@@ -1270,35 +1883,45 @@ mod tests {
     fn test_multiple_operations() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert multiple keys
         for i in 1u64..101 {
             let status = session.upsert(i, i * 10);
             assert_eq!(status, Status::Ok);
         }
-        
+
         // Read them back
         for i in 1u64..101 {
             let result = session.read(&i);
             assert_eq!(result.unwrap(), Some(i * 10), "Failed to read key {}", i);
         }
-        
+
         // Update some
         for i in 1u64..51 {
             let status = session.upsert(i, i * 100);
             assert_eq!(status, Status::Ok);
         }
-        
+
         // Verify updates
         for i in 1u64..51 {
             let result = session.read(&i);
-            assert_eq!(result.unwrap(), Some(i * 100), "Failed to read updated key {}", i);
+            assert_eq!(
+                result.unwrap(),
+                Some(i * 100),
+                "Failed to read updated key {}",
+                i
+            );
         }
-        
+
         // Verify unchanged
         for i in 51u64..101 {
             let result = session.read(&i);
-            assert_eq!(result.unwrap(), Some(i * 10), "Key {} was unexpectedly changed", i);
+            assert_eq!(
+                result.unwrap(),
+                Some(i * 10),
+                "Key {} was unexpectedly changed",
+                i
+            );
         }
     }
 
@@ -1306,12 +1929,12 @@ mod tests {
     fn test_index_stats() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert some data
         for i in 0u64..10 {
             session.upsert(i, i);
         }
-        
+
         let stats = store.index_stats();
         assert!(stats.used_entries > 0);
     }
@@ -1320,12 +1943,12 @@ mod tests {
     fn test_log_stats() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert some data
         for i in 0u64..10 {
             session.upsert(i, i);
         }
-        
+
         let stats = store.log_stats();
         assert!(stats.tail_address > Address::new(0, 0));
     }
@@ -1400,8 +2023,7 @@ mod tests {
         let token2 = store.checkpoint(temp_dir.path()).unwrap();
         let token3 = store.checkpoint(temp_dir.path()).unwrap();
 
-        let tokens =
-            FasterKv::<u64, u64, NullDisk>::list_checkpoints(temp_dir.path()).unwrap();
+        let tokens = FasterKv::<u64, u64, NullDisk>::list_checkpoints(temp_dir.path()).unwrap();
 
         assert_eq!(tokens.len(), 3);
         assert!(tokens.contains(&token1));
@@ -1444,6 +2066,27 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_failure_rolls_back_version() {
+        let store = create_test_store();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let v0 = store.system_state().version;
+        let token = uuid::Uuid::new_v4();
+
+        // 预先制造一个会导致写入 log.snapshot 失败的路径：把它建成目录。
+        let cp_dir = temp_dir.path().join(token.to_string());
+        std::fs::create_dir_all(cp_dir.join("log.snapshot")).unwrap();
+
+        assert!(store
+            .checkpoint_with_action_internal(temp_dir.path(), Action::CheckpointFull, token)
+            .is_err());
+
+        let state = store.system_state();
+        assert_eq!(state.phase, Phase::Rest);
+        assert_eq!(state.version, v0);
+    }
+
+    #[test]
     fn test_checkpoint_not_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
         let fake_token = uuid::Uuid::new_v4();
@@ -1466,10 +2109,10 @@ mod tests {
         };
         let device = NullDisk::new();
         let cache_config = ReadCacheConfig::new(1 << 20); // 1 MB cache
-        
-        let store: Arc<FasterKv<u64, u64, NullDisk>> = 
+
+        let store: Arc<FasterKv<u64, u64, NullDisk>> =
             Arc::new(FasterKv::with_read_cache(config, device, cache_config));
-        
+
         assert!(store.has_read_cache());
         assert!(store.read_cache_stats().is_some());
     }
@@ -1491,10 +2134,10 @@ mod tests {
         };
         let device = NullDisk::new();
         let cache_config = ReadCacheConfig::new(1 << 20);
-        
-        let store: Arc<FasterKv<u64, u64, NullDisk>> = 
+
+        let store: Arc<FasterKv<u64, u64, NullDisk>> =
             Arc::new(FasterKv::with_read_cache(config, device, cache_config));
-        
+
         // Clear should not panic
         store.clear_read_cache();
         assert!(store.has_read_cache());
@@ -1506,7 +2149,7 @@ mod tests {
     fn test_compaction_config() {
         let store = create_test_store();
         let config = store.compaction_config();
-        
+
         assert!(config.target_utilization > 0.0);
         assert!(config.target_utilization <= 1.0);
     }
@@ -1521,7 +2164,7 @@ mod tests {
     fn test_log_compact_empty() {
         let store = create_test_store();
         let result = store.log_compact();
-        
+
         // On empty store, compaction should succeed with no changes
         assert_eq!(result.status, Status::Ok);
         assert_eq!(result.stats.records_scanned, 0);
@@ -1531,16 +2174,16 @@ mod tests {
     fn test_log_utilization() {
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Initial utilization
         let util = store.log_utilization();
         assert!(util >= 0.0 && util <= 1.0);
-        
+
         // After some inserts
         for i in 0u64..10 {
             session.upsert(i, i * 100);
         }
-        
+
         let util_after = store.log_utilization();
         assert!(util_after >= 0.0 && util_after <= 1.0);
     }
@@ -1549,9 +2192,7 @@ mod tests {
     fn test_should_compact() {
         let store = create_test_store();
         // With default settings and empty store, should not need compaction
-        let needs_compact = store.should_compact();
-        // Result depends on configuration
-        assert!(needs_compact || !needs_compact); // Just verify it doesn't panic
+        let _needs_compact = store.should_compact();
     }
 
     #[test]
@@ -1560,36 +2201,58 @@ mod tests {
         // to the tail before reclaiming the original space.
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert some records (start from 1, not 0, for consistency with other tests)
         let num_records = 100u64;
         for i in 1..=num_records {
             session.upsert(i, i * 100);
         }
-        
+
         // Verify all records are readable before compaction
         for i in 1..=num_records {
             let result = session.read(&i);
-            assert!(result.is_ok(), "Record {} should exist before compaction", i);
-            assert_eq!(result.unwrap(), Some(i * 100), "Record {} should have correct value", i);
+            assert!(
+                result.is_ok(),
+                "Record {} should exist before compaction",
+                i
+            );
+            assert_eq!(
+                result.unwrap(),
+                Some(i * 100),
+                "Record {} should have correct value",
+                i
+            );
         }
-        
+
         // Perform compaction
         let compact_result = store.log_compact();
-        assert_eq!(compact_result.status, Status::Ok, "Compaction should succeed");
-        
+        assert_eq!(
+            compact_result.status,
+            Status::Ok,
+            "Compaction should succeed"
+        );
+
         // CRITICAL: Verify all records are still readable after compaction
         // This is the key assertion - if compaction drops live records,
         // this test will fail.
         for i in 1..=num_records {
             let result = session.read(&i);
-            assert!(result.is_ok(), "Record {} should still exist after compaction", i);
+            assert!(
+                result.is_ok(),
+                "Record {} should still exist after compaction",
+                i
+            );
             let value = result.unwrap();
-            assert_eq!(value, Some(i * 100), 
-                "Record {} should have correct value {} after compaction, got {:?}", 
-                i, i * 100, value);
+            assert_eq!(
+                value,
+                Some(i * 100),
+                "Record {} should have correct value {} after compaction, got {:?}",
+                i,
+                i * 100,
+                value
+            );
         }
-        
+
         // Session is automatically dropped when it goes out of scope
     }
 
@@ -1598,34 +2261,34 @@ mod tests {
         // Test that compaction properly removes obsolete (superseded) records
         let store = create_test_store();
         let mut session = store.start_session();
-        
+
         // Insert initial values (start from 1, not 0, to avoid key=0 edge case)
         for i in 1u64..=50 {
             session.upsert(i, i);
         }
-        
+
         // Update some values (creating obsolete records)
         for i in 1u64..=25 {
             session.upsert(i, i + 1000);
         }
-        
+
         // Perform compaction
         let result = store.log_compact();
         assert_eq!(result.status, Status::Ok);
-        
+
         // Verify we can still read all keys with correct values
         // Keys 1-25 should have updated values (i + 1000)
         for i in 1u64..=25 {
             let value = session.read(&i).unwrap();
             assert_eq!(value, Some(i + 1000), "Key {} should have updated value", i);
         }
-        
+
         // Keys 26-50 should have original values
         for i in 26u64..=50 {
             let value = session.read(&i).unwrap();
             assert_eq!(value, Some(i), "Key {} should have original value", i);
         }
-        
+
         // Session is automatically dropped when it goes out of scope
     }
 
@@ -1650,15 +2313,15 @@ mod tests {
     fn test_start_grow_invalid_size() {
         let store = create_test_store();
         let current_size = store.index_size();
-        
+
         // Smaller size should fail
         let result = store.start_grow(current_size / 2);
         assert!(result.is_err());
-        
+
         // Same size should fail
         let result = store.start_grow(current_size);
         assert!(result.is_err());
-        
+
         // Non-power-of-two should fail
         let result = store.start_grow(current_size * 2 + 1);
         assert!(result.is_err());
@@ -1669,13 +2332,13 @@ mod tests {
         let store = create_test_store();
         let current_size = store.index_size();
         let new_size = current_size * 2;
-        
+
         // Start growth
         let result = store.start_grow(new_size);
         assert!(result.is_ok());
         assert!(store.is_grow_in_progress());
         assert!(store.grow_progress().is_some());
-        
+
         // Complete growth
         let grow_result = store.complete_grow();
         assert!(grow_result.success || grow_result.status.is_some());
@@ -1685,17 +2348,16 @@ mod tests {
     fn test_grow_already_in_progress() {
         let store = create_test_store();
         let current_size = store.index_size();
-        
+
         // Start first growth
         let result1 = store.start_grow(current_size * 2);
         assert!(result1.is_ok());
-        
+
         // Second growth should fail
         let result2 = store.start_grow(current_size * 4);
         assert!(result2.is_err());
-        
+
         // Clean up
         store.complete_grow();
     }
 }
-

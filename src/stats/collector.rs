@@ -3,7 +3,6 @@
 //! Provides centralized statistics collection and management.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::stats::metrics::StoreStats;

@@ -120,38 +120,35 @@ impl MemHashIndex {
     /// Returns the entry and a pointer to the atomic entry location.
     pub fn find_entry(&self, hash: KeyHash) -> FindResult {
         let version = self.version as usize;
-        let mut bucket = self.tables[version].bucket(hash);
+        let bucket = self.tables[version].bucket(hash);
         let tag = hash.tag();
 
-        loop {
-            // Search through the bucket
-            for i in 0..HashBucket::NUM_ENTRIES {
-                let entry = bucket.entries[i].load_index(Ordering::Acquire);
-                
-                if entry.is_unused() {
-                    continue;
-                }
-                
-                if entry.tag() == tag && !entry.is_tentative() {
-                    return FindResult {
-                        entry,
-                        atomic_entry: Some(&bucket.entries[i] as *const _),
-                    };
-                }
+        // Search through the bucket.
+        for i in 0..HashBucket::NUM_ENTRIES {
+            let entry = bucket.entries[i].load_index(Ordering::Acquire);
+
+            if entry.is_unused() {
+                continue;
             }
 
-            // Check overflow bucket
-            let overflow = bucket.overflow_entry.load(Ordering::Acquire);
-            if overflow.is_unused() {
-                return FindResult::not_found();
+            if entry.tag() == tag && !entry.is_tentative() {
+                return FindResult {
+                    entry,
+                    atomic_entry: Some(&bucket.entries[i] as *const _),
+                };
             }
+        }
 
-            // Move to next bucket in chain
-            // Note: In a full implementation, this would dereference the overflow
-            // pointer from the overflow bucket allocator. For now, we just return
-            // not found since we don't have the allocator here.
+        // Check overflow bucket.
+        // Note: In a full implementation, this would dereference the overflow pointer from the
+        // overflow bucket allocator. For now, we return not found since we don't have the
+        // allocator here.
+        let overflow = bucket.overflow_entry.load(Ordering::Acquire);
+        if overflow.is_unused() {
             return FindResult::not_found();
         }
+
+        FindResult::not_found()
     }
 
     /// Find or create an entry in the hash index
@@ -169,14 +166,14 @@ impl MemHashIndex {
             // Search through the bucket
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load_index(Ordering::Acquire);
-                
+
                 if entry.is_unused() {
                     if free_entry.is_none() {
                         free_entry = Some(&bucket.entries[i] as *const _);
                     }
                     continue;
                 }
-                
+
                 if entry.tag() == tag && !entry.is_tentative() {
                     return FindResult {
                         entry,
@@ -189,10 +186,10 @@ impl MemHashIndex {
             if let Some(atomic_entry) = free_entry {
                 let tentative_entry = IndexHashBucketEntry::new(Address::INVALID, tag, true);
                 let expected = HashBucketEntry::INVALID;
-                
+
                 // SAFETY: atomic_entry points to valid bucket entry
                 let atomic_ref = unsafe { &*atomic_entry };
-                
+
                 match atomic_ref.compare_exchange(
                     expected,
                     tentative_entry.to_hash_bucket_entry(),
@@ -210,7 +207,7 @@ impl MemHashIndex {
                         // Success - return the non-tentative version
                         let final_entry = IndexHashBucketEntry::new(Address::INVALID, tag, false);
                         atomic_ref.store_index(final_entry, Ordering::Release);
-                        
+
                         return FindResult {
                             entry: final_entry,
                             atomic_entry: Some(atomic_entry),
@@ -231,7 +228,7 @@ impl MemHashIndex {
     }
 
     /// Try to update an entry atomically
-    pub fn try_update_entry(
+    pub(crate) fn try_update_entry(
         &self,
         atomic_entry: *const AtomicHashBucketEntry,
         expected: HashBucketEntry,
@@ -248,20 +245,16 @@ impl MemHashIndex {
 
         // SAFETY: atomic_entry points to valid bucket entry
         let atomic_ref = unsafe { &*atomic_entry };
-        
-        match atomic_ref.compare_exchange(
-            expected,
-            new_entry,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+
+        match atomic_ref.compare_exchange(expected, new_entry, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Status::Ok,
             Err(_) => Status::Aborted,
         }
     }
 
     /// Update an entry unconditionally
-    pub fn update_entry(
+    pub(crate) fn update_entry(
         &self,
         atomic_entry: *const AtomicHashBucketEntry,
         new_address: Address,
@@ -272,7 +265,7 @@ impl MemHashIndex {
         // SAFETY: atomic_entry points to valid bucket entry
         let atomic_ref = unsafe { &*atomic_entry };
         atomic_ref.store_index(new_entry, Ordering::Release);
-        
+
         Status::Ok
     }
 
@@ -284,19 +277,19 @@ impl MemHashIndex {
         our_entry: *const AtomicHashBucketEntry,
     ) -> bool {
         let tag = hash.tag();
-        
+
         for i in 0..HashBucket::NUM_ENTRIES {
             let entry_ptr = &bucket.entries[i] as *const _;
             if entry_ptr == our_entry {
                 continue;
             }
-            
+
             let entry = bucket.entries[i].load_index(Ordering::Acquire);
             if !entry.is_unused() && entry.tag() == tag {
                 return true;
             }
         }
-        
+
         false
     }
 
@@ -320,24 +313,24 @@ impl MemHashIndex {
         new_address: Address,
     ) -> Status {
         let result = self.find_entry(hash);
-        
+
         if !result.found() {
             return Status::NotFound;
         }
-        
+
         // Check if the current address matches what we expect
         if result.entry.address() != old_address {
             return Status::NotFound;
         }
-        
+
         // Try to atomically update the entry
         if let Some(atomic_entry) = result.atomic_entry {
             let expected = result.entry.to_hash_bucket_entry();
             let new_entry = IndexHashBucketEntry::new(new_address, hash.tag(), false);
-            
+
             // SAFETY: atomic_entry points to a valid bucket entry
             let atomic_ref = unsafe { &*atomic_entry };
-            
+
             match atomic_ref.compare_exchange(
                 expected,
                 new_entry.to_hash_bucket_entry(),
@@ -360,14 +353,14 @@ impl MemHashIndex {
 
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
-            
+
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load_index(Ordering::Acquire);
-                
+
                 if entry.is_unused() {
                     continue;
                 }
-                
+
                 let address = entry.address();
                 if address < new_begin_address && address != Address::INVALID {
                     // Try to delete the entry
@@ -386,7 +379,7 @@ impl MemHashIndex {
                 }
             }
         }
-        
+
         cleaned
     }
 
@@ -397,10 +390,10 @@ impl MemHashIndex {
 
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
-            
+
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load_index(Ordering::Acquire);
-                
+
                 if entry.is_tentative() {
                     bucket.entries[i].store(HashBucketEntry::INVALID, Ordering::Release);
                 }
@@ -412,7 +405,7 @@ impl MemHashIndex {
     pub fn dump_distribution(&self) -> IndexStats {
         let version = self.version as usize;
         let table_size = self.tables[version].size();
-        
+
         let mut total_entries = 0u64;
         let mut used_entries = 0u64;
         let mut buckets_with_entries = 0u64;
@@ -420,7 +413,7 @@ impl MemHashIndex {
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
             let mut bucket_used = 0;
-            
+
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load_index(Ordering::Relaxed);
                 total_entries += 1;
@@ -429,7 +422,7 @@ impl MemHashIndex {
                     bucket_used += 1;
                 }
             }
-            
+
             if bucket_used > 0 {
                 buckets_with_entries += 1;
             }
@@ -508,13 +501,13 @@ impl MemHashIndex {
         // Write each bucket
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
-            
+
             // Write each entry in the bucket (8 bytes each, 7 entries per bucket)
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load(Ordering::Relaxed);
                 writer.write_all(&entry.control().to_le_bytes())?;
             }
-            
+
             // Write overflow entry (8 bytes)
             let overflow = bucket.overflow_entry.load(Ordering::Relaxed);
             writer.write_all(&overflow.control().to_le_bytes())?;
@@ -595,20 +588,21 @@ impl MemHashIndex {
         let mut entry_buf = [0u8; 8];
         for idx in 0..file_table_size {
             let bucket = self.tables[version].bucket_at(idx);
-            
+
             // Read each entry in the bucket
             for i in 0..HashBucket::NUM_ENTRIES {
                 reader.read_exact(&mut entry_buf)?;
                 let control = u64::from_le_bytes(entry_buf);
                 bucket.entries[i].store(HashBucketEntry::from_control(control), Ordering::Release);
             }
-            
+
             // Read overflow entry
             reader.read_exact(&mut entry_buf)?;
             let overflow_control = u64::from_le_bytes(entry_buf);
-            bucket
-                .overflow_entry
-                .store(HashBucketOverflowEntry::from_control(overflow_control), Ordering::Release);
+            bucket.overflow_entry.store(
+                HashBucketOverflowEntry::from_control(overflow_control),
+                Ordering::Release,
+            );
         }
 
         Ok(())
@@ -618,15 +612,15 @@ impl MemHashIndex {
     pub fn verify_recovery(&self) -> io::Result<()> {
         let version = self.version as usize;
         let table_size = self.tables[version].size();
-        
+
         let mut errors = 0u64;
 
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
-            
+
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry = bucket.entries[i].load_index(Ordering::Relaxed);
-                
+
                 // Check for obviously corrupted entries
                 if entry.is_tentative() {
                     errors += 1;
@@ -637,7 +631,10 @@ impl MemHashIndex {
         if errors > 0 {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Found {} corrupted entries during recovery verification", errors),
+                format!(
+                    "Found {} corrupted entries during recovery verification",
+                    errors
+                ),
             ))
         } else {
             Ok(())
@@ -689,7 +686,7 @@ mod tests {
     fn test_mem_hash_index_initialize() {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
-        
+
         let result = index.initialize(&config);
         assert_eq!(result, Status::Ok);
         assert_eq!(index.size(), 1024);
@@ -700,10 +697,10 @@ mod tests {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
         index.initialize(&config);
-        
+
         let hash = KeyHash::new(12345);
         let result = index.find_entry(hash);
-        
+
         assert!(!result.found());
     }
 
@@ -712,20 +709,20 @@ mod tests {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
         index.initialize(&config);
-        
+
         let hash = KeyHash::new(12345);
-        
+
         // First call should create
         let result = index.find_or_create_entry(hash);
         assert!(result.atomic_entry.is_some());
-        
+
         // Update the entry
         if let Some(atomic_entry) = result.atomic_entry {
             let new_address = Address::new(1, 100);
             let status = index.update_entry(atomic_entry, new_address, hash.tag());
             assert_eq!(status, Status::Ok);
         }
-        
+
         // Second call should find
         let result2 = index.find_entry(hash);
         assert!(result2.found());
@@ -737,10 +734,10 @@ mod tests {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
         index.initialize(&config);
-        
+
         let hash = KeyHash::new(54321);
         let result = index.find_or_create_entry(hash);
-        
+
         if let Some(atomic_entry) = result.atomic_entry {
             // First update should succeed
             let status = index.try_update_entry(
@@ -751,7 +748,7 @@ mod tests {
                 false,
             );
             assert_eq!(status, Status::Ok);
-            
+
             // Second update with wrong expected should fail
             let status2 = index.try_update_entry(
                 atomic_entry,
@@ -769,7 +766,7 @@ mod tests {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
         index.initialize(&config);
-        
+
         // Create and populate some entries
         for i in 0..10u64 {
             let hash = KeyHash::new(i * 1000);
@@ -779,11 +776,11 @@ mod tests {
                 index.update_entry(atomic_entry, addr, hash.tag());
             }
         }
-        
+
         // GC with threshold at offset 500
         let threshold = Address::new(0, 500);
         let cleaned = index.garbage_collect(threshold);
-        
+
         // Should have cleaned entries with offset < 500
         assert!(cleaned > 0);
     }
@@ -793,7 +790,7 @@ mod tests {
         let mut index = MemHashIndex::new();
         let config = MemHashIndexConfig::new(1024);
         index.initialize(&config);
-        
+
         let stats = index.dump_distribution();
         assert_eq!(stats.table_size, 1024);
         assert_eq!(stats.used_entries, 0);
@@ -843,7 +840,9 @@ mod tests {
 
         // Create a new index and recover
         let mut recovered_index = MemHashIndex::new();
-        recovered_index.recover(temp_dir.path(), Some(&metadata)).unwrap();
+        recovered_index
+            .recover(temp_dir.path(), Some(&metadata))
+            .unwrap();
 
         // Verify all entries are present
         for hash in &test_hashes {
@@ -941,4 +940,3 @@ mod tests {
         assert_eq!(original_stats.used_entries, recovered_stats.used_entries);
     }
 }
-

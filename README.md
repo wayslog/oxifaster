@@ -116,7 +116,7 @@ fn main() {
 |-----|:---:|:---:|:----:|------|
 | **NullDisk** | Y | Y | Y | 完成 |
 | **FileSystemDisk** | Y | Y | Y | 完成 |
-| **io_uring (Linux)** | Y | - | P | 骨架代码 |
+| **io_uring (Linux)** | Y | - | P | Mock 实现 (API 规范化完成) |
 | **IOCP (Windows)** | Y | Y | N | 未实现 |
 | **Azure Blob Storage** | Y | Y | N | 未实现 |
 | **Tiered Storage** | - | Y | N | 未实现 |
@@ -126,12 +126,12 @@ fn main() {
 
 | 功能 | C++ | C# | Rust | 状态 |
 |-----|:---:|:---:|:----:|------|
-| **Index Checkpoint** | Y | Y | P | 状态结构已有 |
-| **HybridLog Checkpoint** | Y | Y | P | 状态结构已有 |
-| **Full Checkpoint** | Y | Y | P | 框架已有 |
-| **CPR Protocol** | Y | Y | P | state_transitions.rs 有框架 |
-| **Snapshot Files** | Y | Y | N | 未实现序列化 |
-| **Session Persistence** | Y | Y | N | 未实现 |
+| **Index Checkpoint** | Y | Y | Y | 完成 |
+| **HybridLog Checkpoint** | Y | Y | Y | 完成 |
+| **Full Checkpoint** | Y | Y | Y | 完成 (含 CPR 状态机) |
+| **CPR Protocol** | Y | Y | Y | 完成 (完整状态机集成) |
+| **Snapshot Files** | Y | Y | Y | 完成 (JSON + bincode) |
+| **Session Persistence** | Y | Y | Y | 完成 (GUID + serial_num) |
 | **Incremental Checkpoint** | - | Y | N | 未实现 |
 | **Delta Log** | - | Y | N | 未实现 |
 
@@ -186,11 +186,11 @@ fn main() {
 | **device** | StorageDevice trait | `src/device/traits.rs` | :white_check_mark: |
 | **device** | NullDisk 内存设备 | `src/device/null_device.rs` | :white_check_mark: |
 | **device** | FileSystemDisk 文件设备 | `src/device/file_device.rs` | :white_check_mark: |
-| **device** | IoUringDevice 配置结构 | `src/device/io_uring.rs` | :construction: |
+| **device** | IoUringDevice Mock 实现 | `src/device/io_uring.rs` | :construction: |
 | **store** | FasterKV 核心 (Read/Upsert/RMW/Delete) | `src/store/faster_kv.rs` | :white_check_mark: |
-| **store** | Session 会话管理 | `src/store/session.rs` | :white_check_mark: |
+| **store** | Session 会话管理 (含 GUID + serial_num) | `src/store/session.rs` | :white_check_mark: |
 | **store** | ThreadContext 线程上下文 | `src/store/contexts.rs` | :white_check_mark: |
-| **store** | StateTransitions 状态机 | `src/store/state_transitions.rs` | :white_check_mark: |
+| **store** | StateTransitions CPR 状态机 | `src/store/state_transitions.rs` | :white_check_mark: |
 | **record** | Record/RecordInfo 记录结构 | `src/record.rs` | :white_check_mark: |
 | **record** | Key/Value trait 泛型支持 | `src/record.rs` | :white_check_mark: |
 | **log** | FasterLog 基础日志 | `src/log/faster_log.rs` | :white_check_mark: |
@@ -202,9 +202,9 @@ fn main() {
 | **f2** | F2Config 配置 | `src/f2/config.rs` | :white_check_mark: |
 | **scan** | LogScanIterator 日志扫描 | `src/scan/log_iterator.rs` | :construction: |
 | **stats** | StatsCollector 统计收集 | `src/stats/collector.rs` | :construction: |
-| **checkpoint** | Checkpoint 状态结构 | `src/checkpoint/state.rs` | :construction: |
-| **checkpoint** | Recovery 恢复结构 | `src/checkpoint/recovery.rs` | :construction: |
-| **checkpoint** | Serialization 序列化 | `src/checkpoint/serialization.rs` | :construction: |
+| **checkpoint** | Checkpoint 状态结构 | `src/checkpoint/state.rs` | :white_check_mark: |
+| **checkpoint** | Recovery 恢复结构 | `src/checkpoint/recovery.rs` | :white_check_mark: |
+| **checkpoint** | Serialization 序列化 | `src/checkpoint/serialization.rs` | :white_check_mark: |
 
 **图例**: :white_check_mark: 完成 | :construction: 部分完成 | :x: 未实现
 
@@ -216,13 +216,13 @@ fn main() {
 gantt
     title oxifaster 开发路线图
     dateFormat YYYY-MM-DD
-    section Phase2_Durability
-        Checkpoint_Complete    :p2a, 2026-01-06, 14d
-        Recovery_Complete      :p2b, after p2a, 14d
-        CPR_Protocol           :p2c, after p2b, 10d
-        Session_Persistence    :p2d, after p2c, 7d
+    section Phase2_Durability_DONE
+        Checkpoint_Complete    :done, p2a, 2026-01-04, 1d
+        Recovery_Complete      :done, p2b, 2026-01-04, 1d
+        CPR_Protocol           :done, p2c, 2026-01-04, 1d
+        Session_Persistence    :done, p2d, 2026-01-04, 1d
     section Phase3_Performance
-        Read_Cache_Complete    :p3a, after p2d, 10d
+        Read_Cache_Complete    :p3a, 2026-01-06, 10d
         Auto_Compaction        :p3b, after p3a, 10d
         Index_Growth_Impl      :p3c, after p3b, 7d
         Log_Scan_Complete      :p3d, after p3c, 5d
@@ -236,22 +236,26 @@ gantt
         Statistics_Complete    :p5c, after p5a, 7d
 ```
 
-### Phase 2: 持久化与恢复 (Durability) - P0
+### Phase 2: 持久化与恢复 (Durability) - P0 :white_check_mark: 已完成
 
-| 功能 | 描述 | 文件 | C++ 参考 |
-|------|------|------|----------|
-| **Checkpoint 元数据序列化** | Index + HybridLog 元数据持久化 | `checkpoint/serialization.rs` | `checkpoint_state.h` |
-| **Index Checkpoint** | 哈希索引检查点写入 | `checkpoint/state.rs` | `checkpoint_state.h` |
-| **HybridLog Checkpoint** | 混合日志检查点写入 | `checkpoint/state.rs` | `checkpoint_state.h` |
-| **Recovery 完整实现** | 从检查点恢复完整状态 | `checkpoint/recovery.rs` | `faster.h` |
-| **CPR 协议** | Concurrent Prefix Recovery | `store/state_transitions.rs` | `state_transitions.h` |
-| **Session 持久化** | 会话状态保存与恢复 | `store/session.rs` | `faster.h` |
-| **Snapshot 文件格式** | 快照文件读写 | `checkpoint/serialization.rs` | `checkpoint_state.h` |
+| 功能 | 描述 | 文件 | 状态 |
+|------|------|------|:----:|
+| **Checkpoint 元数据序列化** | Index + HybridLog 元数据持久化 | `checkpoint/serialization.rs` | :white_check_mark: |
+| **Index Checkpoint** | 哈希索引检查点写入 | `checkpoint/state.rs` | :white_check_mark: |
+| **HybridLog Checkpoint** | 混合日志检查点写入 | `checkpoint/state.rs` | :white_check_mark: |
+| **Recovery 完整实现** | 从检查点恢复完整状态 (含 RecoveryState) | `checkpoint/recovery.rs` | :white_check_mark: |
+| **CPR 协议** | Concurrent Prefix Recovery 完整状态机 | `store/state_transitions.rs` | :white_check_mark: |
+| **Session 持久化** | GUID + serial_num 保存与恢复 | `store/session.rs` | :white_check_mark: |
+| **Snapshot 文件格式** | 快照文件读写 (JSON + bincode) | `checkpoint/serialization.rs` | :white_check_mark: |
 
 ```rust
-// 目标 API
-let token = store.checkpoint()?;
-store.recover(token)?;
+// 已实现 API
+let token = store.checkpoint(checkpoint_dir)?;      // 完整 checkpoint (含 CPR 状态机)
+let store = FasterKv::recover(dir, token, config, device)?;  // 恢复 (含 session 状态)
+
+// Session 持久化
+let states = store.get_recovered_sessions();        // 获取恢复的 session 状态
+let session = store.continue_session(state);        // 从状态恢复 session
 ```
 
 ### Phase 3: 性能优化 (Performance) - P1
@@ -307,14 +311,14 @@ let device = AzureBlobDevice::new(connection_string, container)?;
 
 ### 预估工期
 
-| Phase | 描述 | 工作量 | 累计 |
-|-------|------|:-----:|:----:|
-| Phase 2 | 持久化与恢复 | 45天 | 45天 |
-| Phase 3 | 性能优化 | 32天 | 77天 |
-| Phase 4 | 高级功能 | 29天 | 106天 |
-| Phase 5 | 平台与生态 | 31天 | 137天 |
+| Phase | 描述 | 工作量 | 累计 | 状态 |
+|-------|------|:-----:|:----:|:----:|
+| Phase 2 | 持久化与恢复 | 45天 | 45天 | :white_check_mark: 完成 |
+| Phase 3 | 性能优化 | 32天 | 77天 | 进行中 |
+| Phase 4 | 高级功能 | 29天 | 106天 | 待开始 |
+| Phase 5 | 平台与生态 | 31天 | 137天 | 待开始 |
 
-**总计约 137 工作日 (约 7 个月)**
+**剩余约 92 工作日 (约 5 个月)**
 
 ---
 
@@ -499,6 +503,16 @@ session.upsert(key, value);                    // 插入/更新
 let value = session.read(&key)?;               // 读取
 session.delete(&key);                          // 删除
 session.rmw(key, |v| { *v += 1; true });       // 读-改-写
+
+// Checkpoint 和 Recovery (Phase 2 已完成)
+let token = store.checkpoint(checkpoint_dir)?; // 创建检查点
+let recovered = FasterKv::recover(            // 从检查点恢复
+    checkpoint_dir, token, config, device
+)?;
+
+// Session 持久化
+let states = store.get_recovered_sessions();   // 获取恢复的 session 状态
+let session = store.continue_session(state);   // 从保存的状态恢复 session
 ```
 
 ### FasterKv with Read Cache
@@ -630,8 +644,8 @@ cargo bench
 
 ### 优先级
 
-- **P0**: Checkpoint/Recovery - 生产环境必需
-- **P1**: Read Cache, Compaction - 性能关键
+- **P0**: ~~Checkpoint/Recovery - 生产环境必需~~ :white_check_mark: 已完成
+- **P1**: Read Cache, Compaction - 性能关键 (下一阶段)
 - **P2**: F2, Index Growth, Statistics - 功能完善
 - **P3**: Azure Storage, 配置文件 - 生态扩展
 

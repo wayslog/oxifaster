@@ -6,5 +6,5 @@
 
 mod light_epoch;
 
-pub use light_epoch::{EpochAction, EpochGuard, LightEpoch};
+pub use light_epoch::{get_thread_id, EpochAction, EpochGuard, LightEpoch};
 

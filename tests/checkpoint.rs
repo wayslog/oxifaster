@@ -184,10 +184,12 @@ fn test_recover_restores_version() {
         let recovered: FasterKv<u64, u64, NullDisk> =
             FasterKv::recover(temp_dir.path(), token, config, device).unwrap();
 
-        // Version should be restored from the checkpoint (version at time of checkpoint)
+        // Version should be restored from the checkpoint
+        // According to CPR protocol, the version is incremented during IN_PROGRESS phase
+        // and the checkpoint saves the incremented version.
+        // After 3 checkpoints, version is 3, and that's what gets saved in the third checkpoint.
         let recovered_version = recovered.system_state().version;
-        // The last checkpoint was made at version 2 (before incrementing to 3)
-        assert_eq!(recovered_version, 2);
+        assert_eq!(recovered_version, 3);
     }
 }
 

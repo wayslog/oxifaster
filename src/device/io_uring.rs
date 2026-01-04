@@ -1,20 +1,73 @@
 //! io_uring device implementation
 //!
 //! Provides high-performance async I/O using Linux io_uring interface.
-//! This is a feature-gated module that only compiles on Linux with io_uring support.
 //!
-//! Note: This is a skeleton implementation. Full implementation requires:
-//! 1. The `io-uring` crate
-//! 2. Linux kernel >= 5.1 with io_uring support
-//! 3. Feature flag `io_uring` enabled
+//! # Feature Gates
+//!
+//! This module provides a **mock implementation** by default. To use real io_uring:
+//!
+//! 1. Enable the `io_uring` feature in Cargo.toml:
+//!    ```toml
+//!    [dependencies]
+//!    oxifaster = { version = "*", features = ["io_uring"] }
+//!    ```
+//!
+//! 2. Ensure your system meets the requirements:
+//!    - Linux kernel >= 5.1
+//!    - The `io-uring` crate must be added as a dependency
+//!
+//! # Mock Implementation
+//!
+//! The current mock implementation:
+//! - Returns appropriate errors for unimplemented operations
+//! - Tracks statistics accurately for testing
+//! - Provides feature detection (always returns false on non-Linux)
+//!
+//! # Example
+//!
+//! ```ignore
+//! use oxifaster::device::io_uring::{IoUringDevice, IoUringConfig};
+//!
+//! // Check if io_uring is available
+//! if IoUringDevice::is_available() {
+//!     let config = IoUringConfig::new()
+//!         .with_sq_entries(256)
+//!         .with_sqpoll(true);
+//!     
+//!     let mut device = IoUringDevice::new("/path/to/file", config);
+//!     device.initialize().expect("Failed to initialize io_uring");
+//! }
+//! ```
+//!
+//! # Performance Considerations
+//!
+//! When io_uring is fully implemented:
+//! - SQPOLL mode reduces syscall overhead for high-throughput workloads
+//! - Fixed buffers avoid buffer registration overhead per I/O
+//! - Registered files speed up file descriptor lookups
 
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
-use crate::device::traits::{SyncStorageDevice, AsyncIoCallback, IoContext};
+use crate::device::traits::{AsyncIoCallback, SyncStorageDevice};
 use crate::status::Status;
+
+/// Error type for io_uring operations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IoUringError {
+    /// io_uring is not available on this system
+    NotAvailable,
+    /// Device not initialized
+    NotInitialized,
+    /// Submission queue is full
+    SubmissionQueueFull,
+    /// Invalid argument
+    InvalidArgument,
+    /// I/O operation failed
+    IoError(String),
+    /// Feature not implemented (mock mode)
+    NotImplemented,
+}
 
 /// Configuration for io_uring
 #[derive(Debug, Clone)]
@@ -267,21 +320,64 @@ impl IoUringDevice {
     }
 
     /// Initialize the io_uring instance
+    ///
+    /// # Mock Mode
+    ///
+    /// In mock mode, this always succeeds but the device won't perform real I/O.
+    /// I/O operations will return `Unsupported` errors.
+    /// Enable the `io_uring` feature for full implementation.
+    ///
+    /// # Full Implementation (when feature enabled)
+    ///
+    /// This would:
+    /// 1. Create io_uring instance with `io_uring_setup` syscall
+    /// 2. Register fixed buffers if `use_fixed_buffers` is enabled
+    /// 3. Start SQPOLL thread if `sqpoll` is enabled
+    /// 4. Register files if `register_files` is enabled
+    ///
+    /// # Returns
+    ///
+    /// Always returns `Ok(())` in mock mode. In full implementation,
+    /// returns `Err(Status::NotSupported)` if io_uring is not available.
     pub fn initialize(&mut self) -> Result<(), Status> {
-        // Note: In a full implementation, this would:
-        // 1. Create io_uring instance with io_uring_setup
-        // 2. Register buffers if use_fixed_buffers is enabled
-        // 3. Start SQPOLL thread if sqpoll is enabled
+        // Mock initialization - always succeeds
+        // The device can be initialized, but I/O operations will return errors
+        // indicating mock mode. This allows testing the API surface without
+        // requiring actual io_uring support.
+        //
+        // In a full implementation, this would:
+        // 1. Check io_uring availability
+        // 2. Call io_uring_queue_init_params with config
+        // 3. Set up SQPOLL if enabled
+        // 4. Register buffers and files
         self.initialized = true;
         Ok(())
     }
-    
+
     /// Shutdown the io_uring instance
+    ///
+    /// Waits for pending operations to complete before shutdown.
+    /// This is a blocking operation.
     pub fn shutdown(&mut self) {
-        // Wait for pending operations
-        while self.pending_ops > 0 {
-            let _ = self.process_completions();
+        if !self.initialized {
+            return;
         }
+
+        // Wait for pending operations
+        let mut attempts = 0;
+        while self.pending_ops > 0 && attempts < 1000 {
+            let _ = self.process_completions();
+            attempts += 1;
+        }
+
+        // Log warning if operations couldn't complete
+        if self.pending_ops > 0 {
+            eprintln!(
+                "Warning: io_uring shutdown with {} pending operations",
+                self.pending_ops
+            );
+        }
+
         self.initialized = false;
     }
 
@@ -485,36 +581,118 @@ pub struct IoUringFeatures {
 
 impl SyncStorageDevice for IoUringDevice {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        // Note: In a full implementation, this would use io_uring with blocking wait
-        let _ = offset;
-        let _ = buf;
-        Ok(0)
+        // Mock implementation: returns error indicating not implemented
+        // In a full implementation, this would:
+        // 1. Submit a read operation to io_uring
+        // 2. Wait for completion with io_uring_wait_cqe
+        // 3. Return the bytes read
+        if !self.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                IoUringError::NotInitialized,
+            ));
+        }
+
+        // Return error indicating mock mode
+        let _ = (offset, buf);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "io_uring read_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
+        ))
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        // Note: In a full implementation, this would use io_uring with blocking wait
-        let _ = offset;
-        Ok(buf.len())
+        // Mock implementation: returns error indicating not implemented
+        // In a full implementation, this would:
+        // 1. Submit a write operation to io_uring
+        // 2. Wait for completion with io_uring_wait_cqe
+        // 3. Return the bytes written
+        if !self.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                IoUringError::NotInitialized,
+            ));
+        }
+
+        let _ = (offset, buf);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "io_uring write_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
+        ))
     }
 
     fn flush_sync(&self) -> io::Result<()> {
-        // Note: In a full implementation, this would use FSYNC opcode
-        Ok(())
+        // Mock implementation: returns error indicating not implemented
+        // In a full implementation, this would submit IORING_OP_FSYNC
+        if !self.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                IoUringError::NotInitialized,
+            ));
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "io_uring flush_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
+        ))
     }
 
     fn truncate_sync(&self, size: u64) -> io::Result<()> {
+        // Mock implementation: returns error indicating not implemented
+        // In a full implementation, this would use ftruncate or IORING_OP_FALLOCATE
+        if !self.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                IoUringError::NotInitialized,
+            ));
+        }
+
         let _ = size;
-        Ok(())
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "io_uring truncate_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
+        ))
     }
 
     fn size_sync(&self) -> io::Result<u64> {
-        Ok(0)
+        // Mock implementation: returns error indicating not implemented
+        // In a full implementation, this would use fstat
+        if !self.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                IoUringError::NotInitialized,
+            ));
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "io_uring size_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
+        ))
     }
 
     fn alignment(&self) -> usize {
-        4096 // io_uring typically uses 4K alignment
+        // io_uring with O_DIRECT typically requires 4K alignment
+        // This is a safe default that works with most storage devices
+        4096
     }
 }
+
+impl std::fmt::Display for IoUringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IoUringError::NotAvailable => write!(f, "io_uring is not available on this system"),
+            IoUringError::NotInitialized => write!(f, "io_uring device not initialized"),
+            IoUringError::SubmissionQueueFull => write!(f, "io_uring submission queue is full"),
+            IoUringError::InvalidArgument => write!(f, "invalid argument"),
+            IoUringError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            IoUringError::NotImplemented => {
+                write!(f, "io_uring feature not implemented (mock mode)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for IoUringError {}
 
 #[cfg(test)]
 mod tests {
