@@ -6,11 +6,13 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Instant;
 
 use crate::address::Address;
 use crate::checkpoint::IndexMetadata;
 use crate::constants::CACHE_LINE_BYTES;
+use crate::index::grow::{calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState};
 use crate::index::{
     AtomicHashBucketEntry, HashBucket, HashBucketEntry, HashBucketOverflowEntry,
     IndexHashBucketEntry, InternalHashTable, KeyHash,
@@ -25,6 +27,17 @@ pub struct FindResult {
     pub entry: IndexHashBucketEntry,
     /// Pointer to the atomic entry in the bucket
     pub atomic_entry: Option<*const AtomicHashBucketEntry>,
+}
+
+/// Result of migrating a single chunk during index growth
+#[derive(Debug, Default)]
+struct ChunkMigrationResult {
+    /// Number of entries successfully migrated
+    migrated: u64,
+    /// Number of overflow buckets encountered that couldn't be followed
+    overflow_buckets_skipped: u64,
+    /// Number of entries that couldn't be rehashed (rehash callback returned None)
+    rehash_failures: u64,
 }
 
 impl FindResult {
@@ -72,7 +85,13 @@ pub struct MemHashIndex {
     /// Hash tables (two versions for growth)
     tables: [InternalHashTable; 2],
     /// Current version (0 or 1)
-    version: u8,
+    version: AtomicU8,
+    /// Grow state for tracking growth operations
+    grow_state: GrowState,
+    /// Grow configuration
+    grow_config: GrowConfig,
+    /// Whether a grow operation is in progress
+    grow_in_progress: AtomicBool,
 }
 
 impl MemHashIndex {
@@ -80,7 +99,21 @@ impl MemHashIndex {
     pub fn new() -> Self {
         Self {
             tables: [InternalHashTable::new(), InternalHashTable::new()],
-            version: 0,
+            version: AtomicU8::new(0),
+            grow_state: GrowState::new(),
+            grow_config: GrowConfig::default(),
+            grow_in_progress: AtomicBool::new(false),
+        }
+    }
+
+    /// Create a new hash index with growth configuration
+    pub fn with_grow_config(grow_config: GrowConfig) -> Self {
+        Self {
+            tables: [InternalHashTable::new(), InternalHashTable::new()],
+            version: AtomicU8::new(0),
+            grow_state: GrowState::new(),
+            grow_config,
+            grow_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -93,33 +126,415 @@ impl MemHashIndex {
             return Status::Corruption;
         }
 
-        self.version = 0;
+        self.version.store(0, Ordering::Release);
         self.tables[0].initialize(config.table_size, CACHE_LINE_BYTES)
     }
 
     /// Get the current table size
     #[inline]
     pub fn size(&self) -> u64 {
-        self.tables[self.version as usize].size()
+        let v = self.version.load(Ordering::Acquire);
+        self.tables[v as usize].size()
     }
 
     /// Get the new table size (during growth)
     #[inline]
     pub fn new_size(&self) -> u64 {
-        self.tables[1 - self.version as usize].size()
+        let v = self.version.load(Ordering::Acquire);
+        self.tables[1 - v as usize].size()
     }
 
     /// Get the current version
     #[inline]
     pub fn version(&self) -> u8 {
-        self.version
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Get the grow configuration
+    pub fn grow_config(&self) -> &GrowConfig {
+        &self.grow_config
+    }
+
+    /// Set the grow configuration
+    pub fn set_grow_config(&mut self, config: GrowConfig) {
+        self.grow_config = config;
+    }
+
+    /// Check if grow is in progress
+    pub fn is_grow_in_progress(&self) -> bool {
+        self.grow_in_progress.load(Ordering::Acquire)
+    }
+
+    /// Get the current load factor
+    pub fn load_factor(&self) -> f64 {
+        let stats = self.dump_distribution();
+        stats.load_factor
+    }
+
+    /// Check if growth should be triggered based on configuration
+    pub fn should_grow(&self) -> bool {
+        if self.grow_in_progress.load(Ordering::Acquire) {
+            return false;
+        }
+        self.grow_config.should_grow(self.load_factor())
+    }
+
+    /// Start a grow operation
+    ///
+    /// This allocates a new hash table with `growth_factor` times the current size
+    /// and initializes the grow state for chunk-based migration.
+    ///
+    /// # Returns
+    /// - `Ok(new_size)` if grow was started successfully
+    /// - `Err(Status::Aborted)` if grow is already in progress
+    pub fn start_grow(&mut self) -> Result<u64, Status> {
+        // Check if already in progress
+        if self.grow_in_progress.swap(true, Ordering::AcqRel) {
+            return Err(Status::Aborted);
+        }
+
+        let current_version = self.version.load(Ordering::Acquire);
+        let old_size = self.tables[current_version as usize].size();
+        let new_size = old_size * self.grow_config.growth_factor;
+
+        // Initialize the new table
+        let new_version = 1 - current_version;
+        let status = self.tables[new_version as usize].initialize(new_size, CACHE_LINE_BYTES);
+        if status != Status::Ok {
+            self.grow_in_progress.store(false, Ordering::Release);
+            return Err(status);
+        }
+
+        // Initialize grow state
+        let num_chunks = calculate_num_chunks(old_size);
+        self.grow_state.initialize(current_version, num_chunks);
+
+        Ok(new_size)
+    }
+
+    /// Grow the hash index to a new size using a rehash callback.
+    ///
+    /// This is a blocking operation that migrates all entries from the old
+    /// table to the new table. During migration, each entry's key is rehashed
+    /// using the provided callback to determine the correct new bucket.
+    ///
+    /// # Arguments
+    /// * `rehash_fn` - A callback that takes an Address and returns the KeyHash
+    ///   for the record at that address. This is required because the hash index
+    ///   only stores partial hash information (the tag), which is insufficient
+    ///   to determine the correct new bucket after the table size changes.
+    ///
+    /// # Returns
+    /// `GrowResult` with details about the grow operation.
+    /// 
+    /// # Warning
+    /// If `GrowResult::overflow_buckets_skipped > 0`, some entries stored in
+    /// overflow buckets were NOT migrated and are lost.
+    pub fn grow_with_rehash<F>(&mut self, rehash_fn: F) -> GrowResult
+    where
+        F: Fn(Address) -> Option<KeyHash>,
+    {
+        let start_time = Instant::now();
+
+        // Start the grow operation
+        let new_size = match self.start_grow() {
+            Ok(size) => size,
+            Err(status) => return GrowResult::failure(status),
+        };
+
+        let old_version = self.grow_state.old_version();
+        let new_version = self.grow_state.new_version();
+        let old_size = self.tables[old_version as usize].size();
+        let mut entries_migrated = 0u64;
+        let mut total_overflow_buckets_skipped = 0u64;
+        let mut rehash_failures = 0u64;
+
+        // Process all chunks
+        while let Some(chunk_idx) = self.grow_state.get_next_chunk() {
+            let result = self.migrate_chunk_with_rehash(
+                chunk_idx,
+                old_version,
+                new_version,
+                new_size,
+                &rehash_fn,
+            );
+            entries_migrated += result.migrated;
+            total_overflow_buckets_skipped += result.overflow_buckets_skipped;
+            rehash_failures += result.rehash_failures;
+            self.grow_state.complete_chunk();
+        }
+
+        // Switch to new version
+        self.version.store(new_version, Ordering::Release);
+
+        // Reset grow state
+        self.grow_state.reset();
+        self.grow_in_progress.store(false, Ordering::Release);
+
+        let duration = start_time.elapsed();
+
+        // Return result with both overflow and rehash failure tracking
+        // Success is false if either overflow buckets were skipped or rehash failures occurred
+        GrowResult::with_data_loss_tracking(
+            old_size,
+            new_size,
+            entries_migrated,
+            duration.as_millis() as u64,
+            total_overflow_buckets_skipped,
+            rehash_failures,
+        )
+    }
+
+    /// Grow the hash index to a new size (deprecated - use grow_with_rehash).
+    ///
+    /// # Warning
+    /// This method uses an approximation for bucket placement that may result
+    /// in entries being placed in incorrect buckets. After grow completes,
+    /// some lookups may fail to find existing keys.
+    ///
+    /// Use `grow_with_rehash` with a proper rehash callback for correct behavior.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use grow_with_rehash() with a proper rehash callback for correct bucket placement"
+    )]
+    pub fn grow(&mut self) -> GrowResult {
+        // Fallback: use a simple heuristic that may not be correct
+        // This exists for backward compatibility but should not be used
+        self.grow_with_rehash(|_addr| {
+            // Cannot rehash without access to keys - return None to skip
+            None
+        })
+    }
+
+    /// Migrate a single chunk during external/chunked growth.
+    ///
+    /// This is for callers using the chunked growth path:
+    /// 1. Call `start_grow()` to begin
+    /// 2. Get chunks via `grow_state().get_next_chunk()`
+    /// 3. Call `migrate_chunk_external()` for each chunk
+    /// 4. Call `complete_grow()` when done
+    ///
+    /// The migration results are automatically recorded in grow_state and will
+    /// be included in the `GrowResult` returned by `complete_grow()`.
+    ///
+    /// # Arguments
+    /// * `chunk_idx` - The chunk index to migrate (from `get_next_chunk()`)
+    /// * `rehash_fn` - Callback to get the hash for a record at an address
+    ///
+    /// # Returns
+    /// `true` if this was the last chunk, `false` otherwise
+    pub fn migrate_chunk_external<F>(&self, chunk_idx: u64, rehash_fn: F) -> bool
+    where
+        F: Fn(Address) -> Option<KeyHash>,
+    {
+        if !self.grow_in_progress.load(Ordering::Acquire) {
+            return false;
+        }
+
+        let old_version = self.grow_state.old_version();
+        let new_version = self.grow_state.new_version();
+        let new_size = self.tables[new_version as usize].size();
+
+        let result = self.migrate_chunk_with_rehash(
+            chunk_idx,
+            old_version,
+            new_version,
+            new_size,
+            &rehash_fn,
+        );
+
+        // Record results in grow_state for complete_grow to report
+        self.grow_state.record_chunk_result(
+            result.migrated,
+            result.overflow_buckets_skipped,
+            result.rehash_failures,
+        );
+
+        self.grow_state.complete_chunk()
+    }
+
+    /// Migrate a single chunk of entries from old table to new table using rehash
+    ///
+    /// This function migrates all entries from the primary bucket slots.
+    /// For each entry, it calls the rehash callback to get the full hash,
+    /// then uses that hash to compute the correct new bucket index.
+    /// 
+    /// # Warning
+    /// Currently, overflow bucket chains are NOT followed because there is no
+    /// overflow bucket allocator implementation. If overflow buckets exist
+    /// (indicated by `overflow_buckets_skipped > 0` in the result), those
+    /// entries will be lost after the grow completes.
+    fn migrate_chunk_with_rehash<F>(
+        &self,
+        chunk_idx: u64,
+        old_version: u8,
+        new_version: u8,
+        new_size: u64,
+        rehash_fn: &F,
+    ) -> ChunkMigrationResult
+    where
+        F: Fn(Address) -> Option<KeyHash>,
+    {
+        let old_size = self.tables[old_version as usize].size();
+        let (start_bucket, end_bucket) = get_chunk_bounds(chunk_idx, old_size);
+
+        let mut migrated = 0u64;
+        let mut overflow_buckets_skipped = 0u64;
+        let mut rehash_failures = 0u64;
+
+        for bucket_idx in start_bucket..end_bucket {
+            let old_bucket = self.tables[old_version as usize].bucket_at(bucket_idx);
+
+            // Migrate primary bucket entries
+            for i in 0..HashBucket::NUM_ENTRIES {
+                let entry = old_bucket.entries[i].load_index(Ordering::Acquire);
+
+                if entry.is_unused() || entry.is_tentative() {
+                    continue;
+                }
+
+                // Get the full hash by reading and rehashing the key at this address
+                // NOTE: We call rehash_fn only once and reuse the result to avoid
+                // issues with non-deterministic callbacks or callbacks with side effects
+                let address = entry.address();
+                let hash = match rehash_fn(address) {
+                    Some(h) => h,
+                    None => {
+                        // Cannot rehash - skip this entry (data loss)
+                        rehash_failures += 1;
+                        continue;
+                    }
+                };
+
+                // Use the full hash to compute the correct new bucket index
+                // This is the key fix: we use hash.hash_table_index(new_size)
+                // instead of trying to infer from the stored tag
+                let new_bucket_idx = hash.hash_table_index(new_size) as u64;
+
+                // Create a new entry with the rehashed tag for consistency
+                let new_entry = IndexHashBucketEntry::new(address, hash.tag(), false);
+
+                // Try to insert into new table
+                if self.insert_into_new_table(new_entry, new_bucket_idx, new_version) {
+                    migrated += 1;
+                }
+            }
+
+            // Check for overflow buckets that we cannot migrate
+            // WARNING: Without an overflow bucket allocator, we cannot follow
+            // overflow chains. Any entries in overflow buckets will be lost.
+            let overflow = old_bucket.overflow_entry.load(Ordering::Acquire);
+            if !overflow.is_unused() {
+                // Count the overflow bucket - entries here will be lost
+                overflow_buckets_skipped += 1;
+                
+                // TODO: Once overflow bucket allocator is implemented, follow
+                // the chain and migrate all entries using rehash_fn for each
+            }
+        }
+
+        ChunkMigrationResult {
+            migrated,
+            overflow_buckets_skipped,
+            rehash_failures,
+        }
+    }
+
+    /// Insert an entry into the new table during growth
+    fn insert_into_new_table(
+        &self,
+        entry: IndexHashBucketEntry,
+        bucket_idx: u64,
+        new_version: u8,
+    ) -> bool {
+        let new_bucket = self.tables[new_version as usize].bucket_at(bucket_idx);
+
+        // Find a free slot in the new bucket
+        for i in 0..HashBucket::NUM_ENTRIES {
+            let current = new_bucket.entries[i].load_index(Ordering::Acquire);
+
+            if current.is_unused() {
+                // Try to claim this slot
+                match new_bucket.entries[i].compare_exchange(
+                    HashBucketEntry::INVALID,
+                    entry.to_hash_bucket_entry(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        // No free slot found - in a full implementation, we would allocate
+        // an overflow bucket here
+        false
+    }
+
+    /// Complete a grow operation that was started with `start_grow()`
+    ///
+    /// This should be called after all chunks have been processed via
+    /// `migrate_chunk()`. This is for external callers that want to
+    /// control the migration process (e.g., for concurrent compaction).
+    ///
+    /// # Warning
+    /// If the returned `GrowResult` has `overflow_buckets_skipped > 0` or
+    /// `rehash_failures > 0`, some entries may have been lost during migration.
+    /// Check `has_data_loss_warning()` on the result.
+    pub fn complete_grow(&mut self) -> GrowResult {
+        if !self.grow_in_progress.load(Ordering::Acquire) {
+            return GrowResult::failure(Status::Aborted);
+        }
+
+        // Check if all chunks are done
+        if self.grow_state.remaining_chunks() > 0 {
+            return GrowResult::failure(Status::Pending);
+        }
+
+        let old_version = self.grow_state.old_version();
+        let new_version = self.grow_state.new_version();
+        let old_size = self.tables[old_version as usize].size();
+        let new_size = self.tables[new_version as usize].size();
+
+        // Get accumulated data loss stats from chunk migrations
+        let entries_migrated = self.grow_state.get_entries_migrated();
+        let overflow_buckets_skipped = self.grow_state.get_overflow_buckets_skipped();
+        let rehash_failures = self.grow_state.get_rehash_failures();
+
+        // Switch to new version
+        self.version.store(new_version, Ordering::Release);
+
+        // Reset grow state
+        self.grow_state.reset();
+        self.grow_in_progress.store(false, Ordering::Release);
+
+        // Return result with data loss tracking, consistent with grow_with_rehash
+        GrowResult::with_data_loss_tracking(
+            old_size,
+            new_size,
+            entries_migrated,
+            0, // duration not tracked for chunked growth
+            overflow_buckets_skipped,
+            rehash_failures,
+        )
+    }
+
+    /// Get the grow state (for external progress tracking)
+    pub fn grow_state(&self) -> &GrowState {
+        &self.grow_state
+    }
+
+    /// Get a mutable reference to grow state
+    pub fn grow_state_mut(&mut self) -> &mut GrowState {
+        &mut self.grow_state
     }
 
     /// Find an entry in the hash index
     ///
     /// Returns the entry and a pointer to the atomic entry location.
     pub fn find_entry(&self, hash: KeyHash) -> FindResult {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let bucket = self.tables[version].bucket(hash);
         let tag = hash.tag();
 
@@ -156,7 +571,7 @@ impl MemHashIndex {
     /// If the entry doesn't exist, creates a new tentative entry that the caller
     /// should finalize by CAS-ing in the actual address.
     pub fn find_or_create_entry(&self, hash: KeyHash) -> FindResult {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let tag = hash.tag();
 
         loop {
@@ -347,7 +762,7 @@ impl MemHashIndex {
 
     /// Garbage collect entries pointing to addresses before the given address
     pub fn garbage_collect(&self, new_begin_address: Address) -> u64 {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
         let mut cleaned = 0u64;
 
@@ -385,7 +800,7 @@ impl MemHashIndex {
 
     /// Clear all tentative entries (used during recovery)
     pub fn clear_tentative_entries(&self) {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
         for idx in 0..table_size {
@@ -403,7 +818,7 @@ impl MemHashIndex {
 
     /// Dump distribution statistics
     pub fn dump_distribution(&self) -> IndexStats {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
         let mut total_entries = 0u64;
@@ -454,7 +869,7 @@ impl MemHashIndex {
         checkpoint_dir: &Path,
         token: crate::checkpoint::CheckpointToken,
     ) -> io::Result<IndexMetadata> {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
         if !self.tables[version].is_initialized() {
@@ -469,7 +884,7 @@ impl MemHashIndex {
 
         // Create metadata
         let mut metadata = IndexMetadata::with_token(token);
-        metadata.version = self.version as u32;
+        metadata.version = self.version.load(Ordering::Acquire) as u32;
         metadata.table_size = table_size;
         metadata.num_buckets = stats.buckets_with_entries;
         metadata.num_entries = stats.used_entries;
@@ -489,7 +904,7 @@ impl MemHashIndex {
 
     /// Write the raw hash table data to a file
     fn write_index_data(&self, path: &Path) -> io::Result<()> {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
         let file = File::create(path)?;
@@ -563,7 +978,7 @@ impl MemHashIndex {
 
     /// Read the raw hash table data from a file
     fn read_index_data(&mut self, path: &Path) -> io::Result<()> {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
 
         let file = File::open(path)?;
         let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MB buffer
@@ -610,7 +1025,7 @@ impl MemHashIndex {
 
     /// Verify that the recovered index is consistent
     pub fn verify_recovery(&self) -> io::Result<()> {
-        let version = self.version as usize;
+        let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
         let mut errors = 0u64;
@@ -938,5 +1353,138 @@ mod tests {
 
         assert_eq!(original_stats.table_size, recovered_stats.table_size);
         assert_eq!(original_stats.used_entries, recovered_stats.used_entries);
+    }
+
+    // ============ Growth Tests ============
+
+    #[test]
+    fn test_grow_config() {
+        let config = GrowConfig::new()
+            .with_max_load_factor(0.8)
+            .with_growth_factor(4)
+            .with_auto_grow(true);
+
+        assert_eq!(config.growth_factor, 4);
+        assert!(config.auto_grow);
+    }
+
+    #[test]
+    fn test_grow_empty_index() {
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+        index.set_grow_config(GrowConfig::new().with_growth_factor(2));
+
+        // Grow with a rehash callback that returns None (no entries to rehash)
+        let result = index.grow_with_rehash(|_addr| None);
+        assert!(result.success);
+        assert_eq!(result.old_size, 256);
+        assert_eq!(result.new_size, 512);
+        assert_eq!(index.size(), 512);
+        assert_eq!(index.version(), 1);
+    }
+
+    #[test]
+    fn test_grow_with_entries() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::sync::RwLock;
+
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+        index.set_grow_config(GrowConfig::new().with_growth_factor(2));
+
+        // Store address -> hash mapping for rehash callback
+        let hash_map: Arc<RwLock<HashMap<u64, KeyHash>>> = Arc::new(RwLock::new(HashMap::new()));
+
+        // Add some entries
+        // Note: Start from i=1 and use non-zero addresses to avoid the edge case
+        // where address=0 and tag=0 creates an entry that is_unused() returns true for.
+        let test_hashes: Vec<KeyHash> = (1..=20).map(|i| KeyHash::new(i * 7919)).collect();
+        for (i, hash) in test_hashes.iter().enumerate() {
+            let result = index.find_or_create_entry(*hash);
+            if let Some(atomic_entry) = result.atomic_entry {
+                // Use non-zero page to avoid Address(0) which would create is_unused() entry
+                let addr = Address::new(1, ((i + 1) * 100) as u32);
+                index.update_entry(atomic_entry, addr, hash.tag());
+                // Store the hash for later rehashing
+                hash_map.write().unwrap().insert(addr.control(), *hash);
+            }
+        }
+
+        let original_stats = index.dump_distribution();
+        assert!(original_stats.used_entries > 0);
+
+        // Grow the index with proper rehash callback
+        let hash_map_ref = hash_map.clone();
+        let result = index.grow_with_rehash(|addr| {
+            hash_map_ref.read().unwrap().get(&addr.control()).copied()
+        });
+        
+        assert_eq!(result.old_size, 256);
+        assert_eq!(result.new_size, 512);
+        assert!(result.entries_migrated > 0, "Should have migrated entries");
+        assert_eq!(result.rehash_failures, 0, "All entries should be rehashed successfully");
+
+        // Verify all entries can still be found after grow
+        for hash in test_hashes.iter() {
+            let find_result = index.find_entry(*hash);
+            assert!(find_result.found(), "Entry should still be findable after grow");
+        }
+
+        let new_stats = index.dump_distribution();
+        assert!(new_stats.used_entries > 0);
+        assert_eq!(new_stats.table_size, 512);
+    }
+
+    #[test]
+    fn test_should_grow() {
+        let grow_config = GrowConfig::new()
+            .with_max_load_factor(0.01) // Very low to trigger grow
+            .with_auto_grow(true);
+
+        let mut index = MemHashIndex::with_grow_config(grow_config);
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+
+        // Initially should not grow (no entries)
+        assert!(!index.should_grow());
+
+        // Add many entries to increase load factor
+        for i in 0..100u64 {
+            let hash = KeyHash::new(i * 12345);
+            let result = index.find_or_create_entry(hash);
+            if let Some(atomic_entry) = result.atomic_entry {
+                index.update_entry(atomic_entry, Address::new(i as u32, 0), hash.tag());
+            }
+        }
+
+        // Now should grow
+        assert!(index.should_grow());
+    }
+
+    #[test]
+    fn test_grow_in_progress_prevention() {
+        let mut index = MemHashIndex::new();
+        let config = MemHashIndexConfig::new(256);
+        index.initialize(&config);
+
+        // Start grow
+        assert!(index.start_grow().is_ok());
+        assert!(index.is_grow_in_progress());
+
+        // Second start should fail
+        assert!(index.start_grow().is_err());
+
+        // Complete the grow
+        let result = index.grow_state_mut();
+        while result.get_next_chunk().is_some() {
+            result.complete_chunk();
+        }
+        let _ = index.complete_grow();
+
+        // Now should be able to start again
+        assert!(!index.is_grow_in_progress());
     }
 }

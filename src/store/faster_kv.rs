@@ -408,25 +408,65 @@ where
     }
 
     /// Synchronous read operation
-    pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
+    pub(crate) fn read_sync(&self, _ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
+        let start = Instant::now();
         let hash = KeyHash::new(key.get_hash());
 
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
 
         if !result.found() {
+            // Record miss statistics
+            if self.stats_collector.is_enabled() {
+                self.stats_collector.store_stats.operations.record_read(false);
+                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            }
             return Ok(None);
         }
 
         let mut address = result.entry.address();
 
+        // Check read cache first if enabled
+        if address.in_readcache() {
+            if let Some(value) = self.try_read_from_cache(address, key) {
+                // Record hit statistics
+                if self.stats_collector.is_enabled() {
+                    self.stats_collector.store_stats.operations.record_read(true);
+                    self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                }
+                return Ok(Some(value));
+            }
+            // If cache miss, skip to underlying HybridLog address
+            address = self.skip_read_cache(address);
+        }
+
         // Traverse the chain to find the key
         while address.is_valid() {
-            // SAFETY: These are read-only accesses to log metadata
-            let read_only_address = unsafe { self.hlog().get_read_only_address() };
+            // Check read cache for chain entries
+            if address.in_readcache() {
+                if let Some(value) = self.try_read_from_cache(address, key) {
+                    // Record hit statistics
+                    if self.stats_collector.is_enabled() {
+                        self.stats_collector.store_stats.operations.record_read(true);
+                        self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                    }
+                    return Ok(Some(value));
+                }
+                // Skip to underlying address
+                address = self.skip_read_cache(address);
+                continue;
+            }
 
-            if address < unsafe { self.hlog().get_head_address() } {
+            // SAFETY: These are read-only accesses to log metadata
+            let head_address = unsafe { self.hlog().get_head_address() };
+
+            if address < head_address {
+                // Record pending statistics
+                if self.stats_collector.is_enabled() {
+                    self.stats_collector.store_stats.operations.record_pending();
+                }
                 // Record is on disk - need async I/O
+                // TODO: In the future, we could read from disk and insert into cache
                 return Err(Status::Pending);
             }
 
@@ -442,11 +482,31 @@ where
                 if record_key == key {
                     // Check for tombstone
                     if record.header.is_tombstone() {
+                        // Record miss (tombstone found)
+                        if self.stats_collector.is_enabled() {
+                            self.stats_collector.store_stats.operations.record_read(false);
+                            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                        }
                         return Ok(None);
                     }
 
                     // Return value
                     let value = unsafe { record.value() };
+
+                    // If address is in read-only region, consider inserting into cache
+                    // for future reads (only for cold data from read-only region)
+                    let safe_read_only = unsafe { self.hlog().get_safe_read_only_address() };
+                    if address < safe_read_only && self.read_cache.is_some() {
+                        // Insert into read cache for future reads
+                        let _ = self.try_insert_into_cache(key, value, address);
+                    }
+
+                    // Record hit statistics
+                    if self.stats_collector.is_enabled() {
+                        self.stats_collector.store_stats.operations.record_read(true);
+                        self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                    }
+
                     return Ok(Some(value.clone()));
                 }
 
@@ -457,22 +517,35 @@ where
             }
         }
 
+        // Record miss statistics
+        if self.stats_collector.is_enabled() {
+            self.stats_collector.store_stats.operations.record_read(false);
+            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+        }
         Ok(None)
     }
 
-    /// Synchronous upsert operation
-    pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
+    /// Internal upsert implementation without statistics recording.
+    /// 
+    /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
+    /// operation statistics when RMW creates a new record via upsert.
+    fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
         let hash = KeyHash::new(key.get_hash());
 
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
 
         if result.atomic_entry.is_none() {
-            return Status::OutOfMemory;
+            return (Status::OutOfMemory, 0);
         }
 
         let atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
+
+        // Invalidate any existing read cache entry for this key
+        if old_address.in_readcache() {
+            self.invalidate_cache_entry(old_address, &key);
+        }
 
         // Calculate record size
         let record_size = Record::<K, V>::size();
@@ -481,7 +554,7 @@ where
         // SAFETY: Allocation is protected by epoch and internal synchronization
         let address = match unsafe { self.hlog_mut().allocate(record_size as u32) } {
             Ok(addr) => addr,
-            Err(status) => return status,
+            Err(status) => return (status, 0),
         };
 
         // Get pointer to the allocated space
@@ -493,8 +566,9 @@ where
             unsafe {
                 let record = ptr.as_ptr() as *mut Record<K, V>;
 
-                // Initialize header
-                let header = RecordInfo::new(old_address, ctx.version as u16, false, false, false);
+                // Initialize header - use the underlying HybridLog address, not cache address
+                let hlog_old_address = self.skip_read_cache(old_address);
+                let header = RecordInfo::new(hlog_old_address, ctx.version as u16, false, false, false);
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
@@ -518,17 +592,41 @@ where
 
             if status != Status::Ok {
                 // CAS failed - another thread updated, need to retry
-                // For now, just return success since the record is in the log
+                // Record retry statistics
+                if self.stats_collector.is_enabled() {
+                    self.stats_collector.store_stats.operations.record_retry();
+                }
             }
 
-            Status::Ok
+            (Status::Ok, record_size)
         } else {
-            Status::OutOfMemory
+            (Status::OutOfMemory, 0)
         }
+    }
+
+    /// Synchronous upsert operation
+    ///
+    /// Inserts or updates a key-value pair.
+    pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
+        let start = Instant::now();
+        
+        let (status, record_size) = self.upsert_internal(ctx, key, value);
+
+        // Record upsert statistics
+        if self.stats_collector.is_enabled() {
+            self.stats_collector.store_stats.operations.record_upsert();
+            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            if record_size > 0 {
+                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+            }
+        }
+
+        status
     }
 
     /// Synchronous delete operation
     pub(crate) fn delete_sync(&self, ctx: &mut ThreadContext, key: &K) -> Status {
+        let start = Instant::now();
         let hash = KeyHash::new(key.get_hash());
 
         // Find entry in hash index
@@ -540,6 +638,11 @@ where
 
         let atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
+
+        // Invalidate any existing read cache entry for this key
+        if old_address.in_readcache() {
+            self.invalidate_cache_entry(old_address, key);
+        }
 
         // Calculate record size (tombstone record)
         let record_size = Record::<K, V>::size();
@@ -559,8 +662,9 @@ where
             unsafe {
                 let record = ptr.as_ptr() as *mut Record<K, V>;
 
-                // Initialize header with tombstone flag
-                let header = RecordInfo::new(old_address, ctx.version as u16, false, true, false);
+                // Initialize header with tombstone flag - use underlying HybridLog address
+                let hlog_old_address = self.skip_read_cache(old_address);
+                let header = RecordInfo::new(hlog_old_address, ctx.version as u16, false, true, false);
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
@@ -577,6 +681,13 @@ where
                 false,
             );
 
+            // Record delete statistics
+            if self.stats_collector.is_enabled() {
+                self.stats_collector.store_stats.operations.record_delete();
+                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+            }
+
             Status::Ok
         } else {
             Status::OutOfMemory
@@ -588,6 +699,7 @@ where
     where
         F: FnMut(&mut V) -> bool,
     {
+        let start = Instant::now();
         let hash = KeyHash::new(key.get_hash());
 
         // Find or create entry in hash index
@@ -597,7 +709,7 @@ where
             return Status::OutOfMemory;
         }
 
-        let atomic_entry = result.atomic_entry.unwrap();
+        let _atomic_entry = result.atomic_entry.unwrap();
         let old_address = result.entry.address();
 
         // Try to find existing record for in-place update
@@ -616,6 +728,11 @@ where
                         // Try in-place update
                         let value = (*record).value_mut();
                         if modifier(value) {
+                            // Record RMW statistics (in-place update)
+                            if self.stats_collector.is_enabled() {
+                                self.stats_collector.store_stats.operations.record_rmw();
+                                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                            }
                             return Status::Ok;
                         }
                         // modifier returned false, indicating abort - fall through to create new record
@@ -647,8 +764,20 @@ where
             return Status::NotFound;
         };
 
-        // Upsert the new value
-        self.upsert_sync(ctx, key, new_value)
+        // Upsert the new value using the internal method to avoid double-counting
+        // statistics. We only want to record RMW stats, not both upsert and RMW.
+        let (status, record_size) = self.upsert_internal(ctx, key, new_value);
+
+        // Record RMW statistics only (not upsert stats)
+        if self.stats_collector.is_enabled() {
+            self.stats_collector.store_stats.operations.record_rmw();
+            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            if record_size > 0 {
+                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+            }
+        }
+
+        status
     }
 
     /// Simple compaction: shift log begin address and garbage collect index
@@ -1105,6 +1234,13 @@ where
             rc.skip(address)
         } else {
             address
+        }
+    }
+
+    /// Invalidate a cache entry for a key
+    fn invalidate_cache_entry(&self, address: Address, key: &K) {
+        if let Some(ref rc) = self.read_cache {
+            let _ = rc.invalidate(address, key);
         }
     }
 

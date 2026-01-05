@@ -7,9 +7,12 @@
 //! - Double buffering: Prefetches next page while scanning current (better performance)
 //! - Concurrent: Multiple threads can scan different pages simultaneously
 
+use std::io;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::address::Address;
+use crate::device::SyncStorageDevice;
 use crate::record::{Key, Record, Value};
 use crate::utility::AlignedBuffer;
 
@@ -243,7 +246,7 @@ impl LogPageIterator {
 ///
 /// This iterator provides a simple way to scan through all records
 /// in a range of the log. It handles page boundaries automatically.
-pub struct LogScanIterator<K, V>
+pub struct LogScanIterator<K, V, D = ()>
 where
     K: Key,
     V: Value,
@@ -256,16 +259,20 @@ where
     range: ScanRange,
     /// Records scanned
     records_scanned: u64,
+    /// Optional storage device for disk I/O
+    device: Option<Arc<D>>,
+    /// Page size
+    page_size: usize,
     /// Type markers
     _marker: std::marker::PhantomData<(K, V)>,
 }
 
-impl<K, V> LogScanIterator<K, V>
+impl<K, V> LogScanIterator<K, V, ()>
 where
     K: Key,
     V: Value,
 {
-    /// Create a new log scan iterator
+    /// Create a new log scan iterator without a device (memory-only mode)
     pub fn new(range: ScanRange, page_size: usize) -> Self {
         let alignment = 4096; // Default sector alignment
         Self {
@@ -273,6 +280,8 @@ where
             current_page: LogPage::new(page_size, alignment),
             range,
             records_scanned: 0,
+            device: None,
+            page_size,
             _marker: std::marker::PhantomData,
         }
     }
@@ -335,8 +344,184 @@ where
     }
 }
 
+impl<K, V, D> LogScanIterator<K, V, D>
+where
+    K: Key,
+    V: Value,
+    D: SyncStorageDevice,
+{
+    /// Create a new log scan iterator with a device for disk I/O
+    pub fn with_device(range: ScanRange, page_size: usize, device: Arc<D>) -> Self {
+        let alignment = device.alignment().max(4096);
+        Self {
+            page_iter: LogPageIterator::new(range, page_size),
+            current_page: LogPage::new(page_size, alignment),
+            range,
+            records_scanned: 0,
+            device: Some(device),
+            page_size,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Get the scan range
+    pub fn range(&self) -> ScanRange {
+        self.range
+    }
+
+    /// Get the number of records scanned
+    pub fn records_scanned(&self) -> u64 {
+        self.records_scanned
+    }
+
+    /// Check if there are more records
+    pub fn has_more(&self) -> bool {
+        self.current_page.has_more() || self.page_iter.has_more()
+    }
+
+    /// Get the current page buffer (for loading data)
+    pub fn current_page_mut(&mut self) -> &mut LogPage {
+        &mut self.current_page
+    }
+
+    /// Advance to the next page
+    /// 
+    /// Returns the page address and start address to read,
+    /// or None if no more pages.
+    pub fn advance_page(&mut self) -> Option<(Address, Address)> {
+        self.page_iter.next_page()
+    }
+
+    /// Get the next record from the current page
+    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
+        let result = self.current_page.get_next::<K, V>();
+        if result.is_some() {
+            self.records_scanned += 1;
+        }
+        result
+    }
+
+    /// Copy data into the current page buffer
+    /// 
+    /// This is used to load page data from memory or disk.
+    pub fn load_page_data(&mut self, data: &[u8], start_addr: Address, until: Address) {
+        if let Some(buf) = self.current_page.buffer_mut() {
+            let offset = start_addr.offset() as usize;
+            let copy_len = data.len().min(buf.len() - offset);
+            buf[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+        }
+        
+        let page_addr = Address::new(start_addr.page(), 0);
+        self.current_page.update(page_addr, start_addr, until);
+        self.current_page.set_status(LogPageStatus::Ready);
+    }
+
+    /// Load a page from the device synchronously
+    ///
+    /// Reads a full page from the storage device into the current page buffer.
+    ///
+    /// # Arguments
+    /// * `page_num` - The page number to read
+    /// * `start_addr` - The starting address within the page
+    /// * `until` - The end address for scanning
+    ///
+    /// # Returns
+    /// * `Ok(())` - If the page was loaded successfully
+    /// * `Err(io::Error)` - If the I/O operation failed
+    pub fn load_page_from_device(
+        &mut self,
+        page_num: u32,
+        start_addr: Address,
+        until: Address,
+    ) -> io::Result<()> {
+        let device = self.device.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "No device configured for iterator")
+        })?;
+
+        // Calculate the offset in the device
+        let device_offset = page_num as u64 * self.page_size as u64;
+
+        // Get the buffer and read from device
+        let buf = self.current_page.buffer_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Page buffer not available")
+        })?;
+
+        // Read the entire page from device
+        let bytes_read = device.read_sync(device_offset, buf)?;
+
+        if bytes_read < self.page_size {
+            // Zero out the rest if we didn't read a full page
+            buf[bytes_read..].fill(0);
+        }
+
+        // Update page metadata
+        let page_addr = Address::new(page_num, 0);
+        self.current_page.update(page_addr, start_addr, until);
+        self.current_page.set_status(LogPageStatus::Ready);
+
+        Ok(())
+    }
+
+    /// Scan and process all records in the range using a callback
+    ///
+    /// This method handles all the page loading and iteration internally,
+    /// calling the provided callback for each record.
+    ///
+    /// # Arguments
+    /// * `callback` - A function called for each record: (address, record) -> bool
+    ///                Return false to stop iteration early.
+    ///
+    /// # Returns
+    /// * `Ok(records_processed)` - Number of records processed
+    /// * `Err(io::Error)` - If an I/O error occurred
+    pub fn scan_all<F>(&mut self, mut callback: F) -> io::Result<u64>
+    where
+        F: FnMut(Address, &Record<K, V>) -> bool,
+    {
+        let mut processed = 0u64;
+
+        while let Some((page_addr, start_addr)) = self.advance_page() {
+            // Determine the end address for this page
+            let page_end = Address::new(page_addr.page() + 1, 0);
+            let until = if page_end < self.range.end {
+                page_end
+            } else {
+                self.range.end
+            };
+
+            // Load the page from device
+            self.load_page_from_device(page_addr.page(), start_addr, until)?;
+
+            // Process all records in the page
+            while let Some((addr, record_ptr)) = self.next_record() {
+                let record = unsafe { record_ptr.as_ref() };
+                processed += 1;
+
+                // Call the user callback
+                if !callback(addr, record) {
+                    return Ok(processed);
+                }
+            }
+
+            // Reset page for next iteration
+            self.finish_page();
+        }
+
+        Ok(processed)
+    }
+
+    /// Mark current page as exhausted and ready for next page
+    pub fn finish_page(&mut self) {
+        self.current_page.reset();
+    }
+}
+
 /// Double-buffered log iterator for better performance
-pub struct DoubleBufferedLogIterator<K, V>
+///
+/// Uses two page buffers to enable prefetching while scanning.
+/// While one buffer is being processed, the next page can be loaded
+/// into the other buffer.
+pub struct DoubleBufferedLogIterator<K, V, D = ()>
 where
     K: Key,
     V: Value,
@@ -351,16 +536,22 @@ where
     range: ScanRange,
     /// Records scanned
     records_scanned: u64,
+    /// Optional storage device for disk I/O
+    device: Option<Arc<D>>,
+    /// Page size
+    page_size: usize,
+    /// Pending prefetch info: (page_num, start_addr, until_addr)
+    pending_prefetch: Option<(u32, Address, Address)>,
     /// Type markers
     _marker: std::marker::PhantomData<(K, V)>,
 }
 
-impl<K, V> DoubleBufferedLogIterator<K, V>
+impl<K, V> DoubleBufferedLogIterator<K, V, ()>
 where
     K: Key,
     V: Value,
 {
-    /// Create a new double-buffered log iterator
+    /// Create a new double-buffered log iterator without a device
     pub fn new(range: ScanRange, page_size: usize) -> Self {
         let alignment = 4096;
         Self {
@@ -372,8 +563,16 @@ where
             page_iter: LogPageIterator::new(range, page_size),
             range,
             records_scanned: 0,
+            device: None,
+            page_size,
+            pending_prefetch: None,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Get the scan range
+    pub fn range(&self) -> ScanRange {
+        self.range
     }
 
     /// Get the current page
@@ -387,12 +586,12 @@ where
     }
 
     /// Get the next (prefetch) page
-    pub fn next_page(&self) -> &LogPage {
+    pub fn prefetch_page(&self) -> &LogPage {
         &self.pages[1 - self.current_idx]
     }
 
     /// Get the next page mutably
-    pub fn next_page_mut(&mut self) -> &mut LogPage {
+    pub fn prefetch_page_mut(&mut self) -> &mut LogPage {
         &mut self.pages[1 - self.current_idx]
     }
 
@@ -429,9 +628,254 @@ where
     }
 }
 
+impl<K, V, D> DoubleBufferedLogIterator<K, V, D>
+where
+    K: Key,
+    V: Value,
+    D: SyncStorageDevice,
+{
+    /// Create a new double-buffered log iterator with a device
+    pub fn with_device(range: ScanRange, page_size: usize, device: Arc<D>) -> Self {
+        let alignment = device.alignment().max(4096);
+        Self {
+            pages: [
+                LogPage::new(page_size, alignment),
+                LogPage::new(page_size, alignment),
+            ],
+            current_idx: 0,
+            page_iter: LogPageIterator::new(range, page_size),
+            range,
+            records_scanned: 0,
+            device: Some(device),
+            page_size,
+            pending_prefetch: None,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Get the scan range
+    pub fn range(&self) -> ScanRange {
+        self.range
+    }
+
+    /// Get the current page
+    pub fn current_page(&self) -> &LogPage {
+        &self.pages[self.current_idx]
+    }
+
+    /// Get the current page mutably
+    pub fn current_page_mut(&mut self) -> &mut LogPage {
+        &mut self.pages[self.current_idx]
+    }
+
+    /// Get the next (prefetch) page
+    pub fn prefetch_page(&self) -> &LogPage {
+        &self.pages[1 - self.current_idx]
+    }
+
+    /// Get the next page mutably
+    pub fn prefetch_page_mut(&mut self) -> &mut LogPage {
+        &mut self.pages[1 - self.current_idx]
+    }
+
+    /// Switch to the next page buffer
+    pub fn switch_pages(&mut self) {
+        self.pages[self.current_idx].reset();
+        self.current_idx = 1 - self.current_idx;
+    }
+
+    /// Get the next page address to prefetch
+    pub fn next_prefetch_address(&mut self) -> Option<(Address, Address)> {
+        self.page_iter.next_page()
+    }
+
+    /// Get the next record from the current page
+    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
+        let result = self.pages[self.current_idx].get_next::<K, V>();
+        if result.is_some() {
+            self.records_scanned += 1;
+        }
+        result
+    }
+
+    /// Get the number of records scanned
+    pub fn records_scanned(&self) -> u64 {
+        self.records_scanned
+    }
+
+    /// Check if there are more records
+    pub fn has_more(&self) -> bool {
+        self.pages[self.current_idx].has_more() 
+            || self.pages[1 - self.current_idx].has_more()
+            || self.page_iter.has_more()
+    }
+
+    /// Load a page from the device into the specified buffer
+    fn load_page_into_buffer(
+        device: &D,
+        page: &mut LogPage,
+        page_num: u32,
+        start_addr: Address,
+        until: Address,
+        page_size: usize,
+    ) -> io::Result<()> {
+        let device_offset = page_num as u64 * page_size as u64;
+
+        let buf = page.buffer_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Page buffer not available")
+        })?;
+
+        let bytes_read = device.read_sync(device_offset, buf)?;
+
+        if bytes_read < page_size {
+            buf[bytes_read..].fill(0);
+        }
+
+        let page_addr = Address::new(page_num, 0);
+        page.update(page_addr, start_addr, until);
+        page.set_status(LogPageStatus::Ready);
+
+        Ok(())
+    }
+
+    /// Start prefetching the next page into the secondary buffer
+    ///
+    /// This prepares the next page to be loaded. Call `complete_prefetch`
+    /// to actually load the data.
+    pub fn start_prefetch(&mut self) -> Option<(u32, Address, Address)> {
+        if let Some((page_addr, start_addr)) = self.page_iter.next_page() {
+            let page_end = Address::new(page_addr.page() + 1, 0);
+            let until = if page_end < self.range.end {
+                page_end
+            } else {
+                self.range.end
+            };
+
+            self.pending_prefetch = Some((page_addr.page(), start_addr, until));
+            Some((page_addr.page(), start_addr, until))
+        } else {
+            self.pending_prefetch = None;
+            None
+        }
+    }
+
+    /// Complete the prefetch operation by loading data into the prefetch buffer
+    pub fn complete_prefetch(&mut self) -> io::Result<bool> {
+        let device = match self.device.as_ref() {
+            Some(d) => d,
+            None => return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No device configured for iterator",
+            )),
+        };
+
+        if let Some((page_num, start_addr, until)) = self.pending_prefetch.take() {
+            let prefetch_idx = 1 - self.current_idx;
+            Self::load_page_into_buffer(
+                device,
+                &mut self.pages[prefetch_idx],
+                page_num,
+                start_addr,
+                until,
+                self.page_size,
+            )?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Load the current page from the device
+    pub fn load_current_page(
+        &mut self,
+        page_num: u32,
+        start_addr: Address,
+        until: Address,
+    ) -> io::Result<()> {
+        let device = self.device.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "No device configured for iterator")
+        })?;
+
+        Self::load_page_into_buffer(
+            device,
+            &mut self.pages[self.current_idx],
+            page_num,
+            start_addr,
+            until,
+            self.page_size,
+        )
+    }
+
+    /// Scan all records with double buffering
+    ///
+    /// This method loads pages using double buffering for better I/O performance.
+    /// While processing one page, the next page is loaded in the background.
+    ///
+    /// # Arguments
+    /// * `callback` - A function called for each record: (address, record) -> bool
+    ///                Return false to stop iteration early.
+    ///
+    /// # Returns
+    /// * `Ok(records_processed)` - Number of records processed
+    /// * `Err(io::Error)` - If an I/O error occurred
+    pub fn scan_all<F>(&mut self, mut callback: F) -> io::Result<u64>
+    where
+        F: FnMut(Address, &Record<K, V>) -> bool,
+    {
+        let mut processed = 0u64;
+
+        // Load the first page
+        if let Some((page_addr, start_addr)) = self.page_iter.next_page() {
+            let page_end = Address::new(page_addr.page() + 1, 0);
+            let until = if page_end < self.range.end {
+                page_end
+            } else {
+                self.range.end
+            };
+            
+            self.load_current_page(page_addr.page(), start_addr, until)?;
+        } else {
+            return Ok(0);
+        }
+
+        // Start prefetching the next page
+        self.start_prefetch();
+        let _ = self.complete_prefetch();
+
+        loop {
+            // Process all records in the current page
+            while let Some((addr, record_ptr)) = self.next_record() {
+                let record = unsafe { record_ptr.as_ref() };
+                processed += 1;
+
+                if !callback(addr, record) {
+                    return Ok(processed);
+                }
+            }
+
+            // Check if there's a prefetched page ready
+            if !self.pages[1 - self.current_idx].has_more() && !self.page_iter.has_more() {
+                break;
+            }
+
+            // Switch to the prefetched page
+            self.switch_pages();
+
+            // If the new current page is ready, start prefetching the next
+            if self.pages[self.current_idx].status() == LogPageStatus::Ready {
+                self.start_prefetch();
+                let _ = self.complete_prefetch();
+            }
+        }
+
+        Ok(processed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::NullDisk;
 
     #[test]
     fn test_scan_range() {
@@ -483,7 +927,18 @@ mod tests {
     #[test]
     fn test_log_scan_iterator() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(2, 0));
-        let iter: LogScanIterator<u64, u64> = LogScanIterator::new(range, 4096);
+        let iter: LogScanIterator<u64, u64, ()> = LogScanIterator::new(range, 4096);
+
+        assert_eq!(iter.records_scanned(), 0);
+        // range() is only available when D: SyncStorageDevice
+    }
+
+    #[test]
+    fn test_log_scan_iterator_with_device() {
+        let range = ScanRange::new(Address::new(0, 0), Address::new(2, 0));
+        let device = Arc::new(NullDisk::new());
+        let iter: LogScanIterator<u64, u64, NullDisk> = 
+            LogScanIterator::with_device(range, 4096, device);
 
         assert_eq!(iter.records_scanned(), 0);
         assert_eq!(iter.range().begin, Address::new(0, 0));
@@ -493,9 +948,21 @@ mod tests {
     #[test]
     fn test_double_buffered_iterator() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
-        let iter: DoubleBufferedLogIterator<u64, u64> = DoubleBufferedLogIterator::new(range, 4096);
+        let iter: DoubleBufferedLogIterator<u64, u64, ()> = DoubleBufferedLogIterator::new(range, 4096);
 
         assert_eq!(iter.records_scanned(), 0);
         assert!(iter.has_more());
+    }
+
+    #[test]
+    fn test_double_buffered_iterator_with_device() {
+        let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
+        let device = Arc::new(NullDisk::new());
+        let iter: DoubleBufferedLogIterator<u64, u64, NullDisk> = 
+            DoubleBufferedLogIterator::with_device(range, 4096, device);
+
+        assert_eq!(iter.records_scanned(), 0);
+        assert!(iter.has_more());
+        assert_eq!(iter.range().begin, Address::new(0, 0));
     }
 }

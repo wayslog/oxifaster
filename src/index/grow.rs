@@ -85,6 +85,12 @@ pub struct GrowState {
     next_chunk: AtomicU64,
     /// Whether growth is in progress
     in_progress: bool,
+    /// Accumulated overflow buckets skipped during migration
+    overflow_buckets_skipped: AtomicU64,
+    /// Accumulated rehash failures during migration
+    rehash_failures: AtomicU64,
+    /// Total entries migrated
+    entries_migrated: AtomicU64,
 }
 
 impl GrowState {
@@ -97,6 +103,9 @@ impl GrowState {
             num_pending_chunks: AtomicU64::new(0),
             next_chunk: AtomicU64::new(0),
             in_progress: false,
+            overflow_buckets_skipped: AtomicU64::new(0),
+            rehash_failures: AtomicU64::new(0),
+            entries_migrated: AtomicU64::new(0),
         }
     }
 
@@ -113,6 +122,10 @@ impl GrowState {
         self.num_pending_chunks.store(num_chunks, Ordering::Release);
         self.next_chunk.store(0, Ordering::Release);
         self.in_progress = true;
+        // Reset data loss tracking
+        self.overflow_buckets_skipped.store(0, Ordering::Release);
+        self.rehash_failures.store(0, Ordering::Release);
+        self.entries_migrated.store(0, Ordering::Release);
     }
 
     /// Get the old version
@@ -168,6 +181,9 @@ impl GrowState {
         self.num_pending_chunks.store(0, Ordering::Release);
         self.next_chunk.store(0, Ordering::Release);
         self.in_progress = false;
+        self.overflow_buckets_skipped.store(0, Ordering::Release);
+        self.rehash_failures.store(0, Ordering::Release);
+        self.entries_migrated.store(0, Ordering::Release);
     }
 
     /// Get grow progress as (completed_chunks, total_chunks)
@@ -177,13 +193,46 @@ impl GrowState {
         (completed, self.num_chunks)
     }
 
+    /// Record migration results from a chunk
+    ///
+    /// This should be called after each chunk migration to accumulate
+    /// statistics for the final result.
+    pub fn record_chunk_result(
+        &self,
+        entries_migrated: u64,
+        overflow_buckets_skipped: u64,
+        rehash_failures: u64,
+    ) {
+        self.entries_migrated.fetch_add(entries_migrated, Ordering::AcqRel);
+        self.overflow_buckets_skipped.fetch_add(overflow_buckets_skipped, Ordering::AcqRel);
+        self.rehash_failures.fetch_add(rehash_failures, Ordering::AcqRel);
+    }
+
+    /// Get accumulated overflow buckets skipped
+    pub fn get_overflow_buckets_skipped(&self) -> u64 {
+        self.overflow_buckets_skipped.load(Ordering::Acquire)
+    }
+
+    /// Get accumulated rehash failures
+    pub fn get_rehash_failures(&self) -> u64 {
+        self.rehash_failures.load(Ordering::Acquire)
+    }
+
+    /// Get total entries migrated
+    pub fn get_entries_migrated(&self) -> u64 {
+        self.entries_migrated.load(Ordering::Acquire)
+    }
+
     /// Complete the grow operation and return the result
     pub fn complete(mut self) -> GrowResult {
         let remaining = self.remaining_chunks();
+        let overflow = self.get_overflow_buckets_skipped();
+        let failures = self.get_rehash_failures();
+        let migrated = self.get_entries_migrated();
         self.reset();
         
         if remaining == 0 {
-            GrowResult::success(0, 0, 0, 0) // Actual sizes should be tracked externally
+            GrowResult::with_data_loss_tracking(0, 0, migrated, 0, overflow, failures)
         } else {
             GrowResult::failure(crate::status::Status::Aborted)
         }
@@ -211,6 +260,12 @@ pub struct GrowResult {
     pub duration_ms: u64,
     /// Status code if failed
     pub status: Option<crate::status::Status>,
+    /// Number of overflow buckets encountered that could not be migrated
+    /// (data loss warning if > 0)
+    pub overflow_buckets_skipped: u64,
+    /// Number of entries that failed to rehash (key could not be read)
+    /// These entries were skipped and may be lost
+    pub rehash_failures: u64,
 }
 
 impl GrowResult {
@@ -223,6 +278,61 @@ impl GrowResult {
             entries_migrated,
             duration_ms,
             status: None,
+            overflow_buckets_skipped: 0,
+            rehash_failures: 0,
+        }
+    }
+
+    /// Create a successful result with overflow bucket tracking
+    pub fn success_with_overflow(
+        old_size: u64,
+        new_size: u64,
+        entries_migrated: u64,
+        duration_ms: u64,
+        overflow_buckets_skipped: u64,
+    ) -> Self {
+        Self {
+            success: overflow_buckets_skipped == 0, // Not fully successful if we skipped overflow entries
+            new_size,
+            old_size,
+            entries_migrated,
+            duration_ms,
+            status: if overflow_buckets_skipped > 0 {
+                Some(crate::status::Status::OverflowBucketsSkipped)
+            } else {
+                None
+            },
+            overflow_buckets_skipped,
+            rehash_failures: 0,
+        }
+    }
+
+    /// Create a result with both overflow and rehash failure tracking
+    /// 
+    /// Success is false if either overflow buckets were skipped or rehash failures occurred,
+    /// as both indicate potential data loss.
+    pub fn with_data_loss_tracking(
+        old_size: u64,
+        new_size: u64,
+        entries_migrated: u64,
+        duration_ms: u64,
+        overflow_buckets_skipped: u64,
+        rehash_failures: u64,
+    ) -> Self {
+        let has_data_loss = overflow_buckets_skipped > 0 || rehash_failures > 0;
+        Self {
+            success: !has_data_loss,
+            new_size,
+            old_size,
+            entries_migrated,
+            duration_ms,
+            status: if has_data_loss {
+                Some(crate::status::Status::OverflowBucketsSkipped)
+            } else {
+                None
+            },
+            overflow_buckets_skipped,
+            rehash_failures,
         }
     }
 
@@ -235,7 +345,24 @@ impl GrowResult {
             entries_migrated: 0,
             duration_ms: 0,
             status: Some(status),
+            overflow_buckets_skipped: 0,
+            rehash_failures: 0,
         }
+    }
+
+    /// Check if any overflow buckets were skipped (potential data loss)
+    pub fn has_overflow_warning(&self) -> bool {
+        self.overflow_buckets_skipped > 0
+    }
+
+    /// Check if any rehash failures occurred (potential data loss)
+    pub fn has_rehash_failures(&self) -> bool {
+        self.rehash_failures > 0
+    }
+
+    /// Check if the grow had any issues (overflow or rehash failures)
+    pub fn has_data_loss_warning(&self) -> bool {
+        self.overflow_buckets_skipped > 0 || self.rehash_failures > 0
     }
 
     /// Calculate the growth ratio

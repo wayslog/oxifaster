@@ -168,6 +168,8 @@ where
     cold_compactor: Compactor,
     /// Number of active sessions
     num_active_sessions: AtomicU64,
+    /// Checkpoint directory for background checkpoint operations
+    checkpoint_dir: Option<std::path::PathBuf>,
     /// Phantom data for type parameters
     _marker: std::marker::PhantomData<(K, V)>,
 }
@@ -232,6 +234,7 @@ where
             hot_compactor: Compactor::with_config(hot_compaction_config),
             cold_compactor: Compactor::with_config(cold_compaction_config),
             num_active_sessions: AtomicU64::new(0),
+            checkpoint_dir: None,
             _marker: std::marker::PhantomData,
         })
     }
@@ -239,6 +242,16 @@ where
     /// Get the configuration
     pub fn config(&self) -> &F2Config {
         &self.config
+    }
+
+    /// Set the checkpoint directory for background checkpoint operations
+    pub fn set_checkpoint_dir(&mut self, dir: impl Into<std::path::PathBuf>) {
+        self.checkpoint_dir = Some(dir.into());
+    }
+
+    /// Get the checkpoint directory
+    pub fn checkpoint_dir(&self) -> Option<&std::path::Path> {
+        self.checkpoint_dir.as_deref()
     }
 
     /// Start a new session
@@ -522,7 +535,7 @@ where
     /// # Arguments
     /// * `checkpoint_dir` - Directory containing checkpoints
     /// * `token` - The checkpoint token to recover from
-    pub fn recover(&mut self, _checkpoint_dir: &Path, _token: Uuid) -> Result<u32, Status> {
+    pub fn recover(&mut self, checkpoint_dir: &Path, token: Uuid) -> Result<u32, Status> {
         let result = self.checkpoint.phase.compare_exchange(
             F2CheckpointPhase::Rest,
             F2CheckpointPhase::Recover,
@@ -534,15 +547,138 @@ where
             return Err(Status::Aborted);
         }
 
-        // TODO: Recover hot store
-        // TODO: Recover cold store
+        // Create checkpoint directory paths
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        let hot_dir = cp_dir.join("hot");
+        let cold_dir = cp_dir.join("cold");
+
+        // Verify that the checkpoint directory exists
+        if !cp_dir.exists() {
+            self.checkpoint
+                .phase
+                .store(F2CheckpointPhase::Rest, Ordering::Release);
+            return Err(Status::NotFound);
+        }
+
+        // At least one of hot or cold store must exist for a valid checkpoint
+        let hot_exists = hot_dir.exists();
+        let cold_exists = cold_dir.exists();
+        
+        if !hot_exists && !cold_exists {
+            // Neither store checkpoint exists - this is not a valid checkpoint
+            self.checkpoint
+                .phase
+                .store(F2CheckpointPhase::Rest, Ordering::Release);
+            return Err(Status::NotFound);
+        }
+
+        let mut version = 0u32;
+
+        // Recover hot store
+        if hot_exists {
+            // Recover hot store hash index
+            if let Err(_e) = self.hot_store.hash_index.recover(&hot_dir, None) {
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
+                return Err(Status::Corruption);
+            }
+
+            // Recover hot store hybrid log
+            unsafe {
+                if let Err(_e) = self.hot_store.hlog_mut().recover(&hot_dir, None) {
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                    return Err(Status::Corruption);
+                }
+            }
+
+            // Get version from hot store log metadata
+            if let Ok(log_meta) = crate::checkpoint::LogMetadata::read_from_file(&hot_dir.join("log.meta")) {
+                version = log_meta.version;
+            }
+        }
+
+        // Recover cold store
+        if cold_exists {
+            // Recover cold store hash index
+            if let Err(_e) = self.cold_store.hash_index.recover(&cold_dir, None) {
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
+                return Err(Status::Corruption);
+            }
+
+            // Recover cold store hybrid log
+            unsafe {
+                if let Err(_e) = self.cold_store.hlog_mut().recover(&cold_dir, None) {
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                    return Err(Status::Corruption);
+                }
+            }
+
+            // Get version from cold store log metadata if not already set from hot store
+            // This handles the case where only cold store checkpoint exists
+            if version == 0 {
+                if let Ok(log_meta) = crate::checkpoint::LogMetadata::read_from_file(&cold_dir.join("log.meta")) {
+                    version = log_meta.version;
+                }
+            }
+        }
+
+        // Update checkpoint state with recovered version so subsequent checkpoints
+        // continue from the correct version number
+        self.checkpoint.set_version(version);
 
         // Move back to REST phase
         self.checkpoint
             .phase
             .store(F2CheckpointPhase::Rest, Ordering::Release);
 
-        Ok(0) // Return version
+        Ok(version)
+    }
+
+    /// Save checkpoint to disk
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory to save checkpoint files
+    /// * `token` - The checkpoint token
+    pub fn save_checkpoint(&self, checkpoint_dir: &Path, token: Uuid) -> Result<(), Status> {
+        // Create checkpoint directories
+        let cp_dir = checkpoint_dir.join(token.to_string());
+        let hot_dir = cp_dir.join("hot");
+        let cold_dir = cp_dir.join("cold");
+
+        std::fs::create_dir_all(&hot_dir).map_err(|_| Status::Corruption)?;
+        std::fs::create_dir_all(&cold_dir).map_err(|_| Status::Corruption)?;
+
+        // Get the checkpoint version
+        let checkpoint_version = self.checkpoint.version();
+
+        // Checkpoint hot store index
+        let _hot_index_meta = self.hot_store.hash_index
+            .checkpoint(&hot_dir, token)
+            .map_err(|_| Status::Corruption)?;
+
+        // Checkpoint hot store hybrid log (writes both metadata and snapshot)
+        let _hot_log_meta = self.hot_store.hlog()
+            .checkpoint(&hot_dir, token, checkpoint_version)
+            .map_err(|_| Status::Corruption)?;
+
+        // Checkpoint cold store index
+        let _cold_index_meta = self.cold_store.hash_index
+            .checkpoint(&cold_dir, token)
+            .map_err(|_| Status::Corruption)?;
+
+        // Checkpoint cold store hybrid log (writes both metadata and snapshot)
+        let _cold_log_meta = self.cold_store.hlog()
+            .checkpoint(&cold_dir, token, checkpoint_version)
+            .map_err(|_| Status::Corruption)?;
+
+        Ok(())
     }
 
     /// Compact the hot log
@@ -755,18 +891,54 @@ where
                 self.checkpoint
                     .hot_store_status
                     .store(StoreCheckpointStatus::Active, Ordering::Release);
-                // TODO: Actually checkpoint hot store
-                self.checkpoint
-                    .hot_store_status
-                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
+                
+                // Actually checkpoint hot store - index first
+                let token = self.checkpoint.token();
+                let checkpoint_version = self.checkpoint.version();
+                let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
+                    let hot_dir = cp_dir.join(token.to_string()).join("hot");
+                    let dir_created = std::fs::create_dir_all(&hot_dir).is_ok();
+                    
+                    if dir_created {
+                        // Checkpoint hot store index
+                        let index_ok = self.hot_store.hash_index.checkpoint(&hot_dir, token).is_ok();
+                        
+                        // Checkpoint hot store hybrid log (writes both metadata and snapshot)
+                        let log_ok = self.hot_store.hlog()
+                            .checkpoint(&hot_dir, token, checkpoint_version)
+                            .is_ok();
+                        
+                        index_ok && log_ok
+                    } else {
+                        false
+                    }
+                } else {
+                    // No checkpoint directory configured - this is an error condition
+                    // Cannot checkpoint without a directory
+                    false
+                };
+                
+                if checkpoint_success {
+                    self.checkpoint
+                        .hot_store_status
+                        .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
-                // Move to cold store checkpoint phase
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
-                self.checkpoint
-                    .cold_store_status
-                    .store(StoreCheckpointStatus::Requested, Ordering::Release);
+                    // Move to cold store checkpoint phase
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
+                    self.checkpoint
+                        .cold_store_status
+                        .store(StoreCheckpointStatus::Requested, Ordering::Release);
+                } else {
+                    // Checkpoint failed - mark as failed and reset phase
+                    self.checkpoint
+                        .hot_store_status
+                        .store(StoreCheckpointStatus::Failed, Ordering::Release);
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                }
             }
 
             // Check cold store checkpoint
@@ -777,15 +949,50 @@ where
                 self.checkpoint
                     .cold_store_status
                     .store(StoreCheckpointStatus::Active, Ordering::Release);
-                // TODO: Actually checkpoint cold store
-                self.checkpoint
-                    .cold_store_status
-                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
+                
+                // Actually checkpoint cold store
+                let token = self.checkpoint.token();
+                let checkpoint_version = self.checkpoint.version();
+                let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
+                    let cold_dir = cp_dir.join(token.to_string()).join("cold");
+                    let dir_created = std::fs::create_dir_all(&cold_dir).is_ok();
+                    
+                    if dir_created {
+                        // Checkpoint cold store index
+                        let index_ok = self.cold_store.hash_index.checkpoint(&cold_dir, token).is_ok();
+                        
+                        // Checkpoint cold store hybrid log (writes both metadata and snapshot)
+                        let log_ok = self.cold_store.hlog()
+                            .checkpoint(&cold_dir, token, checkpoint_version)
+                            .is_ok();
+                        
+                        index_ok && log_ok
+                    } else {
+                        false
+                    }
+                } else {
+                    // No checkpoint directory configured - this is an error condition
+                    false
+                };
+                
+                if checkpoint_success {
+                    self.checkpoint
+                        .cold_store_status
+                        .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
-                // Move back to REST
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::Rest, Ordering::Release);
+                    // Move back to REST
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                } else {
+                    // Checkpoint failed - mark as failed and reset phase
+                    self.checkpoint
+                        .cold_store_status
+                        .store(StoreCheckpointStatus::Failed, Ordering::Release);
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                }
             }
 
             // Hot-cold compaction

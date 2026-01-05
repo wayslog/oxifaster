@@ -155,6 +155,8 @@ pub struct F2CheckpointState {
     pub cold_store_status: AtomicCheckpointStatus,
     /// Checkpoint token
     token: Uuid,
+    /// Checkpoint version (incremented with each successful checkpoint)
+    version: AtomicU32,
     /// Number of threads pending hot store persistence
     threads_pending_hot_store: AtomicU32,
     /// Number of threads pending callback issue
@@ -178,6 +180,7 @@ impl F2CheckpointState {
             hot_store_status: AtomicCheckpointStatus::default(),
             cold_store_status: AtomicCheckpointStatus::default(),
             token: Uuid::nil(),
+            version: AtomicU32::new(0),
             threads_pending_hot_store: AtomicU32::new(0),
             threads_pending_callback: AtomicU32::new(0),
             persistent_serial_nums,
@@ -187,6 +190,8 @@ impl F2CheckpointState {
     /// Initialize the checkpoint state for a new checkpoint
     pub fn initialize(&mut self, token: Uuid, num_active_threads: u32) {
         self.token = token;
+        // Increment version for this new checkpoint
+        self.version.fetch_add(1, Ordering::AcqRel);
         self.threads_pending_hot_store.store(num_active_threads, Ordering::Release);
         self.threads_pending_callback.store(num_active_threads, Ordering::Release);
         
@@ -201,6 +206,16 @@ impl F2CheckpointState {
     /// Get the checkpoint token
     pub fn token(&self) -> Uuid {
         self.token
+    }
+
+    /// Get the current checkpoint version
+    pub fn version(&self) -> u32 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Set the checkpoint version (used during recovery)
+    pub fn set_version(&self, version: u32) {
+        self.version.store(version, Ordering::Release);
     }
 
     /// Reset the checkpoint state

@@ -28,6 +28,8 @@ pub enum Status {
     InvalidOperation = 8,
     /// Feature or operation not supported
     NotSupported = 9,
+    /// Overflow buckets were skipped during index growth (potential data loss)
+    OverflowBucketsSkipped = 10,
 }
 
 impl Status {
@@ -61,6 +63,7 @@ impl Status {
                 | Status::InvalidArgument
                 | Status::InvalidOperation
                 | Status::NotSupported
+                | Status::OverflowBucketsSkipped
         )
     }
 
@@ -77,6 +80,7 @@ impl Status {
             Status::InvalidArgument => "InvalidArgument",
             Status::InvalidOperation => "InvalidOperation",
             Status::NotSupported => "NotSupported",
+            Status::OverflowBucketsSkipped => "OverflowBucketsSkipped",
         }
     }
 }
