@@ -9,9 +9,20 @@
 //! 3. If latest, conditionally insert into the tail of the log
 //! 4. Update hash index to point to new location
 //! 5. Shift begin_address to reclaim space
+//!
+//! # Concurrent Compaction
+//!
+//! The module also provides concurrent compaction support via `ConcurrentCompactor`,
+//! which distributes work across multiple threads for improved throughput.
 
 mod compact;
+mod concurrent;
 mod contexts;
 
 pub use compact::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
+pub use concurrent::{
+    ConcurrentCompactionConfig, ConcurrentCompactionContext, ConcurrentCompactionResult,
+    ConcurrentCompactionState, ConcurrentCompactor, ConcurrentLogPageIterator,
+    CompactionWorkerHandle, PageChunk,
+};
 pub use contexts::{CompactionContext, CompactionInsertContext};

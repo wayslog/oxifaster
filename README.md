@@ -145,7 +145,7 @@ fn main() {
 | **Cache Eviction** | Y | - | Y | 完成 (LRU 淘汰策略) |
 | **Log Compaction** | Y | Y | Y | 完成 |
 | **Auto Compaction** | Y | Y | Y | 完成 (后台线程) |
-| **Concurrent Compaction** | Y | Y | P | 部分实现 |
+| **Concurrent Compaction** | Y | Y | Y | 完成 (多线程页面分发) |
 | **Index Growth** | Y | Y | Y | 完成 (含 rehash 回调) |
 | **Log Scan Iterator** | Y | Y | Y | 完成 (支持 StorageDevice) |
 
@@ -154,8 +154,8 @@ fn main() {
 | 功能 | C++ | C# | Rust | 状态 |
 |-----|:---:|:---:|:----:|------|
 | **F2 Architecture** | Y | - | Y | 完成 (含 Checkpoint/Recovery) |
-| **Cold Index** | Y | - | N | 未实现 |
-| **Checkpoint Locks** | Y | Y | N | 未实现 |
+| **Cold Index** | Y | - | Y | 完成 (磁盘二级索引) |
+| **Checkpoint Locks** | Y | Y | Y | 完成 (CPR 协议锁保护) |
 | **Statistics** | Y | Y | Y | 完成 (集成到所有操作) |
 | **Variable Length Records** | - | Y | N | 未实现 |
 | **Async API** | Y | Y | P | 部分支持 |
@@ -210,6 +210,9 @@ fn main() {
 | **checkpoint** | Checkpoint 状态结构 | `src/checkpoint/state.rs` | :white_check_mark: |
 | **checkpoint** | Recovery 恢复结构 | `src/checkpoint/recovery.rs` | :white_check_mark: |
 | **checkpoint** | Serialization 序列化 | `src/checkpoint/serialization.rs` | :white_check_mark: |
+| **checkpoint** | Checkpoint Locks CPR 锁 | `src/checkpoint/locks.rs` | :white_check_mark: |
+| **index** | Cold Index 磁盘冷索引 | `src/index/cold_index.rs` | :white_check_mark: |
+| **compaction** | Concurrent Compaction | `src/compaction/concurrent.rs` | :white_check_mark: |
 
 **图例**: :white_check_mark: 完成 | :construction: 部分完成 | :x: 未实现
 
@@ -229,16 +232,17 @@ gantt
     section Phase3_Performance_DONE
         Read_Cache_Complete    :done, p3a, 2026-01-05, 1d
         Auto_Compaction        :done, p3b, 2026-01-05, 1d
+        Concurrent_Compaction  :done, p3b2, 2026-01-05, 1d
         Index_Growth_Impl      :done, p3c, 2026-01-05, 1d
         Log_Scan_Complete      :done, p3d, 2026-01-05, 1d
         Statistics_Integration :done, p3e, 2026-01-05, 1d
-    section Phase4_Advanced_PARTIAL
+    section Phase4_Advanced_DONE
         F2_Complete            :done, p4a, 2026-01-05, 1d
         F2_Checkpoint_Recovery :done, p4a2, 2026-01-05, 1d
-        Cold_Index             :p4b, 2026-01-20, 10d
-        Checkpoint_Locks       :p4c, after p4b, 5d
+        Cold_Index             :done, p4b, 2026-01-05, 1d
+        Checkpoint_Locks       :done, p4c, 2026-01-05, 1d
     section Phase5_Platform
-        io_uring_impl          :p5a, after p4c, 10d
+        io_uring_impl          :p5a, 2026-01-10, 10d
         Azure_Storage          :p5b, after p5a, 14d
 ```
 
@@ -271,7 +275,7 @@ let session = store.continue_session(state);        // 从状态恢复 session
 | **Read Cache 完整集成** | 热点数据内存缓存，集成到读取路径 | `cache/read_cache.rs` | :white_check_mark: |
 | **Cache Eviction** | LRU-like 缓存淘汰策略 | `cache/read_cache.rs` | :white_check_mark: |
 | **Auto Compaction** | 自动后台压缩线程 | `compaction/auto_compact.rs` | :white_check_mark: |
-| **Concurrent Compaction** | 多线程并发压缩 | `compaction/compact.rs` | :construction: |
+| **Concurrent Compaction** | 多线程并发压缩 | `compaction/concurrent.rs` | :white_check_mark: |
 | **Index Growth** | 动态哈希表扩容 (含 rehash 回调) | `index/grow.rs`, `index/mem_index.rs` | :white_check_mark: |
 | **Log Scan Iterator** | 日志扫描迭代器 (支持 StorageDevice) | `scan/log_iterator.rs` | :white_check_mark: |
 | **Statistics 集成** | 统计收集器集成到所有操作 | `stats/collector.rs` | :white_check_mark: |
@@ -299,15 +303,15 @@ let stats = store.stats();
 println!("Read ops: {}", stats.operations.reads);
 ```
 
-### Phase 4: 高级功能 (Advanced) - P2 (部分完成)
+### Phase 4: 高级功能 (Advanced) - P2 :white_check_mark: 已完成
 
 | 功能 | 描述 | 文件 | 状态 |
 |------|------|------|:----:|
 | **F2 Hot-Cold 完整实现** | 热冷数据分离 | `f2/store.rs` | :white_check_mark: |
 | **F2 Checkpoint/Recovery** | 热冷存储检查点与恢复 | `f2/store.rs`, `f2/state.rs` | :white_check_mark: |
 | **F2 后台迁移** | 自动数据迁移线程 | `f2/store.rs` | :white_check_mark: |
-| **Cold Index** | 磁盘上的冷索引 | `index/cold_index.rs` | :x: |
-| **Checkpoint Locks** | 检查点期间的锁保护 | `checkpoint/locks.rs` | :x: |
+| **Cold Index** | 磁盘上的二级哈希索引 | `index/cold_index.rs` | :white_check_mark: |
+| **Checkpoint Locks** | CPR 协议期间的锁保护 | `checkpoint/locks.rs` | :white_check_mark: |
 
 ```rust
 // 已实现 API: F2 热冷架构
@@ -318,6 +322,30 @@ let token = f2_store.checkpoint(checkpoint_dir)?;
 
 // F2 Recovery
 let version = f2_store.recover(checkpoint_dir, token)?;
+
+// Cold Index (磁盘二级索引)
+use oxifaster::index::{ColdIndex, ColdIndexConfig};
+let cold_config = ColdIndexConfig::new(table_size, in_mem_size, mutable_fraction);
+let mut cold_index = ColdIndex::new(cold_config);
+cold_index.initialize()?;
+cold_index.find_entry(hash);
+cold_index.update_entry(hash, new_address);
+
+// Checkpoint Locks (CPR 协议保护)
+use oxifaster::checkpoint::{CheckpointLocks, CheckpointLockGuard};
+let locks = CheckpointLocks::with_size(1024);
+let mut guard = CheckpointLockGuard::new(&locks, key_hash);
+guard.try_lock_old();  // 锁定旧版本记录
+// ... 执行操作 ...
+// guard 自动释放锁
+
+// Concurrent Compaction (多线程压缩)
+use oxifaster::compaction::{ConcurrentCompactor, ConcurrentCompactionConfig};
+let compactor = ConcurrentCompactor::new(ConcurrentCompactionConfig::new(4)); // 4 线程
+let result = compactor.compact_range(scan_range, |chunk| {
+    // 处理每个页面块
+    process_chunk(chunk)
+});
 ```
 
 ### Phase 5: 平台与生态 (Platform) - P3
@@ -345,10 +373,10 @@ let device = AzureBlobDevice::new(connection_string, container)?;
 |-------|------|:-----:|:----:|:----:|
 | Phase 2 | 持久化与恢复 | 45天 | 45天 | :white_check_mark: 完成 |
 | Phase 3 | 性能优化 | 32天 | 77天 | :white_check_mark: 完成 |
-| Phase 4 | 高级功能 | 29天 | 106天 | :construction: 部分完成 |
+| Phase 4 | 高级功能 | 29天 | 106天 | :white_check_mark: 完成 |
 | Phase 5 | 平台与生态 | 31天 | 137天 | 待开始 |
 
-**剩余约 40 工作日 (约 2 个月)**
+**剩余约 31 工作日 (约 1.5 个月)**
 
 ---
 
@@ -386,7 +414,8 @@ oxifaster/
 │   │   ├── hash_bucket.rs
 │   │   ├── hash_table.rs
 │   │   ├── mem_index.rs
-│   │   └── grow.rs         # 索引扩展
+│   │   ├── grow.rs         # 索引扩展
+│   │   └── cold_index.rs   # 磁盘冷索引
 │   │
 │   ├── allocator/          # 内存分配器
 │   │   ├── mod.rs
@@ -410,6 +439,7 @@ oxifaster/
 │   ├── checkpoint/         # 检查点和恢复
 │   │   ├── mod.rs
 │   │   ├── state.rs
+│   │   ├── locks.rs        # CPR 检查点锁
 │   │   ├── recovery.rs
 │   │   └── serialization.rs
 │   │
@@ -427,6 +457,7 @@ oxifaster/
 │   ├── compaction/         # 日志压缩
 │   │   ├── mod.rs
 │   │   ├── compact.rs
+│   │   ├── concurrent.rs    # 并发压缩
 │   │   ├── auto_compact.rs  # 自动压缩后台线程
 │   │   └── contexts.rs
 │   │
@@ -677,7 +708,7 @@ cargo bench
 
 - **P0**: ~~Checkpoint/Recovery - 生产环境必需~~ :white_check_mark: 已完成
 - **P1**: ~~Read Cache, Compaction, Index Growth - 性能关键~~ :white_check_mark: 已完成
-- **P2**: ~~F2 Checkpoint/Recovery, Statistics 集成~~ :white_check_mark: 已完成 | Cold Index, Checkpoint Locks - 待实现
+- **P2**: ~~F2 Checkpoint/Recovery, Statistics 集成, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: 已完成
 - **P3**: io_uring 完整实现, Azure Storage, 配置文件 - 生态扩展
 
 ### 开发流程
