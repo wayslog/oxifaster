@@ -140,6 +140,27 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Clone, Default, Debug, PartialEq, Eq)]
+    struct TestKey(u64);
+
+    impl Key for TestKey {
+        fn size(&self) -> u32 {
+            8
+        }
+        fn get_hash(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[derive(Clone, Default, Debug)]
+    struct TestValue(u64);
+
+    impl Value for TestValue {
+        fn size(&self) -> u32 {
+            8
+        }
+    }
+
     #[test]
     fn test_compaction_context() {
         let mut ctx = CompactionContext::new(Address::new(0, 0), Address::new(10, 0));
@@ -189,33 +210,167 @@ mod tests {
     }
 
     #[test]
+    fn test_compaction_context_large_range() {
+        let ctx = CompactionContext::new(Address::from_control(0), Address::from_control(1000000));
+        assert!(ctx.is_valid());
+        assert_eq!(ctx.scan_begin.control(), 0);
+        assert_eq!(ctx.scan_end.control(), 1000000);
+    }
+
+    #[test]
+    fn test_compaction_context_multiple_operations() {
+        let mut ctx = CompactionContext::new(Address::new(0, 0), Address::new(100, 0));
+
+        // Simulate scanning many records
+        for _ in 0..1000 {
+            ctx.record_scanned();
+        }
+        assert_eq!(ctx.records_scanned, 1000);
+
+        // Simulate compacting some records
+        for _ in 0..300 {
+            ctx.record_compacted();
+        }
+        assert_eq!(ctx.records_compacted, 300);
+
+        // Simulate skipping some records
+        for _ in 0..500 {
+            ctx.record_skipped();
+        }
+        assert_eq!(ctx.records_skipped, 500);
+
+        // Simulate finding tombstones
+        for _ in 0..200 {
+            ctx.record_tombstone();
+        }
+        assert_eq!(ctx.tombstones_found, 200);
+    }
+
+    #[test]
     fn test_compaction_insert_context_basic() {
-        // Create a simple test record to work with
-        // We'll use Record<u64, u64> as a simple case
-
-        #[derive(Clone, Default, Debug, PartialEq, Eq)]
-        struct SimpleKey(u64);
-
-        impl Key for SimpleKey {
-            fn size(&self) -> u32 {
-                8
-            }
-            fn get_hash(&self) -> u64 {
-                self.0
-            }
-        }
-
-        #[derive(Clone, Default, Debug)]
-        struct SimpleValue(u64);
-
-        impl Value for SimpleValue {
-            fn size(&self) -> u32 {
-                8
-            }
-        }
-
         // Test the record size method
-        let record_size = Record::<SimpleKey, SimpleValue>::size();
+        let record_size = Record::<TestKey, TestValue>::size();
         assert!(record_size > 0);
+    }
+
+    #[test]
+    fn test_compaction_insert_context_record_size() {
+        // Create a buffer for the record
+        let record_size = Record::<TestKey, TestValue>::size();
+        let mut buffer = vec![0u8; record_size];
+
+        // Initialize the record in the buffer
+        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
+
+        // Initialize fields
+        record.header = crate::record::RecordInfo::default();
+        unsafe {
+            *record.key_mut() = TestKey(42);
+            *record.value_mut() = TestValue(100);
+        }
+
+        // Create insert context
+        let ctx = CompactionInsertContext::new(record, Address::from_control(1000));
+
+        // Verify original address
+        assert_eq!(ctx.original_address.control(), 1000);
+
+        // Verify record size
+        assert_eq!(ctx.record_size(), record_size);
+    }
+
+    #[test]
+    fn test_compaction_insert_context_key_value() {
+        let record_size = Record::<TestKey, TestValue>::size();
+        let mut buffer = vec![0u8; record_size];
+
+        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
+        record.header = crate::record::RecordInfo::default();
+        unsafe {
+            *record.key_mut() = TestKey(123);
+            *record.value_mut() = TestValue(456);
+        }
+
+        let ctx = CompactionInsertContext::new(record, Address::new(2000, 0));
+
+        // Test key access
+        let key = ctx.key();
+        assert_eq!(key.0, 123);
+
+        // Test value access
+        let value = ctx.value();
+        assert_eq!(value.0, 456);
+    }
+
+    #[test]
+    fn test_compaction_insert_context_is_tombstone() {
+        let record_size = Record::<TestKey, TestValue>::size();
+        let mut buffer = vec![0u8; record_size];
+
+        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
+        record.header = crate::record::RecordInfo::default();
+        unsafe {
+            *record.key_mut() = TestKey(1);
+            *record.value_mut() = TestValue(1);
+        }
+
+        // Without tombstone flag
+        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
+        assert!(!ctx.is_tombstone());
+
+        // Set tombstone flag
+        record.header.set_tombstone(true);
+        let ctx_tombstone = CompactionInsertContext::new(record, Address::new(0, 0));
+        assert!(ctx_tombstone.is_tombstone());
+    }
+
+    #[test]
+    fn test_compaction_insert_context_insert_into() {
+        let record_size = Record::<TestKey, TestValue>::size();
+        let mut buffer = vec![0u8; record_size];
+
+        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
+        record.header = crate::record::RecordInfo::default();
+        unsafe {
+            *record.key_mut() = TestKey(999);
+            *record.value_mut() = TestValue(888);
+        }
+
+        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
+
+        // Test insert into sufficient buffer
+        let mut dest = vec![0u8; record_size + 100];
+        let result = ctx.insert_into(&mut dest);
+        assert!(result);
+
+        // Test insert into exact size buffer
+        let mut dest_exact = vec![0u8; record_size];
+        let result_exact = ctx.insert_into(&mut dest_exact);
+        assert!(result_exact);
+
+        // Test insert into insufficient buffer
+        let mut dest_small = vec![0u8; record_size - 1];
+        let result_small = ctx.insert_into(&mut dest_small);
+        assert!(!result_small);
+    }
+
+    #[test]
+    fn test_compaction_insert_context_record_reference() {
+        let record_size = Record::<TestKey, TestValue>::size();
+        let mut buffer = vec![0u8; record_size];
+
+        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
+        record.header = crate::record::RecordInfo::default();
+        unsafe {
+            *record.key_mut() = TestKey(777);
+            *record.value_mut() = TestValue(666);
+        }
+
+        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
+
+        // Test getting the record reference
+        let record_ref = ctx.record();
+        assert_eq!(unsafe { record_ref.key() }.0, 777);
+        assert_eq!(unsafe { record_ref.value() }.0, 666);
     }
 }

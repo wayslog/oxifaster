@@ -1435,7 +1435,8 @@ where
         let result = create_checkpoint_directory(checkpoint_dir, token)
             .and_then(|cp_dir| self.execute_checkpoint_state_machine(&cp_dir, token, action));
 
-        // 失败时必须回滚到 checkpoint 开始前的版本，避免 CPR 版本被错误递增。
+        // On failure, we must roll back to the version before checkpoint started
+        // to prevent the CPR version from being incorrectly incremented.
         if result.is_err() {
             self.system_state
                 .store(SystemState::rest(start_version), Ordering::Release);
@@ -2468,7 +2469,7 @@ mod tests {
         let v0 = store.system_state().version;
         let token = uuid::Uuid::new_v4();
 
-        // 预先制造一个会导致写入 log.snapshot 失败的路径：把它建成目录。
+        // Create a path that will cause log.snapshot write to fail: make it a directory.
         let cp_dir = temp_dir.path().join(token.to_string());
         std::fs::create_dir_all(cp_dir.join("log.snapshot")).unwrap();
 

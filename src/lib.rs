@@ -1,31 +1,171 @@
-//! oxifaster - A high-performance concurrent key-value store and log engine
+//! # oxifaster - A High-Performance Concurrent Key-Value Store and Log Engine
 //!
-//! This is a Rust port of Microsoft's FASTER project, providing:
-//! - **FASTER KV**: A concurrent key-value store supporting data larger than memory
-//! - **FASTER Log**: A high-performance persistent recoverable log
+//! `oxifaster` is a Rust port of Microsoft's [FASTER](https://github.com/microsoft/FASTER) project,
+//! providing a high-performance concurrent key-value store and log engine designed for
+//! data-intensive applications.
 //!
-//! # Features
+//! ## Overview
 //!
-//! - High-performance concurrent operations with epoch-based memory reclamation
-//! - Hybrid log architecture (in-memory + disk)
-//! - Non-blocking checkpointing and recovery
-//! - Async I/O with Tokio runtime
+//! This library provides two main components:
 //!
-//! # Quick Start
+//! - **FasterKV**: A concurrent key-value store that supports data larger than memory
+//!   with seamless disk spillover via a hybrid log architecture.
+//! - **FasterLog**: A high-performance persistent recoverable append-only log.
+//!
+//! ## Key Features
+//!
+//! - **High-Performance Concurrent Operations**: Lock-free data structures with epoch-based
+//!   memory reclamation ensure safe and efficient concurrent access.
+//! - **Hybrid Log Architecture**: Automatic tiering between in-memory (mutable + read-only)
+//!   and on-disk storage regions.
+//! - **Non-Blocking Checkpointing**: CPR (Concurrent Prefix Recovery) protocol enables
+//!   checkpoints without stopping operations.
+//! - **Read Cache**: Optional in-memory cache for frequently accessed cold data.
+//! - **Log Compaction**: Space reclamation through background compaction of obsolete records.
+//! - **Dynamic Index Growth**: Hash table can grow dynamically with minimal disruption.
+//! - **F2 Architecture**: Two-tier hot-cold data separation for optimized access patterns.
+//! - **Async I/O**: Full async/await support with Tokio runtime.
+//!
+//! ## Quick Start
+//!
+//! ### Basic Key-Value Operations
 //!
 //! ```rust,ignore
-//! use oxifaster::{FasterKv, Status};
+//! use std::sync::Arc;
+//! use oxifaster::device::NullDisk;
+//! use oxifaster::store::{FasterKv, FasterKvConfig};
 //!
-//! // Create a new store
-//! let store = FasterKv::new(config)?;
+//! // Create a store with default configuration
+//! let config = FasterKvConfig::default();
+//! let device = NullDisk::new();
+//! let store = Arc::new(FasterKv::new(config, device));
 //!
-//! // Start a session
-//! let session = store.start_session();
+//! // Start a session (required for all operations)
+//! let mut session = store.start_session();
 //!
-//! // Perform operations
-//! session.upsert(key, value).await?;
-//! let result = session.read(key).await?;
+//! // Insert or update a key-value pair
+//! session.upsert(42u64, 100u64);
+//!
+//! // Read a value
+//! if let Ok(Some(value)) = session.read(&42u64) {
+//!     println!("Value: {}", value);
+//! }
+//!
+//! // Delete a key
+//! session.delete(&42u64);
+//!
+//! // Read-Modify-Write operation
+//! session.rmw(42u64, |value| {
+//!     *value += 1;
+//!     true // return true to apply the modification
+//! });
 //! ```
+//!
+//! ### Checkpoint and Recovery
+//!
+//! ```rust,ignore
+//! use std::path::Path;
+//!
+//! // Create a checkpoint
+//! let checkpoint_dir = Path::new("/path/to/checkpoints");
+//! let token = store.checkpoint(checkpoint_dir)?;
+//!
+//! // Later, recover from the checkpoint
+//! let recovered_store = FasterKv::recover(
+//!     checkpoint_dir,
+//!     token,
+//!     config,
+//!     device
+//! )?;
+//!
+//! // Continue sessions from checkpoint
+//! for session_state in recovered_store.get_recovered_sessions() {
+//!     let session = recovered_store.continue_session(session_state);
+//!     // Use the recovered session...
+//! }
+//! ```
+//!
+//! ### With Read Cache
+//!
+//! ```rust,ignore
+//! use oxifaster::cache::ReadCacheConfig;
+//!
+//! let cache_config = ReadCacheConfig::new(256 * 1024 * 1024); // 256 MB cache
+//! let store = FasterKv::with_read_cache(config, device, cache_config);
+//! ```
+//!
+//! ### Log Compaction
+//!
+//! ```rust,ignore
+//! // Manual compaction
+//! let result = store.log_compact();
+//! println!("Compacted {} records", result.stats.records_compacted);
+//!
+//! // Check if compaction is recommended
+//! if store.should_compact() {
+//!     store.log_compact();
+//! }
+//! ```
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                        Application                          │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │                   Session / AsyncSession                    │
+//! ├──────────────────────────┬──────────────────────────────────┤
+//! │       FasterKV           │         FasterLog                │
+//! ├──────────────────────────┼──────────────────────────────────┤
+//! │       Read Cache         │       Log Compaction             │
+//! ├──────────────────────────┴──────────────────────────────────┤
+//! │                     Epoch Protection                        │
+//! ├───────────────────────────┬─────────────────────────────────┤
+//! │    Hash Index             │     Hybrid Log                  │
+//! │   (MemHashIndex)          │  ┌────────┬────────┬────────┐   │
+//! │                           │  │Mutable │ReadOnly│On-Disk │   │
+//! │                           │  │Region  │Region  │Region  │   │
+//! │                           │  └────────┴────────┴────────┘   │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │                    Storage Device Layer                     │
+//! │         (NullDisk / FileSystemDisk / IoUring)               │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Module Organization
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`address`] | 48-bit logical address system for hybrid log |
+//! | [`allocator`] | Hybrid log memory allocator (PersistentMemoryMalloc) |
+//! | [`cache`] | Read cache for hot data acceleration |
+//! | [`checkpoint`] | Checkpoint and recovery with CPR protocol |
+//! | [`compaction`] | Log compaction for space reclamation |
+//! | [`delta_log`] | Delta log for incremental checkpoints |
+//! | [`device`] | Storage device abstraction layer |
+//! | [`epoch`] | Epoch-based memory reclamation framework |
+//! | [`f2`] | F2 two-tier hot-cold storage architecture |
+//! | [`index`] | High-performance in-memory hash index |
+//! | [`log`] | FasterLog append-only log |
+//! | [`record`] | Record format and Key/Value traits |
+//! | [`scan`] | Log scanning and iteration |
+//! | [`stats`] | Statistics collection and reporting |
+//! | [`status`] | Operation status codes |
+//! | [`store`] | FasterKV core implementation |
+//! | [`varlen`] | Variable-length record support |
+//!
+//! ## Performance Considerations
+//!
+//! - **Session Affinity**: Each thread should have its own session for optimal performance.
+//!   Sessions are not thread-safe and are designed for single-threaded use.
+//! - **Epoch Protection**: Operations are protected by epochs. Long-running operations
+//!   may delay memory reclamation.
+//! - **Page Size**: Larger pages reduce metadata overhead but may increase I/O latency.
+//! - **Mutable Fraction**: Controls how much of the log is available for in-place updates.
+//!
+//! ## Feature Flags
+//!
+//! - `statistics`: Enable comprehensive statistics collection (slight performance overhead)
 
 #![warn(missing_docs)]
 #![allow(dead_code)]

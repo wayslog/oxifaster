@@ -2,6 +2,55 @@
 //!
 //! This module provides checkpointing and recovery functionality
 //! for FasterKV stores.
+//!
+//! # Overview
+//!
+//! FASTER uses the CPR (Concurrent Prefix Recovery) protocol for checkpointing,
+//! which allows checkpoints to be taken without stopping normal operations.
+//!
+//! # Checkpoint Types
+//!
+//! - **Full Checkpoint**: Saves both index and hybrid log state
+//! - **Index-Only Checkpoint**: Saves only the hash index
+//! - **HybridLog-Only Checkpoint**: Saves only the log state
+//! - **Incremental Checkpoint**: Saves only changes since last snapshot
+//!
+//! # CPR Protocol Phases
+//!
+//! 1. **PrepIndexChkpt**: Prepare index checkpoint, synchronize threads
+//! 2. **IndexChkpt**: Write index to disk
+//! 3. **Prepare**: Prepare HybridLog checkpoint
+//! 4. **InProgress**: Increment version, mark checkpoint in progress
+//! 5. **WaitPending**: Wait for pending operations
+//! 6. **WaitFlush**: Wait for log flush
+//! 7. **PersistenceCallback**: Invoke persistence callback
+//! 8. **Rest**: Return to rest state
+//!
+//! # File Structure
+//!
+//! Each checkpoint creates a directory with the following files:
+//!
+//! - `index.meta`: Index checkpoint metadata (JSON)
+//! - `index.dat`: Hash index data (binary)
+//! - `log.meta`: Log checkpoint metadata (JSON)
+//! - `log.snapshot`: Log snapshot data (binary)
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! use std::path::Path;
+//!
+//! // Create checkpoint
+//! let token = store.checkpoint(Path::new("/checkpoints"))?;
+//!
+//! // Recover from checkpoint
+//! let recovered = FasterKv::recover(
+//!     Path::new("/checkpoints"),
+//!     token,
+//!     config,
+//!     device
+//! )?;
+//! ```
 
 mod locks;
 mod recovery;

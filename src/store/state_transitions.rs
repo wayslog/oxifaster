@@ -305,8 +305,9 @@ impl SystemState {
                 None
             }
 
-            // 增量检查点也需要持久化索引文件（index.meta/index.dat），否则校验/恢复会失败。
-            // 因此这里复用完整检查点的阶段流转（包含索引阶段），仅在具体执行 IN_PROGRESS 时写 delta。
+            // Incremental checkpoints also need to persist index files (index.meta/index.dat),
+            // otherwise validation/recovery will fail. Therefore, we reuse the full checkpoint
+            // phase transitions (including index phases), and only write delta during IN_PROGRESS.
             Action::CheckpointIncremental => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::CheckpointIncremental,

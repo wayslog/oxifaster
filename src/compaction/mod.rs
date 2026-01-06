@@ -3,17 +3,43 @@
 //! This module provides log compaction functionality to reclaim space
 //! by removing obsolete records from the log.
 //!
-//! Compaction process:
-//! 1. Scan old records from begin_address to new_begin_address
-//! 2. For each live record, check if it's the latest version (in hash index)
-//! 3. If latest, conditionally insert into the tail of the log
-//! 4. Update hash index to point to new location
-//! 5. Shift begin_address to reclaim space
+//! # Overview
 //!
-//! # Concurrent Compaction
+//! As updates and deletes occur, old versions of records become obsolete.
+//! Compaction scans these old records, copies live ones to the tail, and
+//! reclaims the space by advancing the begin address.
 //!
-//! The module also provides concurrent compaction support via `ConcurrentCompactor`,
-//! which distributes work across multiple threads for improved throughput.
+//! # Compaction Process
+//!
+//! 1. **Scan**: Read old records from begin_address to target_address
+//! 2. **Filter**: Check if each record is the latest version (via hash index)
+//! 3. **Copy**: Conditionally insert live records into the tail of the log
+//! 4. **Update Index**: Point hash index to the new location
+//! 5. **Reclaim**: Shift begin_address to reclaim space
+//!
+//! # Compaction Types
+//!
+//! - **Single-threaded**: Basic compaction via [`Compactor`]
+//! - **Concurrent**: Multi-threaded compaction via [`ConcurrentCompactor`]
+//! - **Auto**: Background compaction via the auto-compaction worker
+//!
+//! # Configuration
+//!
+//! ```rust,ignore
+//! use oxifaster::compaction::CompactionConfig;
+//!
+//! let config = CompactionConfig::new()
+//!     .with_target_utilization(0.5)  // Compact when < 50% live data
+//!     .with_num_threads(4);          // Use 4 threads for concurrent compaction
+//! ```
+//!
+//! # Safety Guarantees
+//!
+//! The compaction algorithm ensures data safety by:
+//!
+//! - Using CAS to update index entries atomically
+//! - Preserving records that fail to copy or update
+//! - Only reclaiming space after all copies complete successfully
 
 mod compact;
 mod concurrent;

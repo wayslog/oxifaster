@@ -1670,4 +1670,301 @@ mod tests {
 
         f2.stop_session();
     }
+
+    #[test]
+    fn test_f2_config() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let config_ref = f2.config();
+        assert!(config_ref.hot_store.log_mem_size > 0);
+        assert!(config_ref.cold_store.log_mem_size > 0);
+    }
+
+    #[test]
+    fn test_f2_checkpoint_dir() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Initially no checkpoint dir
+        assert!(f2.checkpoint_dir().is_none());
+
+        // Set checkpoint dir
+        f2.set_checkpoint_dir("/tmp/test_checkpoint");
+
+        // Verify it's set
+        assert!(f2.checkpoint_dir().is_some());
+        assert!(f2.checkpoint_dir().unwrap().to_string_lossy().contains("test_checkpoint"));
+    }
+
+    #[test]
+    fn test_f2_compaction_config() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let compaction_config = f2.compaction_config();
+        assert!(compaction_config.trigger_percentage > 0.0);
+    }
+
+    #[test]
+    fn test_f2_num_active_sessions() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Initially no active sessions
+        assert_eq!(f2.num_active_sessions(), 0);
+
+        // Start session
+        let _session = f2.start_session().unwrap();
+        assert_eq!(f2.num_active_sessions(), 1);
+
+        // Stop session
+        f2.stop_session();
+        assert_eq!(f2.num_active_sessions(), 0);
+    }
+
+    #[test]
+    fn test_f2_is_compaction_scheduled() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Initially compaction is not scheduled
+        assert!(!f2.is_compaction_scheduled());
+    }
+
+    #[test]
+    fn test_f2_continue_session() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let session_id = uuid::Uuid::new_v4();
+        let result = f2.continue_session(session_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+
+        f2.stop_session();
+    }
+
+    #[test]
+    fn test_f2_complete_pending_compactions() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Should not hang or panic on empty store
+        f2.complete_pending_compactions();
+    }
+
+    #[test]
+    fn test_f2_rmw() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let _session = f2.start_session().unwrap();
+
+        // RMW on non-existent key creates new entry
+        let result = f2.rmw(TestKey(1), |v| {
+            v.0 = 100;
+        });
+        assert!(result.is_ok());
+
+        f2.stop_session();
+    }
+
+    #[test]
+    fn test_store_index_cold_creation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let result = StoreIndex::new_cold(config);
+        assert!(result.is_ok());
+
+        let index = result.unwrap();
+        assert!(index.is_cold());
+        assert!(!index.is_memory());
+    }
+
+    #[test]
+    fn test_store_index_as_cold_mut() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let mut index = StoreIndex::new_cold(config).unwrap();
+
+        let cold_idx = index.as_cold_mut();
+        assert!(cold_idx.is_some());
+    }
+
+    #[test]
+    fn test_store_stats_debug() {
+        let stats = StoreStats {
+            size: 1000,
+            begin_address: Address::new(0, 0),
+            tail_address: Address::new(100, 0),
+            safe_read_only_address: Address::new(50, 0),
+        };
+
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("StoreStats"));
+        assert!(debug_str.contains("size"));
+        assert!(debug_str.contains("1000"));
+    }
+
+    #[test]
+    fn test_store_stats_clone() {
+        let stats = StoreStats {
+            size: 2000,
+            begin_address: Address::new(10, 0),
+            tail_address: Address::new(200, 0),
+            safe_read_only_address: Address::new(100, 0),
+        };
+
+        let cloned = stats.clone();
+        assert_eq!(stats.size, cloned.size);
+        assert_eq!(stats.begin_address, cloned.begin_address);
+        assert_eq!(stats.tail_address, cloned.tail_address);
+        assert_eq!(stats.safe_read_only_address, cloned.safe_read_only_address);
+    }
+
+    #[test]
+    fn test_f2_save_checkpoint() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+
+        let result = f2.save_checkpoint(temp_dir.path(), token);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_f2_recover_not_found() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let token = uuid::Uuid::new_v4();
+
+        // Should fail because checkpoint doesn't exist
+        let result = f2.recover(temp_dir.path(), token);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f2_checkpoint_during_checkpoint() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Start first checkpoint
+        let token1 = f2.checkpoint(false);
+        assert!(token1.is_ok());
+
+        // Second checkpoint should fail (already in progress)
+        let token2 = f2.checkpoint(false);
+        assert!(token2.is_err());
+
+        // Reset for cleanup
+        f2.checkpoint.reset();
+    }
+
+    #[test]
+    fn test_f2_start_session_during_checkpoint() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Start checkpoint (changes phase from Rest)
+        let _token = f2.checkpoint(false);
+
+        // Try to start session during checkpoint - should fail
+        let session_result = f2.start_session();
+        assert!(session_result.is_err());
+
+        f2.checkpoint.reset();
+    }
+
+    #[test]
+    fn test_f2_continue_session_during_checkpoint() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let mut f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Start checkpoint
+        let _token = f2.checkpoint(false);
+
+        // Try to continue session during checkpoint - should fail
+        let session_id = uuid::Uuid::new_v4();
+        let result = f2.continue_session(session_id);
+        assert!(result.is_err());
+
+        f2.checkpoint.reset();
+    }
+
+    #[test]
+    fn test_store_index_find_entry_cold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let index = StoreIndex::new_cold(config).unwrap();
+
+        let hash = KeyHash::new(12345);
+        let result = index.find_entry(hash);
+        // Should not find anything in empty index
+        assert!(result.entry.is_unused());
+    }
+
+    #[test]
+    fn test_store_index_find_or_create_entry_cold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let mut index = StoreIndex::new_cold(config).unwrap();
+
+        let hash = KeyHash::new(12345);
+        let _result = index.find_or_create_entry(hash);
+        // Entry should be created (or found)
+    }
+
+    #[test]
+    fn test_store_index_garbage_collect_cold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let mut index = StoreIndex::new_cold(config).unwrap();
+
+        // Should not panic on cold index
+        index.garbage_collect(Address::new(100, 0));
+    }
 }

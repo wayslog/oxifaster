@@ -3,11 +3,50 @@
 //! F2 (Fast & Fair) is a two-tier storage architecture that separates
 //! hot (frequently accessed) data from cold (infrequently accessed) data.
 //!
-//! Key features:
-//! - Hot store: Fast in-memory store with read cache
-//! - Cold store: Larger on-disk store for less frequently accessed data
-//! - Automatic compaction: Background thread moves data between stores
-//! - Unified interface: Read/Write/RMW operations work across both stores
+//! # Overview
+//!
+//! The F2 architecture provides optimized storage by automatically tiering
+//! data based on access patterns:
+//!
+//! - **Hot Store**: Fast in-memory store for frequently accessed data
+//! - **Cold Store**: Larger on-disk store for infrequently accessed data
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌───────────────────────────────────────────┐
+//! │              F2Kv Store                    │
+//! ├───────────────────┬───────────────────────┤
+//! │    Hot Store      │     Cold Store        │
+//! │  (MemHashIndex)   │    (ColdIndex)        │
+//! │   (HybridLog)     │   (HybridLog)         │
+//! │   + Read Cache    │                       │
+//! └───────────────────┴───────────────────────┘
+//!         ↑                     ↑
+//!    Frequent Access      Infrequent Access
+//! ```
+//!
+//! # Key Features
+//!
+//! - **Automatic Migration**: Background thread moves cold data to cold store
+//! - **Unified Interface**: Read/Write/RMW operations work transparently
+//! - **Checkpoint/Recovery**: Both stores can be checkpointed together
+//! - **Cold Index**: On-disk hash index for cold store
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! use oxifaster::f2::{F2Kv, F2Config};
+//!
+//! let config = F2Config::default();
+//! let f2_store = F2Kv::new(config, hot_device, cold_device);
+//!
+//! // Checkpoint both stores
+//! let token = f2_store.checkpoint(checkpoint_dir)?;
+//!
+//! // Recovery
+//! let recovered = F2Kv::recover(checkpoint_dir, token)?;
+//! ```
 //!
 //! Based on C++ FASTER's f2.h implementation.
 

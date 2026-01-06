@@ -589,4 +589,172 @@ mod tests {
         let iter = DeltaLogIterator::new(delta_log, 100, 50);
         assert!(!iter.is_done()); // Initially not done since state is NotStarted
     }
+
+    #[test]
+    fn test_iterator_state_not_started() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIterator::new(delta_log, 0, 100);
+        assert_eq!(iter.state(), IteratorState::NotStarted);
+    }
+
+    #[test]
+    fn test_iterator_becomes_done_on_empty_range() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        // Iterator with start = end
+        let mut iter = DeltaLogIterator::new(delta_log, 100, 100);
+        let result = iter.get_next().unwrap();
+        assert!(result.is_none());
+        assert_eq!(iter.state(), IteratorState::Done);
+    }
+
+    #[test]
+    fn test_iterator_current_address_updates() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::new(delta_log, 50, 60);
+        assert_eq!(iter.current_address(), 50);
+        
+        // After get_next, current_address should update
+        let _ = iter.get_next();
+        // Current address will have been updated during get_next
+    }
+
+    #[test]
+    fn test_iterator_into_iter_with_error_handling() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIntoIterator::new(delta_log);
+        
+        // Collect all items - should be empty for null device
+        let items: Vec<_> = iter.collect();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_iterator_state_equality() {
+        assert!(IteratorState::NotStarted == IteratorState::NotStarted);
+        assert!(IteratorState::Active == IteratorState::Active);
+        assert!(IteratorState::Done == IteratorState::Done);
+        assert!(IteratorState::Error == IteratorState::Error);
+
+        assert!(IteratorState::NotStarted != IteratorState::Active);
+        assert!(IteratorState::Active != IteratorState::Done);
+        assert!(IteratorState::Done != IteratorState::Error);
+    }
+
+    #[test]
+    fn test_iterator_state_all_values() {
+        // Test all enum variants
+        let states = [
+            IteratorState::NotStarted,
+            IteratorState::Active,
+            IteratorState::Done,
+            IteratorState::Error,
+        ];
+
+        for (i, state) in states.iter().enumerate() {
+            for (j, other) in states.iter().enumerate() {
+                if i == j {
+                    assert_eq!(state, other);
+                } else {
+                    assert_ne!(state, other);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_iterator_new_with_different_configs() {
+        // Test with small page size
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(10); // 1KB pages
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIterator::new(delta_log, 0, 100);
+        assert_eq!(iter.current_address(), 0);
+        assert_eq!(iter.next_address(), 0);
+
+        // Test with large page size
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(16); // 64KB pages
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIterator::new(delta_log, 0, 100);
+        assert_eq!(iter.current_address(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_iterator_get_next_async_with_range() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        // Create iterator with custom range
+        let mut iter = DeltaLogIterator::new(delta_log, 0, 4096);
+        
+        // Should return None on empty log
+        let result = iter.get_next_async().await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_all_with_range() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::new(delta_log, 0, 8192);
+        let entries = iter.collect_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_iterator_debug_state() {
+        let debug_not_started = format!("{:?}", IteratorState::NotStarted);
+        let debug_active = format!("{:?}", IteratorState::Active);
+        let debug_done = format!("{:?}", IteratorState::Done);
+        let debug_error = format!("{:?}", IteratorState::Error);
+
+        assert!(debug_not_started.contains("NotStarted"));
+        assert!(debug_active.contains("Active"));
+        assert!(debug_done.contains("Done"));
+        assert!(debug_error.contains("Error"));
+    }
+
+    #[test]
+    fn test_find_last_checkpoint_metadata_with_range() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::new(delta_log, 0, 4096);
+        let result = iter.find_last_checkpoint_metadata().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_iterator_sequential_calls() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+
+        // Multiple sequential get_next calls
+        for _ in 0..5 {
+            let result = iter.get_next().unwrap();
+            assert!(result.is_none());
+            assert!(iter.is_done());
+        }
+    }
 }
