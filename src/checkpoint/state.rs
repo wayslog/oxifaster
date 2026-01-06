@@ -295,7 +295,7 @@ impl LogMetadata {
 /// Note: The discriminant values are part of the on-disk format.
 /// FoldOver=0 and Snapshot=1 are the original values and must be preserved
 /// for backward compatibility with existing checkpoint files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum CheckpointType {
     /// Fold-over checkpoint (no snapshot file, original default)
@@ -303,6 +303,7 @@ pub enum CheckpointType {
     FoldOver = 0,
     /// Snapshot checkpoint (uses snapshot file)
     /// Preserved as 1 for backward compatibility
+    #[default]
     Snapshot = 1,
     /// Full checkpoint (index + hybrid log), equivalent to Snapshot
     Full = 2,
@@ -340,13 +341,6 @@ impl CheckpointType {
             5 => Some(CheckpointType::IncrementalSnapshot),
             _ => None,
         }
-    }
-}
-
-impl Default for CheckpointType {
-    fn default() -> Self {
-        // Default to Snapshot (Full) for new checkpoints
-        CheckpointType::Snapshot
     }
 }
 

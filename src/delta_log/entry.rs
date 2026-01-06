@@ -23,10 +23,11 @@ use std::io;
 pub const DELTA_LOG_HEADER_SIZE: usize = 16;
 
 /// The type of a record in the delta (incremental) log
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i32)]
 pub enum DeltaLogEntryType {
     /// The entry is a delta record (changed data)
+    #[default]
     Delta = 0,
     /// The entry is checkpoint metadata
     CheckpointMetadata = 1,
@@ -45,12 +46,6 @@ impl DeltaLogEntryType {
     /// Convert to i32
     pub fn to_i32(self) -> i32 {
         self as i32
-    }
-}
-
-impl Default for DeltaLogEntryType {
-    fn default() -> Self {
-        DeltaLogEntryType::Delta
     }
 }
 

@@ -43,8 +43,8 @@ fn main() {
     // 读取数据
     for i in 1u64..=5 {
         match session.read(&i) {
-            Ok(Some(value)) => println!("  key {} = {}", i, value),
-            _ => println!("  key {} 未找到", i),
+            Ok(Some(value)) => println!("  key {i} = {value}"),
+            _ => println!("  key {i} 未找到"),
         }
     }
     println!();
@@ -71,7 +71,7 @@ fn main() {
     // 6. 删除操作
     println!("--- 6. 删除操作 ---");
     let delete_status = restored_session.delete(&1u64);
-    println!("  删除 key 1: {:?}", delete_status);
+    println!("  删除 key 1: {delete_status:?}");
 
     match restored_session.read(&1u64) {
         Ok(Some(_)) => println!("  key 1 仍存在"),
@@ -83,16 +83,16 @@ fn main() {
     // 7. RMW 操作
     println!("--- 7. RMW (Read-Modify-Write) 操作 ---");
     let before = session.read(&2u64).unwrap();
-    println!("  RMW 前 key 2 = {:?}", before);
+    println!("  RMW 前 key 2 = {before:?}");
 
     let rmw_status = session.rmw(2u64, |v| {
         *v += 50;
         true
     });
-    println!("  RMW 状态: {:?}", rmw_status);
+    println!("  RMW 状态: {rmw_status:?}");
 
     let after = session.read(&2u64).unwrap();
-    println!("  RMW 后 key 2 = {:?}\n", after);
+    println!("  RMW 后 key 2 = {after:?}\n");
 
     // 8. 刷新 epoch
     println!("--- 8. Epoch 刷新 ---");

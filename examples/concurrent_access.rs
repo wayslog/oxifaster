@@ -32,7 +32,7 @@ fn main() {
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
 
     // 预填充数据
-    println!("预填充 {} 个键...", key_range);
+    println!("预填充 {key_range} 个键...");
     {
         let mut session = store.start_session();
         for i in 1..=key_range {
@@ -46,10 +46,7 @@ fn main() {
     let total_writes = Arc::new(AtomicU64::new(0));
     let successful_reads = Arc::new(AtomicU64::new(0));
 
-    println!(
-        "启动 {} 个线程，每个执行 {} 次操作...\n",
-        num_threads, ops_per_thread
-    );
+    println!("启动 {num_threads} 个线程，每个执行 {ops_per_thread} 次操作...\n");
     let start = Instant::now();
 
     // 创建工作线程
@@ -90,10 +87,7 @@ fn main() {
                 total_writes.fetch_add(local_writes, Ordering::Relaxed);
                 successful_reads.fetch_add(local_success, Ordering::Relaxed);
 
-                println!(
-                    "  线程 {} 完成: {} 读, {} 写",
-                    thread_id, local_reads, local_writes
-                );
+                println!("  线程 {thread_id} 完成: {local_reads} 读, {local_writes} 写");
             })
         })
         .collect();
@@ -112,10 +106,10 @@ fn main() {
     let success = successful_reads.load(Ordering::Relaxed);
     let total_ops = reads + writes;
 
-    println!("总操作数: {}", total_ops);
-    println!("  读操作: {} (成功: {})", reads, success);
-    println!("  写操作: {}", writes);
-    println!("耗时: {:.2?}", elapsed);
+    println!("总操作数: {total_ops}");
+    println!("  读操作: {reads} (成功: {success})");
+    println!("  写操作: {writes}");
+    println!("耗时: {elapsed:.2?}");
     println!(
         "吞吐量: {:.2} ops/sec",
         total_ops as f64 / elapsed.as_secs_f64()

@@ -375,18 +375,18 @@ impl ColdIndexStats {
     pub fn print_stats(&self) {
         let find_calls = self.find_entry_calls.load(Ordering::Relaxed);
         let find_success = self.find_entry_success.load(Ordering::Relaxed);
-        eprintln!("FindEntry Calls: {}", find_calls);
+        eprintln!("FindEntry Calls: {find_calls}");
         if find_calls > 0 {
             let rate = (find_success as f64 / find_calls as f64) * 100.0;
-            eprintln!("  Success Rate: {:.2}%", rate);
+            eprintln!("  Success Rate: {rate:.2}%");
         }
 
         let try_update_calls = self.try_update_calls.load(Ordering::Relaxed);
         let try_update_success = self.try_update_success.load(Ordering::Relaxed);
-        eprintln!("TryUpdateEntry Calls: {}", try_update_calls);
+        eprintln!("TryUpdateEntry Calls: {try_update_calls}");
         if try_update_calls > 0 {
             let rate = (try_update_success as f64 / try_update_calls as f64) * 100.0;
-            eprintln!("  Success Rate: {:.2}%", rate);
+            eprintln!("  Success Rate: {rate:.2}%");
         }
 
         eprintln!(
@@ -893,8 +893,7 @@ mod tests {
         // Should find most entries (some may collide in this simplified implementation)
         assert!(
             found_count >= 5,
-            "Expected at least 5 entries, found {}",
-            found_count
+            "Expected at least 5 entries, found {found_count}"
         );
     }
 

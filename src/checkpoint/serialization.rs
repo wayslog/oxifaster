@@ -59,9 +59,9 @@ impl SerializableIndexMetadata {
     /// Convert to IndexMetadata
     pub fn to_metadata(&self) -> io::Result<super::IndexMetadata> {
         let token = self.token.parse().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {e}"))
         })?;
-        
+
         Ok(super::IndexMetadata {
             token,
             version: self.version,
@@ -97,7 +97,7 @@ impl SerializableSessionState {
     /// Convert to SessionState
     pub fn to_state(&self) -> io::Result<super::SessionState> {
         let guid = self.guid.parse().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {e}"))
         })?;
         Ok(super::SessionState::new(guid, self.serial_num))
     }
@@ -192,9 +192,9 @@ impl SerializableLogMetadata {
     /// Convert to LogMetadata
     pub fn to_metadata(&self) -> io::Result<super::LogMetadata> {
         let token = self.token.parse().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {e}"))
         })?;
-        
+
         let session_states: Result<Vec<_>, _> =
             self.session_states.iter().map(|s| s.to_state()).collect();
 
@@ -202,13 +202,13 @@ impl SerializableLogMetadata {
             Some(t.parse().map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid prev snapshot UUID: {}", e),
+                    format!("Invalid prev snapshot UUID: {e}"),
                 )
             })?)
         } else {
             None
         };
-        
+
         Ok(super::LogMetadata {
             token,
             use_snapshot_file: self.use_snapshot_file,
@@ -371,7 +371,7 @@ pub fn log_snapshot_path(checkpoint_dir: &Path) -> std::path::PathBuf {
 
 /// Get the delta log file path for a specific delta index
 pub fn delta_log_path(checkpoint_dir: &Path, delta_index: u32) -> std::path::PathBuf {
-    checkpoint_dir.join(format!("delta.{}.log", delta_index))
+    checkpoint_dir.join(format!("delta.{delta_index}.log"))
 }
 
 /// Get the delta log metadata file path
@@ -454,7 +454,7 @@ impl DeltaLogMetadata {
         self.token.parse().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid token UUID: {}", e),
+                format!("Invalid token UUID: {e}"),
             )
         })
     }
@@ -464,7 +464,7 @@ impl DeltaLogMetadata {
         self.base_snapshot_token.parse().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid base token UUID: {}", e),
+                format!("Invalid base token UUID: {e}"),
             )
         })
     }
@@ -504,13 +504,13 @@ impl IncrementalCheckpointChain {
     pub fn latest_token(&self) -> io::Result<CheckpointToken> {
         if let Some(last) = self.incremental_tokens.last() {
             last.parse().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid token: {}", e))
+                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid token: {e}"))
             })
         } else {
             self.base_snapshot_token.parse().map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid base token: {}", e),
+                    format!("Invalid base token: {e}"),
                 )
             })
         }

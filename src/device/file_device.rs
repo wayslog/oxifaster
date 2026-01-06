@@ -55,7 +55,7 @@ impl SyncStorageDevice for FileSystemFile {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock file"))?;
+            .map_err(|_| io::Error::other("Failed to lock file"))?;
 
         file.seek(SeekFrom::Start(offset))?;
         file.read(buf)
@@ -65,7 +65,7 @@ impl SyncStorageDevice for FileSystemFile {
         let mut file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock file"))?;
+            .map_err(|_| io::Error::other("Failed to lock file"))?;
 
         file.seek(SeekFrom::Start(offset))?;
         file.write(buf)
@@ -75,7 +75,7 @@ impl SyncStorageDevice for FileSystemFile {
         let file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock file"))?;
+            .map_err(|_| io::Error::other("Failed to lock file"))?;
 
         file.sync_all()
     }
@@ -84,7 +84,7 @@ impl SyncStorageDevice for FileSystemFile {
         let file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock file"))?;
+            .map_err(|_| io::Error::other("Failed to lock file"))?;
 
         file.set_len(size)
     }
@@ -93,7 +93,7 @@ impl SyncStorageDevice for FileSystemFile {
         let file = self
             .file
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock file"))?;
+            .map_err(|_| io::Error::other("Failed to lock file"))?;
 
         file.metadata().map(|m| m.len())
     }
@@ -138,7 +138,7 @@ impl SegmentedFile {
         let mut segments = self
             .segments
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock segments"))?;
+            .map_err(|_| io::Error::other("Failed to lock segments"))?;
 
         // Extend vector if needed
         while segments.len() <= segment as usize {
@@ -166,7 +166,7 @@ impl SyncStorageDevice for SegmentedFile {
         let segments = self
             .segments
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock segments"))?;
+            .map_err(|_| io::Error::other("Failed to lock segments"))?;
 
         if let Some(ref file) = segments[segment as usize] {
             file.read_sync(segment_offset, buf)
@@ -184,7 +184,7 @@ impl SyncStorageDevice for SegmentedFile {
         let segments = self
             .segments
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock segments"))?;
+            .map_err(|_| io::Error::other("Failed to lock segments"))?;
 
         if let Some(ref file) = segments[segment as usize] {
             file.write_sync(segment_offset, buf)
@@ -197,7 +197,7 @@ impl SyncStorageDevice for SegmentedFile {
         let segments = self
             .segments
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock segments"))?;
+            .map_err(|_| io::Error::other("Failed to lock segments"))?;
 
         for segment in segments.iter().flatten() {
             segment.flush_sync()?;
@@ -216,7 +216,7 @@ impl SyncStorageDevice for SegmentedFile {
         let segments = self
             .segments
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock segments"))?;
+            .map_err(|_| io::Error::other("Failed to lock segments"))?;
 
         let mut total = 0u64;
         for segment in segments.iter().flatten() {

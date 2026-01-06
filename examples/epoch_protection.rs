@@ -39,7 +39,7 @@ fn main() {
         );
 
         let protected_epoch = epoch.protect(thread_id);
-        println!("  线程 {} 进入保护, Epoch: {}", thread_id, protected_epoch);
+        println!("  线程 {thread_id} 进入保护, Epoch: {protected_epoch}");
         println!(
             "  线程 {} 是否受保护: {}",
             thread_id,
@@ -47,7 +47,7 @@ fn main() {
         );
 
         epoch.unprotect(thread_id);
-        println!("  线程 {} 退出保护", thread_id);
+        println!("  线程 {thread_id} 退出保护");
         println!(
             "  线程 {} 是否受保护: {}",
             thread_id,
@@ -62,7 +62,7 @@ fn main() {
 
         {
             let _guard = EpochGuard::new(&epoch, thread_id);
-            println!("  线程 {} 通过 Guard 进入保护", thread_id);
+            println!("  线程 {thread_id} 通过 Guard 进入保护");
             println!(
                 "  线程 {} 是否受保护: {}",
                 thread_id,
@@ -85,13 +85,13 @@ fn main() {
     println!("\n--- 示例 3: 递增 Epoch ---");
     {
         let initial = epoch.current_epoch.load(Ordering::Relaxed);
-        println!("  当前 Epoch: {}", initial);
+        println!("  当前 Epoch: {initial}");
 
         let new_epoch = epoch.bump_current_epoch();
-        println!("  递增后 Epoch: {}", new_epoch);
+        println!("  递增后 Epoch: {new_epoch}");
 
         let new_epoch2 = epoch.bump_current_epoch();
-        println!("  再次递增后 Epoch: {}", new_epoch2);
+        println!("  再次递增后 Epoch: {new_epoch2}");
     }
 
     // 示例 4: 带回调的 Epoch 递增
@@ -131,14 +131,14 @@ fn main() {
                 thread::spawn(move || {
                     // 每个线程进入保护
                     let protected = epoch.protect(thread_id);
-                    println!("  线程 {} 进入保护, Epoch: {}", thread_id, protected);
+                    println!("  线程 {thread_id} 进入保护, Epoch: {protected}");
 
                     // 模拟一些工作
                     thread::sleep(Duration::from_millis(10));
 
                     // 退出保护
                     epoch.unprotect(thread_id);
-                    println!("  线程 {} 退出保护", thread_id);
+                    println!("  线程 {thread_id} 退出保护");
                 })
             })
             .collect();
@@ -156,7 +156,7 @@ fn main() {
         // 保护线程
         epoch.protect(thread_id);
         let protected_epoch = epoch.current_epoch.load(Ordering::Relaxed);
-        println!("  线程 {} 受保护于 Epoch: {}", thread_id, protected_epoch);
+        println!("  线程 {thread_id} 受保护于 Epoch: {protected_epoch}");
 
         // 递增几次 Epoch
         for _ in 0..5 {
@@ -167,8 +167,8 @@ fn main() {
         let current = epoch.current_epoch.load(Ordering::Relaxed);
         let safe = epoch.compute_new_safe_to_reclaim_epoch(current);
 
-        println!("  当前 Epoch: {}", current);
-        println!("  安全回收 Epoch: {}", safe);
+        println!("  当前 Epoch: {current}");
+        println!("  安全回收 Epoch: {safe}");
         println!(
             "  Epoch {} 是否安全回收: {}",
             protected_epoch - 1,
@@ -186,7 +186,7 @@ fn main() {
         // 重新计算
         let safe2 = epoch.compute_new_safe_to_reclaim_epoch(current);
         println!("\n  取消保护后:");
-        println!("  安全回收 Epoch: {}", safe2);
+        println!("  安全回收 Epoch: {safe2}");
         println!(
             "  Epoch {} 是否安全回收: {}",
             protected_epoch,

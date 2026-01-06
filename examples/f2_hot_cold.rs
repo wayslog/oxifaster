@@ -108,7 +108,7 @@ fn main() {
 
     match f2_config.validate() {
         Ok(_) => println!("  配置验证: 通过"),
-        Err(e) => println!("  配置验证: 失败 - {}", e),
+        Err(e) => println!("  配置验证: 失败 - {e}"),
     }
     println!();
 
@@ -116,8 +116,8 @@ fn main() {
     println!("--- 5. 存储类型 (StoreType) ---");
     let hot_type = StoreType::Hot;
     let cold_type = StoreType::Cold;
-    println!("  热存储类型: {:?}", hot_type);
-    println!("  冷存储类型: {:?}", cold_type);
+    println!("  热存储类型: {hot_type:?}");
+    println!("  冷存储类型: {cold_type:?}");
     println!("  相等比较: {}\n", hot_type == StoreType::Hot);
 
     // 6. 操作阶段
@@ -165,7 +165,7 @@ fn main() {
         F2CheckpointPhase::Recover,
     ];
     for phase in &phases {
-        println!("  {:?}", phase);
+        println!("  {phase:?}");
     }
     println!();
 
@@ -196,7 +196,7 @@ fn main() {
 
     match invalid_config.validate() {
         Ok(_) => println!("  1 MB 热存储预算: 通过"),
-        Err(e) => println!("  1 MB 热存储预算: 失败 - {}", e),
+        Err(e) => println!("  1 MB 热存储预算: 失败 - {e}"),
     }
 
     // 禁用压缩后可以使用小预算
@@ -206,7 +206,7 @@ fn main() {
 
     match config_disabled.validate() {
         Ok(_) => println!("  禁用压缩后小预算: 通过"),
-        Err(e) => println!("  禁用压缩后小预算: 失败 - {}", e),
+        Err(e) => println!("  禁用压缩后小预算: 失败 - {e}"),
     }
 
     // 11. 可变区域边界

@@ -17,10 +17,11 @@ use crate::record::{Key, Record, Value};
 use crate::utility::AlignedBuffer;
 
 /// Status of a log page buffer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum LogPageStatus {
     /// Page buffer not initialized
+    #[default]
     Uninitialized = 0,
     /// Page data ready for reading
     Ready = 1,
@@ -28,12 +29,6 @@ pub enum LogPageStatus {
     Pending = 2,
     /// No more data available (past end of log)
     Unavailable = 3,
-}
-
-impl Default for LogPageStatus {
-    fn default() -> Self {
-        LogPageStatus::Uninitialized
-    }
 }
 
 /// A range to scan in the log
@@ -436,9 +431,10 @@ where
         start_addr: Address,
         until: Address,
     ) -> io::Result<()> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "No device configured for iterator")
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| io::Error::other("No device configured for iterator"))?;
 
         // Calculate the offset in the device
         let device_offset = page_num as u64 * self.page_size as u64;
@@ -447,7 +443,7 @@ where
         let buf = self
             .current_page
             .buffer_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Page buffer not available"))?;
+            .ok_or_else(|| io::Error::other("Page buffer not available"))?;
 
         // Read the entire page from device
         let bytes_read = device.read_sync(device_offset, buf)?;
@@ -472,7 +468,7 @@ where
     ///
     /// # Arguments
     /// * `callback` - A function called for each record: (address, record) -> bool
-    ///                Return false to stop iteration early.
+    ///   Return false to stop iteration early.
     ///
     /// # Returns
     /// * `Ok(records_processed)` - Number of records processed
@@ -726,7 +722,7 @@ where
 
         let buf = page
             .buffer_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Page buffer not available"))?;
+            .ok_or_else(|| io::Error::other("Page buffer not available"))?;
 
         let bytes_read = device.read_sync(device_offset, buf)?;
 
@@ -766,12 +762,7 @@ where
     pub fn complete_prefetch(&mut self) -> io::Result<bool> {
         let device = match self.device.as_ref() {
             Some(d) => d,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "No device configured for iterator",
-                ))
-            }
+            None => return Err(io::Error::other("No device configured for iterator")),
         };
 
         if let Some((page_num, start_addr, until)) = self.pending_prefetch.take() {
@@ -797,9 +788,10 @@ where
         start_addr: Address,
         until: Address,
     ) -> io::Result<()> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "No device configured for iterator")
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| io::Error::other("No device configured for iterator"))?;
 
         Self::load_page_into_buffer(
             device,
@@ -818,7 +810,7 @@ where
     ///
     /// # Arguments
     /// * `callback` - A function called for each record: (address, record) -> bool
-    ///                Return false to stop iteration early.
+    ///   Return false to stop iteration early.
     ///
     /// # Returns
     /// * `Ok(records_processed)` - Number of records processed

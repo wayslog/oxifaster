@@ -142,7 +142,7 @@ impl ConcurrentCompactionContext {
 
         // Calculate page range
         let start_page = begin / page_size;
-        let end_page = (end + page_size - 1) / page_size;
+        let end_page = end.div_ceil(page_size);
 
         // Create thread finished flags
         let thread_finished: Vec<AtomicBool> =
@@ -426,7 +426,7 @@ impl ConcurrentCompactor {
 
         // Create shared context
         let context = Arc::new(ConcurrentCompactionContext::new(
-            range.clone(),
+            range,
             self.config.num_threads,
             self.config.page_size,
             self.config.pages_per_chunk,

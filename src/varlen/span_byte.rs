@@ -94,8 +94,8 @@ impl SpanByte {
         }
     }
 
-    /// Create a SpanByte from a string
-    pub fn from_str(s: &str) -> Self {
+    /// Create a SpanByte from a string slice
+    pub fn from_string(s: &str) -> Self {
         Self::from_slice(s.as_bytes())
     }
 
@@ -314,7 +314,7 @@ impl From<Vec<u8>> for SpanByte {
 
 impl From<&str> for SpanByte {
     fn from(s: &str) -> Self {
-        Self::from_str(s)
+        Self::from_string(s)
     }
 }
 
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_span_byte_from_string() {
-        let span = SpanByte::from_str("hello");
+        let span = SpanByte::from_string("hello");
         assert_eq!(span.len(), 5);
         assert_eq!(span.to_string_lossy(), "hello");
     }

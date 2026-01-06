@@ -380,8 +380,10 @@ mod tests {
     #[test]
     fn test_should_compact_skip_tombstones() {
         // Modify config to not compact tombstones
-        let mut config = CompactionConfig::default();
-        config.compact_tombstones = false;
+        let config = CompactionConfig {
+            compact_tombstones: false,
+            ..Default::default()
+        };
         let compactor = Compactor::with_config(config);
 
         let addr = Address::new(1, 100);

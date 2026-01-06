@@ -202,7 +202,7 @@ impl F2CompactionConfig {
 }
 
 /// Main F2 configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct F2Config {
     /// Hot store configuration
     pub hot_store: HotStoreConfig,
@@ -210,16 +210,6 @@ pub struct F2Config {
     pub cold_store: ColdStoreConfig,
     /// Compaction configuration
     pub compaction: F2CompactionConfig,
-}
-
-impl Default for F2Config {
-    fn default() -> Self {
-        Self {
-            hot_store: HotStoreConfig::default(),
-            cold_store: ColdStoreConfig::default(),
-            compaction: F2CompactionConfig::default(),
-        }
-    }
 }
 
 impl F2Config {

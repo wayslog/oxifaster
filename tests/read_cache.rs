@@ -94,9 +94,9 @@ fn test_cache_config_region_sizes() {
     let read_only = config.read_only_size();
 
     // 90% mutable
-    assert!(mutable >= 89 * 1024 * 1024 && mutable <= 91 * 1024 * 1024);
+    assert!((89 * 1024 * 1024..=91 * 1024 * 1024).contains(&mutable));
     // 10% read-only
-    assert!(read_only >= 9 * 1024 * 1024 && read_only <= 11 * 1024 * 1024);
+    assert!((9 * 1024 * 1024..=11 * 1024 * 1024).contains(&read_only));
 }
 
 #[test]

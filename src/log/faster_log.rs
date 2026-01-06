@@ -111,7 +111,7 @@ impl<'a, D: StorageDevice> Iterator for LogIterator<'a, D> {
         if let Some(data) = self.log.read_entry(self.current_address) {
             let addr = self.current_address;
             let entry_size = LogEntry::HEADER_SIZE + data.len();
-            self.current_address = self.current_address + entry_size as u64;
+            self.current_address += entry_size as u64;
             Some((addr, data))
         } else {
             None
@@ -449,7 +449,7 @@ mod tests {
     fn test_append_multiple() {
         let log = create_test_log();
 
-        let entries: Vec<_> = (0..10).map(|i| format!("Entry {}", i)).collect();
+        let entries: Vec<_> = (0..10).map(|i| format!("Entry {i}")).collect();
 
         let addresses: Vec<_> = entries
             .iter()

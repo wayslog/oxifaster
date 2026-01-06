@@ -55,18 +55,13 @@ pub enum RmwOperationStage {
 }
 
 /// Index type for a store
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndexType {
     /// In-memory hash index (for hot store)
+    #[default]
     MemoryIndex,
     /// On-disk cold index (for cold store in F2 mode)
     ColdIndex,
-}
-
-impl Default for IndexType {
-    fn default() -> Self {
-        Self::MemoryIndex
-    }
 }
 
 /// Unified index interface for F2 stores
@@ -1054,11 +1049,9 @@ where
         if phase == F2CheckpointPhase::ColdStoreCheckpoint {
             let status = self.checkpoint.cold_store_status.load(Ordering::Acquire);
             if !status.is_done() {
-                return;
+                // All done - can move to REST
+                // Note: Full implementation would issue callbacks here
             }
-
-            // All done - can move to REST
-            // Note: Full implementation would issue callbacks here
         }
     }
 

@@ -92,7 +92,7 @@ fn main() {
     println!("  处理块:");
     for _ in 0..3 {
         if let Some(chunk) = grow_state.get_next_chunk() {
-            println!("    获取块 {}", chunk);
+            println!("    获取块 {chunk}");
             grow_state.complete_chunk();
         }
     }
@@ -107,25 +107,25 @@ fn main() {
     // 5. 计算扩容块数
     println!("--- 5. 扩容块计算 ---");
     let table_sizes = [1024u64, 16384, 65536, 262144];
-    println!("  块大小: {} 桶", HASH_TABLE_CHUNK_SIZE);
+    println!("  块大小: {HASH_TABLE_CHUNK_SIZE} 桶");
     println!("  不同表大小需要的块数:");
     for size in &table_sizes {
         let chunks = calculate_num_chunks(*size);
-        println!("    {} 桶 -> {} 块", size, chunks);
+        println!("    {size} 桶 -> {chunks} 块");
     }
     println!();
 
     // 6. 块边界计算
     println!("--- 6. 块边界计算 ---");
     let total_buckets = 50000u64;
-    println!("  总桶数: {}", total_buckets);
+    println!("  总桶数: {total_buckets}");
     for chunk_idx in 0..3 {
         let (start, end) = get_chunk_bounds(chunk_idx, total_buckets);
-        println!("  块 {}: 桶 {} -> {}", chunk_idx, start, end);
+        println!("  块 {chunk_idx}: 桶 {start} -> {end}");
     }
     let last_chunk = calculate_num_chunks(total_buckets) - 1;
     let (start, end) = get_chunk_bounds(last_chunk, total_buckets);
-    println!("  块 {} (最后): 桶 {} -> {}\n", last_chunk, start, end);
+    println!("  块 {last_chunk} (最后): 桶 {start} -> {end}\n");
 
     // 7. GrowResult 演示
     println!("--- 7. GrowResult 演示 ---");

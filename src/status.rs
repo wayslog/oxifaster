@@ -5,10 +5,11 @@
 use std::fmt;
 
 /// Status code returned by FASTER operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum Status {
     /// Operation completed successfully
+    #[default]
     Ok = 0,
     /// Operation is pending (async continuation required)
     Pending = 1,
@@ -91,17 +92,12 @@ impl fmt::Display for Status {
     }
 }
 
-impl Default for Status {
-    fn default() -> Self {
-        Status::Ok
-    }
-}
-
 /// Internal operation status used within FASTER
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum OperationStatus {
     /// Operation succeeded
+    #[default]
     Success,
     /// Key not found
     NotFound,
@@ -177,12 +173,6 @@ impl OperationStatus {
             OperationStatus::CprShiftDetected => Status::Pending,
             OperationStatus::Aborted | OperationStatus::AbortedUnmark => Status::Aborted,
         }
-    }
-}
-
-impl Default for OperationStatus {
-    fn default() -> Self {
-        OperationStatus::Success
     }
 }
 

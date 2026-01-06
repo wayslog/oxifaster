@@ -116,10 +116,10 @@ fn main() {
                 );
             }
             Ok(None) => {
-                println!("  未找到: {:?}", id);
+                println!("  未找到: {id:?}");
             }
             Err(e) => {
-                println!("  错误: {:?} - {:?}", id, e);
+                println!("  错误: {id:?} - {e:?}");
             }
         }
     }
@@ -130,7 +130,7 @@ fn main() {
     let updated_info = UserInfo::new("张三丰", 26, 90.0);
 
     if session.upsert(update_id.clone(), updated_info.clone()) == Status::Ok {
-        println!("  更新成功: {:?}", update_id);
+        println!("  更新成功: {update_id:?}");
 
         // 验证更新
         if let Ok(Some(info)) = session.read(&update_id) {
@@ -146,13 +146,13 @@ fn main() {
     let delete_id = UserId::new('B', 2002);
 
     if session.delete(&delete_id) == Status::Ok {
-        println!("  删除成功: {:?}", delete_id);
+        println!("  删除成功: {delete_id:?}");
 
         // 验证删除
         match session.read(&delete_id) {
             Ok(None) => println!("  验证: 用户已删除"),
             Ok(Some(_)) => println!("  验证: 用户仍存在 (错误)"),
-            Err(e) => println!("  验证错误: {:?}", e),
+            Err(e) => println!("  验证错误: {e:?}"),
         }
     }
 

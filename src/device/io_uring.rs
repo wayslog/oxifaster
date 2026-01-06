@@ -688,7 +688,7 @@ impl std::fmt::Display for IoUringError {
             IoUringError::NotInitialized => write!(f, "io_uring device not initialized"),
             IoUringError::SubmissionQueueFull => write!(f, "io_uring submission queue is full"),
             IoUringError::InvalidArgument => write!(f, "invalid argument"),
-            IoUringError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            IoUringError::IoError(msg) => write!(f, "I/O error: {msg}"),
             IoUringError::NotImplemented => {
                 write!(f, "io_uring feature not implemented (mock mode)")
             }
@@ -797,19 +797,23 @@ mod tests {
 
     #[test]
     fn test_stats_pending() {
-        let mut stats = IoUringStats::default();
-        stats.reads_submitted = 10;
-        stats.reads_completed = 5;
-        stats.read_errors = 2;
+        let stats = IoUringStats {
+            reads_submitted: 10,
+            reads_completed: 5,
+            read_errors: 2,
+            ..Default::default()
+        };
 
         assert_eq!(stats.pending_reads(), 3);
     }
 
     #[test]
     fn test_stats_reset() {
-        let mut stats = IoUringStats::default();
-        stats.reads_submitted = 100;
-        stats.writes_completed = 50;
+        let mut stats = IoUringStats {
+            reads_submitted: 100,
+            writes_completed: 50,
+            ..Default::default()
+        };
 
         stats.reset();
 
@@ -829,12 +833,12 @@ mod tests {
 
     #[test]
     fn test_supported_features() {
-        let features = IoUringDevice::supported_features();
+        let _features = IoUringDevice::supported_features();
         // On non-Linux, all features should be false
         #[cfg(not(target_os = "linux"))]
         {
-            assert!(!features.sqpoll);
-            assert!(!features.fixed_buffers);
+            assert!(!_features.sqpoll);
+            assert!(!_features.fixed_buffers);
         }
     }
 

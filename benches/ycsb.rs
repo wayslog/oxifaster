@@ -64,8 +64,8 @@ fn bench_read(c: &mut Criterion) {
     group.bench_function("random", |b| {
         b.iter(|| {
             let key = rng.gen_range(0..num_keys);
-            let result = session.read(black_box(&key));
-            result
+
+            session.read(black_box(&key))
         })
     });
 
@@ -93,7 +93,7 @@ fn bench_mixed_a(c: &mut Criterion) {
     group.bench_function("random_ops", |b| {
         b.iter(|| {
             let key = rng.gen_range(0..num_keys);
-            if op_counter % 2 == 0 {
+            if op_counter.is_multiple_of(2) {
                 let _ = session.read(black_box(&key));
             } else {
                 let _ = session.upsert(black_box(key), black_box(key * 100));

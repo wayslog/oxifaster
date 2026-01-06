@@ -61,8 +61,8 @@ fn main() {
 
     // 4. 块和条目结构
     println!("--- 4. 块和条目结构 ---");
-    println!("  每块桶数: {}", DEFAULT_NUM_BUCKETS_PER_CHUNK);
-    println!("  每桶条目数: {}", ENTRIES_PER_BUCKET);
+    println!("  每块桶数: {DEFAULT_NUM_BUCKETS_PER_CHUNK}");
+    println!("  每桶条目数: {ENTRIES_PER_BUCKET}");
     println!(
         "  每块总条目数: {}\n",
         DEFAULT_NUM_BUCKETS_PER_CHUNK * ENTRIES_PER_BUCKET
@@ -73,7 +73,7 @@ fn main() {
     let hash_value = 0x123456789ABCDEF0u64;
     let key_hash = KeyHash::new(hash_value);
 
-    println!("  原始哈希值: 0x{:016X}", hash_value);
+    println!("  原始哈希值: 0x{hash_value:016X}");
     println!("  tag (14位): 0x{:04X}", key_hash.tag());
     println!(
         "  hash_table_index (用于定位): {}\n",
@@ -122,7 +122,7 @@ fn main() {
         (1 << 22, "4M 块 - 超大数据集"),
     ];
     for (size, description) in &suggested_sizes {
-        println!("  {} - {}", size, description);
+        println!("  {size} - {description}");
     }
 
     println!("\n=== 示例完成 ===");

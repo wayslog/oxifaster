@@ -267,9 +267,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 // Offset exceeds valid range - need to move to new page
                 let (_advanced, won_cas) = self.tail_page_offset.new_page(page);
                 if won_cas {
-                    if let Err(status) = self.on_page_full(page) {
-                        return Err(status);
-                    }
+                    self.on_page_full(page)?;
                 }
                 continue;
             }
@@ -300,9 +298,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
             if won_cas {
                 // We won - need to handle page transition
-                if let Err(status) = self.on_page_full(page) {
-                    return Err(status);
-                }
+                self.on_page_full(page)?;
             }
 
             // Retry allocation
@@ -478,9 +474,9 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             read_only_address: read_only,
             head_address: head,
             begin_address: begin,
-            mutable_bytes: (tail - read_only) as u64,
-            read_only_bytes: (read_only - head) as u64,
-            on_disk_bytes: (head - begin) as u64,
+            mutable_bytes: tail - read_only,
+            read_only_bytes: read_only - head,
+            on_disk_bytes: head - begin,
         }
     }
 
@@ -809,9 +805,8 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Buffer size mismatch: checkpoint has {} pages, recovery allocator has {} pages. \
-                     Recovery buffer size must be >= checkpoint buffer size to prevent data corruption.",
-                    checkpoint_buffer_size, recovery_buffer_size
+                    "Buffer size mismatch: checkpoint has {checkpoint_buffer_size} pages, recovery allocator has {recovery_buffer_size} pages. \
+                     Recovery buffer size must be >= checkpoint buffer size to prevent data corruption."
                 ),
             ));
         }
@@ -837,7 +832,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if !self.pages.allocate_page(page, self.config.page_size) {
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
-                    format!("Failed to allocate page {} during recovery", page),
+                    format!("Failed to allocate page {page} during recovery"),
                 ));
             }
 
@@ -846,10 +841,9 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 dest.copy_from_slice(&page_data);
             } else {
                 // This should not happen after successful allocation
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Page {} not available after allocation", page),
-                ));
+                return Err(io::Error::other(format!(
+                    "Page {page} not available after allocation"
+                )));
             }
         }
 
@@ -1025,7 +1019,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if !self.pages.allocate_page(page_num, self.config.page_size) {
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
-                    format!("Failed to allocate page {} during delta recovery", page_num),
+                    format!("Failed to allocate page {page_num} during delta recovery"),
                 ));
             }
 
@@ -1380,8 +1374,7 @@ mod tests {
         if let Err(e) = result {
             assert!(
                 e.to_string().contains("Buffer size mismatch"),
-                "Error should mention buffer size mismatch, got: {}",
-                e
+                "Error should mention buffer size mismatch, got: {e}"
             );
         }
     }
@@ -1476,8 +1469,7 @@ mod tests {
             assert!(
                 e.to_string().contains("Log snapshot file missing")
                     || e.to_string().contains("snapshot"),
-                "Error should mention missing snapshot, got: {}",
-                e
+                "Error should mention missing snapshot, got: {e}"
             );
         }
     }

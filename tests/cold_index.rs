@@ -69,7 +69,7 @@ fn test_cold_index_config_validate_too_large() {
 fn test_cold_index_config_validate_power_of_two_sizes() {
     for shift in 10..24 {
         let config = ColdIndexConfig::new(1u64 << shift, 32 * 1024 * 1024, 0.5);
-        assert!(config.validate().is_ok(), "Failed for size 2^{}", shift);
+        assert!(config.validate().is_ok(), "Failed for size 2^{shift}");
     }
 }
 

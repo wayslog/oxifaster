@@ -108,7 +108,7 @@ fn test_multiple_keys() {
     // Verify all keys
     for i in 1..=num_keys {
         let result = session.read(&i);
-        assert_eq!(result.unwrap(), Some(i * 10), "Failed to read key {}", i);
+        assert_eq!(result.unwrap(), Some(i * 10), "Failed to read key {i}");
     }
 }
 
@@ -227,6 +227,6 @@ fn test_log_stats() {
     }
 
     let stats = store.log_stats();
-    println!("{}", stats);
+    println!("{stats}");
     assert!(stats.tail_address > stats.begin_address);
 }

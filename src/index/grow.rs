@@ -379,7 +379,7 @@ impl GrowResult {
 
 /// Calculate the number of chunks for a given table size
 pub fn calculate_num_chunks(table_size: u64) -> u64 {
-    (table_size + HASH_TABLE_CHUNK_SIZE - 1) / HASH_TABLE_CHUNK_SIZE
+    table_size.div_ceil(HASH_TABLE_CHUNK_SIZE)
 }
 
 /// Calculate chunk boundaries

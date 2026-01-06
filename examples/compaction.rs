@@ -169,8 +169,8 @@ fn main() {
             }
         }
 
-        println!("  找到记录: {}", found);
-        println!("  未找到记录: {} (已删除)\n", not_found);
+        println!("  找到记录: {found}");
+        println!("  未找到记录: {not_found} (已删除)\n");
     }
 
     // 10. should_compact_record 逻辑演示

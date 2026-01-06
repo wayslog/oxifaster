@@ -45,9 +45,9 @@ fn main() {
     println!("\n--- 读取数据 ---");
     for i in 1..=10u64 {
         match session.read(&i) {
-            Ok(Some(value)) => println!("  读取: key={}, value={}", i, value),
-            Ok(None) => println!("  读取: key={}, 未找到", i),
-            Err(e) => println!("  读取: key={}, 错误: {:?}", i, e),
+            Ok(Some(value)) => println!("  读取: key={i}, value={value}"),
+            Ok(None) => println!("  读取: key={i}, 未找到"),
+            Err(e) => println!("  读取: key={i}, 错误: {e:?}"),
         }
     }
 
@@ -57,7 +57,7 @@ fn main() {
         let new_value = i * 1000;
         let status = session.upsert(i, new_value);
         if status == Status::Ok {
-            println!("  更新: key={}, new_value={}", i, new_value);
+            println!("  更新: key={i}, new_value={new_value}");
         }
     }
 
@@ -67,10 +67,7 @@ fn main() {
         if let Ok(Some(value)) = session.read(&i) {
             let expected = if i <= 5 { i * 1000 } else { i * 100 };
             let status = if value == expected { "✓" } else { "✗" };
-            println!(
-                "  {} key={}, value={} (期望: {})",
-                status, i, value, expected
-            );
+            println!("  {status} key={i}, value={value} (期望: {expected})");
         }
     }
 
@@ -78,16 +75,16 @@ fn main() {
     println!("\n--- 删除数据 ---");
     for i in 1..=3u64 {
         let status = session.delete(&i);
-        println!("  删除: key={}, 状态: {:?}", i, status);
+        println!("  删除: key={i}, 状态: {status:?}");
     }
 
     // 10. 验证删除
     println!("\n--- 验证删除 ---");
     for i in 1..=5u64 {
         match session.read(&i) {
-            Ok(Some(value)) => println!("  key={} 存在, value={}", i, value),
-            Ok(None) => println!("  key={} 已删除", i),
-            Err(e) => println!("  key={} 错误: {:?}", i, e),
+            Ok(Some(value)) => println!("  key={i} 存在, value={value}"),
+            Ok(None) => println!("  key={i} 已删除"),
+            Err(e) => println!("  key={i} 错误: {e:?}"),
         }
     }
 

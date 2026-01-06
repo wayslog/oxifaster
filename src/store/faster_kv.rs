@@ -591,7 +591,7 @@ where
     }
 
     /// Internal upsert implementation without statistics recording.
-    /// 
+    ///
     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
     /// operation statistics when RMW creates a new record via upsert.
     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
@@ -638,12 +638,11 @@ where
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
-                let key_ptr = (ptr.as_ptr() as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
+                let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
                 ptr::write(key_ptr, key);
 
                 // Write value
-                let value_ptr =
-                    (ptr.as_ptr() as *mut u8).add(Record::<K, V>::value_offset()) as *mut V;
+                let value_ptr = ptr.as_ptr().add(Record::<K, V>::value_offset()) as *mut V;
                 ptr::write(value_ptr, value);
             }
 
@@ -675,7 +674,7 @@ where
     /// Inserts or updates a key-value pair.
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
         let start = Instant::now();
-        
+
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
         // Record upsert statistics
@@ -741,7 +740,7 @@ where
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
-                let key_ptr = (ptr.as_ptr() as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
+                let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
                 ptr::write(key_ptr, key.clone());
             }
 
@@ -826,10 +825,7 @@ where
         // Need to create new record
         // First, read old value if exists
         let old_value: Option<V> = if old_address.is_valid() {
-            match self.read_sync(ctx, &key) {
-                Ok(v) => v,
-                Err(_) => None,
-            }
+            self.read_sync(ctx, &key).unwrap_or_default()
         } else {
             None
         };
@@ -936,7 +932,7 @@ where
             };
 
         // Create compaction context
-        let _context = self.compactor.create_context(scan_range.clone());
+        let _context = self.compactor.create_context(scan_range);
 
         // Track statistics
         let mut stats = CompactionStats::default();
@@ -1491,11 +1487,11 @@ where
                             current_state.version,
                         )?);
                     } else {
-                    log_metadata = Some(self.handle_in_progress_checkpoint(
-                        cp_dir,
-                        token,
-                        current_state.version,
-                    )?);
+                        log_metadata = Some(self.handle_in_progress_checkpoint(
+                            cp_dir,
+                            token,
+                            current_state.version,
+                        )?);
                     }
                 }
 
@@ -1509,7 +1505,7 @@ where
                     if is_incremental {
                         self.handle_incremental_wait_flush(cp_dir, token, current_state.version)?;
                     } else {
-                    self.handle_wait_flush()?;
+                        self.handle_wait_flush()?;
                     }
                 }
 
@@ -1666,7 +1662,12 @@ where
     }
 
     /// Handle WAIT_FLUSH phase for incremental checkpoint
-    fn handle_incremental_wait_flush(&self, cp_dir: &Path, token: CheckpointToken, version: u32) -> io::Result<()> {
+    fn handle_incremental_wait_flush(
+        &self,
+        cp_dir: &Path,
+        token: CheckpointToken,
+        version: u32,
+    ) -> io::Result<()> {
         // Get the previous snapshot state
         let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
         let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
@@ -2289,7 +2290,7 @@ mod tests {
         // Read them back
         for i in 1u64..101 {
             let result = session.read(&i);
-            assert_eq!(result.unwrap(), Some(i * 10), "Failed to read key {}", i);
+            assert_eq!(result.unwrap(), Some(i * 10), "Failed to read key {i}");
         }
 
         // Update some
@@ -2304,8 +2305,7 @@ mod tests {
             assert_eq!(
                 result.unwrap(),
                 Some(i * 100),
-                "Failed to read updated key {}",
-                i
+                "Failed to read updated key {i}"
             );
         }
 
@@ -2315,8 +2315,7 @@ mod tests {
             assert_eq!(
                 result.unwrap(),
                 Some(i * 10),
-                "Key {} was unexpectedly changed",
-                i
+                "Key {i} was unexpectedly changed"
             );
         }
     }
@@ -2573,7 +2572,7 @@ mod tests {
 
         // Initial utilization
         let util = store.log_utilization();
-        assert!(util >= 0.0 && util <= 1.0);
+        assert!((0.0..=1.0).contains(&util));
 
         // After some inserts
         for i in 0u64..10 {
@@ -2581,7 +2580,7 @@ mod tests {
         }
 
         let util_after = store.log_utilization();
-        assert!(util_after >= 0.0 && util_after <= 1.0);
+        assert!((0.0..=1.0).contains(&util_after));
     }
 
     #[test]
@@ -2607,16 +2606,11 @@ mod tests {
         // Verify all records are readable before compaction
         for i in 1..=num_records {
             let result = session.read(&i);
-            assert!(
-                result.is_ok(),
-                "Record {} should exist before compaction",
-                i
-            );
+            assert!(result.is_ok(), "Record {i} should exist before compaction");
             assert_eq!(
                 result.unwrap(),
                 Some(i * 100),
-                "Record {} should have correct value",
-                i
+                "Record {i} should have correct value"
             );
         }
 
@@ -2635,8 +2629,7 @@ mod tests {
             let result = session.read(&i);
             assert!(
                 result.is_ok(),
-                "Record {} should still exist after compaction",
-                i
+                "Record {i} should still exist after compaction"
             );
             let value = result.unwrap();
             assert_eq!(
@@ -2676,13 +2669,13 @@ mod tests {
         // Keys 1-25 should have updated values (i + 1000)
         for i in 1u64..=25 {
             let value = session.read(&i).unwrap();
-            assert_eq!(value, Some(i + 1000), "Key {} should have updated value", i);
+            assert_eq!(value, Some(i + 1000), "Key {i} should have updated value");
         }
 
         // Keys 26-50 should have original values
         for i in 26u64..=50 {
             let value = session.read(&i).unwrap();
-            assert_eq!(value, Some(i), "Key {} should have original value", i);
+            assert_eq!(value, Some(i), "Key {i} should have original value");
         }
 
         // Session is automatically dropped when it goes out of scope

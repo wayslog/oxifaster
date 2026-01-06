@@ -55,7 +55,7 @@ fn main() {
             assert_eq!(status, Status::Ok);
         }
     }
-    println!("  插入 {} 条记录\n", num_keys);
+    println!("  插入 {num_keys} 条记录\n");
 
     // 4. 首次读取 (缓存冷启动)
     println!("--- 4. 首次读取 (缓存冷启动) ---");
@@ -136,7 +136,7 @@ fn main() {
         // 再次读取，应该得到新值
         let result = session.read(&key);
         assert_eq!(result.unwrap(), Some(99999));
-        println!("  key={} 更新后读取成功: value=99999\n", key);
+        println!("  key={key} 更新后读取成功: value=99999\n");
     }
 
     // 10. 显示缓存配置

@@ -417,13 +417,13 @@ impl<'a> CheckpointLockGuard<'a> {
     /// Check if any old version locks are held on the underlying lock.
     #[inline]
     pub fn old_locked(&self) -> bool {
-        self.lock.map_or(false, |l| l.old_locked())
+        self.lock.is_some_and(|l| l.old_locked())
     }
 
     /// Check if any new version locks are held on the underlying lock.
     #[inline]
     pub fn new_locked(&self) -> bool {
-        self.lock.map_or(false, |l| l.new_locked())
+        self.lock.is_some_and(|l| l.new_locked())
     }
 
     /// Check if this guard holds an old lock.

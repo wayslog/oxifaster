@@ -160,7 +160,7 @@ fn test_scan_range_page_boundary() {
 #[test]
 fn test_scan_range_clone() {
     let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
-    let cloned = range.clone();
+    let cloned = range;
 
     assert_eq!(range.begin, cloned.begin);
     assert_eq!(range.end, cloned.end);
@@ -178,7 +178,7 @@ fn test_scan_range_copy() {
 #[test]
 fn test_log_page_status_clone() {
     let status = LogPageStatus::Ready;
-    let cloned = status.clone();
+    let cloned = status;
 
     assert_eq!(status, cloned);
 }
@@ -196,7 +196,7 @@ fn test_log_page_status_copy() {
 #[test]
 fn test_scan_range_debug() {
     let range = ScanRange::new(Address::new(1, 100), Address::new(5, 500));
-    let debug_str = format!("{:?}", range);
+    let debug_str = format!("{range:?}");
 
     assert!(debug_str.contains("begin"));
     assert!(debug_str.contains("end"));

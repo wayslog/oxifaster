@@ -24,9 +24,10 @@ use crate::checkpoint::{
 use crate::status::Status;
 
 /// Status of a recovery operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecoveryStatus {
     /// Recovery not started
+    #[default]
     NotStarted,
     /// Recovery in progress - loading metadata
     LoadingMetadata,
@@ -40,12 +41,6 @@ pub enum RecoveryStatus {
     Completed,
     /// Recovery failed
     Failed,
-}
-
-impl Default for RecoveryStatus {
-    fn default() -> Self {
-        RecoveryStatus::NotStarted
-    }
 }
 
 impl RecoveryStatus {
@@ -286,7 +281,7 @@ impl RecoveryState {
 
         if let Err(e) = info.load() {
             self.status = RecoveryStatus::Failed;
-            self.error_message = Some(format!("Failed to load checkpoint metadata: {}", e));
+            self.error_message = Some(format!("Failed to load checkpoint metadata: {e}"));
             return Status::IoError;
         }
 
@@ -419,7 +414,7 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
     }
 
     // Sort by version (newest first)
-    checkpoints.sort_by(|a, b| b.version().unwrap_or(0).cmp(&a.version().unwrap_or(0)));
+    checkpoints.sort_by_key(|b| std::cmp::Reverse(b.version().unwrap_or(0)));
 
     checkpoints
 }
@@ -433,7 +428,7 @@ pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
         if !path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Missing checkpoint file: {}", file),
+                format!("Missing checkpoint file: {file}"),
             ));
         }
     }
@@ -450,7 +445,7 @@ pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> 
         if !path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Missing checkpoint file: {}", file),
+                format!("Missing checkpoint file: {file}"),
             ));
         }
     }
@@ -502,7 +497,7 @@ pub fn build_incremental_chain(
         if !info.is_valid() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid checkpoint in chain: {}", current_token),
+                format!("Invalid checkpoint in chain: {current_token}"),
             ));
         }
 

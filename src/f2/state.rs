@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use uuid::Uuid;
 
 /// Checkpoint phase for F2
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum F2CheckpointPhase {
     /// No checkpoint in progress
+    #[default]
     Rest = 0,
     /// Checkpointing hot store
     HotStoreCheckpoint = 1,
@@ -32,17 +33,12 @@ impl F2CheckpointPhase {
     }
 }
 
-impl Default for F2CheckpointPhase {
-    fn default() -> Self {
-        Self::Rest
-    }
-}
-
 /// Status of a store's checkpoint
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum StoreCheckpointStatus {
     /// No checkpoint operation
+    #[default]
     Idle = 0,
     /// Checkpoint requested
     Requested = 1,
@@ -70,12 +66,6 @@ impl StoreCheckpointStatus {
     /// Check if the checkpoint is done (finished or failed)
     pub fn is_done(&self) -> bool {
         matches!(self, Self::Finished | Self::Failed)
-    }
-}
-
-impl Default for StoreCheckpointStatus {
-    fn default() -> Self {
-        Self::Idle
     }
 }
 

@@ -21,10 +21,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Actions that can be performed by the FASTER store.
 /// Only one action can be active at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum Action {
     /// No action in progress
+    #[default]
     None = 0,
     /// Full checkpoint (index + hybrid log)
     CheckpointFull = 1,
@@ -40,12 +41,6 @@ pub enum Action {
     GrowIndex = 6,
     /// Incremental checkpoint (delta log)
     CheckpointIncremental = 7,
-}
-
-impl Default for Action {
-    fn default() -> Self {
-        Action::None
-    }
 }
 
 impl From<u8> for Action {
@@ -65,7 +60,7 @@ impl From<u8> for Action {
 }
 
 /// Phases during checkpoint/recovery/GC/grow operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum Phase {
     // Checkpoint phases
@@ -82,6 +77,7 @@ pub enum Phase {
     /// Waiting for flush to complete
     WaitFlush = 5,
     /// Rest state - no operation in progress
+    #[default]
     Rest = 6,
     /// Persistence callback
     PersistenceCallback = 7,
@@ -100,12 +96,6 @@ pub enum Phase {
 
     /// Invalid phase
     Invalid = 255,
-}
-
-impl Default for Phase {
-    fn default() -> Self {
-        Phase::Rest
-    }
 }
 
 impl From<u8> for Phase {

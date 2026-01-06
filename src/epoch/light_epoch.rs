@@ -19,10 +19,9 @@ thread_local! {
     /// Thread-local ID for epoch table indexing
     /// Each thread gets a unique ID (0..MAX_THREADS-1) on first access
     static THREAD_ID: usize = {
-        let id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
         // Note: In production, we should handle thread ID exhaustion more gracefully
         // For now, we rely on debug_assert in protect/unprotect to catch overflow
-        id
+        NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed)
     };
 }
 
@@ -315,12 +314,10 @@ impl LightEpoch {
             if trigger_epoch <= safe_epoch
                 && trigger_epoch != EpochAction::FREE
                 && trigger_epoch != EpochAction::LOCKED
+                && action.try_pop(trigger_epoch)
+                && self.drain_count.fetch_sub(1, Ordering::AcqRel) == 1
             {
-                if action.try_pop(trigger_epoch) {
-                    if self.drain_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        break;
-                    }
-                }
+                break;
             }
         }
     }

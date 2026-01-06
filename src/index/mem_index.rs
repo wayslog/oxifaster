@@ -962,10 +962,9 @@ impl MemHashIndex {
         let config = MemHashIndexConfig::new(metadata.table_size);
         let status = self.initialize(&config);
         if status != Status::Ok {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to initialize hash index: {:?}", status),
-            ));
+            return Err(io::Error::other(format!(
+                "Failed to initialize hash index: {status:?}"
+            )));
         }
 
         // Read the index data
@@ -1048,10 +1047,7 @@ impl MemHashIndex {
         if errors > 0 {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "Found {} corrupted entries during recovery verification",
-                    errors
-                ),
+                format!("Found {errors} corrupted entries during recovery verification"),
             ))
         } else {
             Ok(())

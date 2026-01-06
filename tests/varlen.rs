@@ -39,7 +39,7 @@ fn test_span_byte_from_vec() {
 
 #[test]
 fn test_span_byte_from_str() {
-    let span = SpanByte::from_str("test");
+    let span = SpanByte::from_string("test");
 
     assert_eq!(span.len(), 4);
     assert_eq!(span.to_string_lossy(), "test");
@@ -282,8 +282,8 @@ fn test_fasterkv_span_byte_upsert_read() {
     let store = create_test_store();
     let mut session = store.start_session();
 
-    let key = SpanByte::from_str("key1");
-    let value = SpanByte::from_str("value1");
+    let key = SpanByte::from_string("key1");
+    let value = SpanByte::from_string("value1");
 
     let status = session.upsert(key.clone(), value.clone());
     assert_eq!(status, Status::Ok);
@@ -297,8 +297,8 @@ fn test_fasterkv_span_byte_delete() {
     let store = create_test_store();
     let mut session = store.start_session();
 
-    let key = SpanByte::from_str("key1");
-    let value = SpanByte::from_str("value1");
+    let key = SpanByte::from_string("key1");
+    let value = SpanByte::from_string("value1");
 
     session.upsert(key.clone(), value);
     let delete_status = session.delete(&key);
@@ -313,9 +313,9 @@ fn test_fasterkv_span_byte_update() {
     let store = create_test_store();
     let mut session = store.start_session();
 
-    let key = SpanByte::from_str("key1");
-    let value1 = SpanByte::from_str("value1");
-    let value2 = SpanByte::from_str("value2");
+    let key = SpanByte::from_string("key1");
+    let value1 = SpanByte::from_string("value1");
+    let value2 = SpanByte::from_string("value2");
 
     session.upsert(key.clone(), value1);
     session.upsert(key.clone(), value2.clone());
@@ -330,14 +330,14 @@ fn test_fasterkv_span_byte_multiple_keys() {
     let mut session = store.start_session();
 
     for i in 0..100 {
-        let key = SpanByte::from_str(&format!("key{}", i));
-        let value = SpanByte::from_str(&format!("value{}", i));
+        let key = SpanByte::from_string(&format!("key{i}"));
+        let value = SpanByte::from_string(&format!("value{i}"));
         session.upsert(key, value);
     }
 
     for i in 0..100 {
-        let key = SpanByte::from_str(&format!("key{}", i));
-        let expected = SpanByte::from_str(&format!("value{}", i));
+        let key = SpanByte::from_string(&format!("key{i}"));
+        let expected = SpanByte::from_string(&format!("value{i}"));
         let result = session.read(&key);
         assert_eq!(result, Ok(Some(expected)));
     }
@@ -373,7 +373,7 @@ fn test_span_byte_deref() {
     let span = SpanByte::from_slice(b"hello");
 
     // Test Deref
-    let slice: &[u8] = &*span;
+    let slice: &[u8] = &span;
     assert_eq!(slice, b"hello");
 }
 
@@ -389,18 +389,18 @@ fn test_span_byte_as_ref() {
 #[test]
 fn test_span_byte_debug() {
     let short = SpanByte::from_slice(b"short");
-    let debug_str = format!("{:?}", short);
+    let debug_str = format!("{short:?}");
     assert!(debug_str.contains("SpanByte"));
 
     let long = SpanByte::from_vec(vec![0u8; 100]);
-    let long_debug = format!("{:?}", long);
+    let long_debug = format!("{long:?}");
     assert!(long_debug.contains("bytes"));
 }
 
 #[test]
 fn test_span_byte_display() {
-    let span = SpanByte::from_str("hello");
-    let display = format!("{}", span);
+    let span = SpanByte::from_string("hello");
+    let display = format!("{span}");
     assert_eq!(display, "hello");
 }
 

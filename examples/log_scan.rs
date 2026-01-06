@@ -41,7 +41,7 @@ fn main() {
         ("Unavailable", LogPageStatus::Unavailable),
     ];
     for (name, status) in &statuses {
-        println!("  {:15}: {:?}", name, status);
+        println!("  {name:15}: {status:?}");
     }
     println!();
 

@@ -399,31 +399,35 @@ impl<D: StorageDevice> DeltaLog<D> {
     }
 
     /// Flush asynchronously
+    #[allow(clippy::await_holding_lock)]
     pub async fn flush_async(&self) -> io::Result<()> {
-        let buffer_guard = self.write_buffer.lock();
-        let buffer = match buffer_guard.as_ref() {
-            Some(b) => b,
-            None => return Ok(()),
-        };
+        // Extract data while holding lock, then release before await
+        let (data_to_write, page_start, start_offset, tail) = {
+            let buffer_guard = self.write_buffer.lock();
+            let buffer = match buffer_guard.as_ref() {
+                Some(b) => b,
+                None => return Ok(()),
+            };
 
-        if buffer.is_empty() {
-            return Ok(());
-        }
+            if buffer.is_empty() {
+                return Ok(());
+            }
 
-        let tail = self.tail_address.load(Ordering::Acquire);
-        let flushed = self.flushed_until_address.load(Ordering::Acquire);
-        let page_size = self.config.page_size() as i64;
+            let tail = self.tail_address.load(Ordering::Acquire);
+            let flushed = self.flushed_until_address.load(Ordering::Acquire);
+            let page_size = self.config.page_size() as i64;
 
-        let page_start = (flushed / page_size) * page_size;
-        let start_offset = (flushed & self.config.page_size_mask() as i64) as usize;
-        let flush_length = self.config.align(tail - flushed) as usize;
+            let page_start = (flushed / page_size) * page_size;
+            let start_offset = (flushed & self.config.page_size_mask() as i64) as usize;
+            let flush_length = self.config.align(tail - flushed) as usize;
 
-        if flush_length == 0 {
-            return Ok(());
-        }
+            if flush_length == 0 {
+                return Ok(());
+            }
 
-        let data_to_write = buffer.data[start_offset..start_offset + flush_length].to_vec();
-        drop(buffer_guard);
+            let data = buffer.data[start_offset..start_offset + flush_length].to_vec();
+            (data, page_start, start_offset, tail)
+        }; // buffer_guard dropped here
 
         self.device
             .write(page_start as u64 + start_offset as u64, &data_to_write)
@@ -588,7 +592,7 @@ mod tests {
         log.init_for_writes();
 
         for i in 0..10 {
-            let entry = DeltaLogEntry::delta(format!("entry {}", i).into_bytes());
+            let entry = DeltaLogEntry::delta(format!("entry {i}").into_bytes());
             log.write_entry(&entry).unwrap();
         }
 

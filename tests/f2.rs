@@ -189,8 +189,8 @@ fn test_store_type_debug() {
     let hot = StoreType::Hot;
     let cold = StoreType::Cold;
 
-    assert_eq!(format!("{:?}", hot), "Hot");
-    assert_eq!(format!("{:?}", cold), "Cold");
+    assert_eq!(format!("{hot:?}"), "Hot");
+    assert_eq!(format!("{cold:?}"), "Cold");
 }
 
 // ============ ReadOperationStage Tests ============

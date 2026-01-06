@@ -16,20 +16,20 @@ fn main() {
     // 1. SpanByte 基本使用
     println!("--- 1. SpanByte 基本使用 ---");
     let span1 = SpanByte::from_slice(b"hello world");
-    println!("  从字节切片创建: {:?}", span1);
+    println!("  从字节切片创建: {span1:?}");
     println!("  长度: {} 字节", span1.len());
     println!("  总大小 (含头部): {} 字节", span1.total_size());
     println!("  内容: {}\n", span1.to_string_lossy());
 
     // 2. 从不同类型创建
     println!("--- 2. 从不同类型创建 ---");
-    let from_str = SpanByte::from_str("from string");
+    let from_str = SpanByte::from_string("from string");
     let from_string = SpanByte::from(String::from("from String"));
     let from_vec = SpanByte::from_vec(vec![1, 2, 3, 4, 5]);
 
-    println!("  从 &str: {:?}", from_str);
-    println!("  从 String: {:?}", from_string);
-    println!("  从 Vec<u8>: {:?}\n", from_vec);
+    println!("  从 &str: {from_str:?}");
+    println!("  从 String: {from_string:?}");
+    println!("  从 Vec<u8>: {from_vec:?}\n");
 
     // 3. SpanByteBuilder
     println!("--- 3. SpanByteBuilder 构建器 ---");
@@ -40,7 +40,7 @@ fn main() {
         .metadata(42)
         .build();
 
-    println!("  构建的 SpanByte: {:?}", built);
+    println!("  构建的 SpanByte: {built:?}");
     println!("  内容: {}", built.to_string_lossy());
     println!("  元数据: {:?}\n", built.metadata());
 
@@ -65,11 +65,11 @@ fn main() {
     let mut buffer = vec![0u8; original.total_size()];
 
     let bytes_written = original.serialize_to(&mut buffer);
-    println!("  原始: {:?}", original);
-    println!("  序列化字节数: {}", bytes_written);
+    println!("  原始: {original:?}");
+    println!("  序列化字节数: {bytes_written}");
 
     let deserialized = SpanByte::deserialize_from(&buffer).unwrap();
-    println!("  反序列化: {:?}", deserialized);
+    println!("  反序列化: {deserialized:?}");
     println!("  相等: {}\n", original == deserialized);
 
     // 6. 带元数据的序列化
@@ -78,7 +78,7 @@ fn main() {
     with_meta.set_metadata(999);
 
     let total_size = with_meta.total_size();
-    println!("  总大小 (含元数据): {} 字节", total_size);
+    println!("  总大小 (含元数据): {total_size} 字节");
     println!("  = 4 (头部) + 8 (元数据) + {} (数据)", with_meta.len());
 
     let mut buffer2 = vec![0u8; total_size];
@@ -114,10 +114,10 @@ fn main() {
         let mut session = store.start_session();
 
         // 插入字符串键值
-        let key = SpanByte::from_str("user:1");
-        let value = SpanByte::from_str("Alice");
+        let key = SpanByte::from_string("user:1");
+        let value = SpanByte::from_string("Alice");
         let status = session.upsert(key.clone(), value);
-        println!("  插入 user:1 -> Alice: {:?}", status);
+        println!("  插入 user:1 -> Alice: {status:?}");
 
         // 读取
         match session.read(&key) {
@@ -127,16 +127,15 @@ fn main() {
         }
 
         // 更新
-        let new_value = SpanByte::from_str("Alice Smith");
+        let new_value = SpanByte::from_string("Alice Smith");
         session.upsert(key.clone(), new_value);
-        match session.read(&key) {
-            Ok(Some(v)) => println!("  更新后 user:1: {}", v.to_string_lossy()),
-            _ => {}
+        if let Ok(Some(v)) = session.read(&key) {
+            println!("  更新后 user:1: {}", v.to_string_lossy());
         }
 
         // 删除
         let delete_status = session.delete(&key);
-        println!("  删除 user:1: {:?}", delete_status);
+        println!("  删除 user:1: {delete_status:?}");
     }
     println!();
 

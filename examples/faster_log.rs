@@ -54,10 +54,10 @@ fn main() {
     println!("\n--- 提交日志 ---");
     match log.commit() {
         Ok(committed_addr) => {
-            println!("已提交到地址: {}", committed_addr);
+            println!("已提交到地址: {committed_addr}");
         }
         Err(e) => {
-            println!("提交失败: {:?}", e);
+            println!("提交失败: {e:?}");
         }
     }
 
@@ -78,7 +78,7 @@ fn main() {
         let text = String::from_utf8_lossy(&data);
         println!("  {} - {} ({} 字节)", addr, text, data.len());
     }
-    println!("共扫描到 {} 条记录", count);
+    println!("共扫描到 {count} 条记录");
 
     // 7. 追加更多条目
     println!("\n--- 追加更多条目 ---");
@@ -86,7 +86,7 @@ fn main() {
 
     for entry in &more_entries {
         if let Ok(addr) = log.append(entry.as_bytes()) {
-            println!("  追加: {} - {}", addr, entry);
+            println!("  追加: {addr} - {entry}");
         }
     }
 
@@ -108,7 +108,7 @@ fn main() {
     if !addresses.is_empty() {
         let truncate_addr = addresses[3]; // 截断前 4 条
         log.truncate_until(truncate_addr);
-        println!("已截断到地址: {}", truncate_addr);
+        println!("已截断到地址: {truncate_addr}");
         println!("新的起始地址: {}", log.get_begin_address());
     }
 
