@@ -1,17 +1,27 @@
 //! YCSB-style benchmark for oxifaster
 //!
-//! This benchmark tests the performance of FasterKv under different workloads.
+//! This benchmark tests the performance of FasterKv under different workloads:
+//! - Basic single-threaded operations (upsert, read, mixed, RMW)
+//! - Multi-threaded concurrent operations
+//! - Large key/value operations using SpanByte
+//! - Real disk I/O operations using FileSystemDisk
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
 
-use oxifaster::device::NullDisk;
+use oxifaster::device::{FileSystemDisk, NullDisk};
 use oxifaster::store::{FasterKv, FasterKvConfig};
+use oxifaster::varlen::SpanByte;
 
-/// Create a test store with the given configuration
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Create a test store with NullDisk (in-memory)
 fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, NullDisk>> {
     let config = FasterKvConfig {
         table_size,
@@ -22,6 +32,49 @@ fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, Nul
     let device = NullDisk::new();
     Arc::new(FasterKv::new(config, device))
 }
+
+/// Create a test store with SpanByte key/value and NullDisk
+fn create_spanb_store(
+    table_size: u64,
+    memory_size: u64,
+) -> Arc<FasterKv<SpanByte, SpanByte, NullDisk>> {
+    let config = FasterKvConfig {
+        table_size,
+        log_memory_size: memory_size,
+        page_size_bits: 22,
+        mutable_fraction: 0.9,
+    };
+    let device = NullDisk::new();
+    Arc::new(FasterKv::new(config, device))
+}
+
+/// Create a test store with FileSystemDisk (real disk I/O)
+fn create_disk_store(
+    table_size: u64,
+    memory_size: u64,
+    path: &std::path::Path,
+) -> Arc<FasterKv<u64, u64, FileSystemDisk>> {
+    let config = FasterKvConfig {
+        table_size,
+        log_memory_size: memory_size,
+        page_size_bits: 20, // 1MB pages for disk
+        mutable_fraction: 0.9,
+    };
+    let device = FileSystemDisk::single_file(path.join("data.db")).unwrap();
+    Arc::new(FasterKv::new(config, device))
+}
+
+/// Generate random bytes of specified size
+fn generate_random_bytes(size: usize) -> Vec<u8> {
+    let mut rng = rand::thread_rng();
+    let mut data = vec![0u8; size];
+    rng.fill_bytes(&mut data);
+    data
+}
+
+// =============================================================================
+// Basic Single-Threaded Benchmarks
+// =============================================================================
 
 /// Benchmark pure upsert performance
 fn bench_upsert(c: &mut Criterion) {
@@ -166,8 +219,376 @@ fn bench_rmw(c: &mut Criterion) {
     group.finish();
 }
 
+// =============================================================================
+// Multi-Threaded Concurrent Benchmarks
+// =============================================================================
+
+use rayon::prelude::*;
+
+/// Benchmark concurrent read performance with multiple threads using rayon
+fn bench_concurrent_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_read");
+    group.measurement_time(Duration::from_secs(10));
+
+    // Test with different thread counts
+    for num_threads in [1, 2, 4, 8] {
+        // Configure rayon thread pool for this test
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+
+        // Create store inside the pool to ensure sessions are created in pool threads
+        let store = pool.install(|| create_store(1 << 20, 1 << 28));
+
+        // Populate store with initial data
+        let num_keys = 100_000u64;
+        pool.install(|| {
+            let mut session = store.start_session();
+            for i in 0..num_keys {
+                session.upsert(i, i * 10);
+            }
+        });
+
+        let ops_per_thread = 10000u64;
+        group.throughput(Throughput::Elements(ops_per_thread * num_threads as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("threads", num_threads),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    let total_ops = AtomicU64::new(0);
+                    pool.install(|| {
+                        (0..num_threads).into_par_iter().for_each(|_| {
+                            let mut session = store.start_session();
+                            let mut rng = rand::thread_rng();
+                            for _ in 0..ops_per_thread {
+                                let key = rng.gen_range(0..num_keys);
+                                let _ = session.read(black_box(&key));
+                            }
+                            total_ops.fetch_add(ops_per_thread, Ordering::Relaxed);
+                        });
+                    });
+                    total_ops.load(Ordering::Relaxed)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark concurrent mixed read/write workload (80% read, 20% write) using rayon
+fn bench_concurrent_mixed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_mixed_80_20");
+    group.measurement_time(Duration::from_secs(10));
+
+    // Test with different thread counts
+    for num_threads in [1, 2, 4, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+
+        let store = pool.install(|| create_store(1 << 20, 1 << 28));
+
+        // Populate store with initial data
+        let num_keys = 100_000u64;
+        pool.install(|| {
+            let mut session = store.start_session();
+            for i in 0..num_keys {
+                session.upsert(i, i * 10);
+            }
+        });
+
+        let ops_per_thread = 10000u64;
+        group.throughput(Throughput::Elements(ops_per_thread * num_threads as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("threads", num_threads),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    let total_ops = AtomicU64::new(0);
+                    pool.install(|| {
+                        (0..num_threads).into_par_iter().for_each(|thread_id| {
+                            let mut session = store.start_session();
+                            let mut rng = rand::thread_rng();
+                            for i in 0..ops_per_thread {
+                                let key = rng.gen_range(0..num_keys);
+                                // 80% read, 20% write
+                                if i.is_multiple_of(5) {
+                                    let value = key * 10 + thread_id as u64;
+                                    let _ = session.upsert(black_box(key), black_box(value));
+                                } else {
+                                    let _ = session.read(black_box(&key));
+                                }
+                            }
+                            total_ops.fetch_add(ops_per_thread, Ordering::Relaxed);
+                        });
+                    });
+                    total_ops.load(Ordering::Relaxed)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark concurrent write-heavy workload (100% upsert) using rayon
+fn bench_concurrent_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_write");
+    group.measurement_time(Duration::from_secs(10));
+
+    // Test with different thread counts
+    for num_threads in [1, 2, 4, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+
+        let store = pool.install(|| create_store(1 << 20, 1 << 28));
+
+        let ops_per_thread = 10000u64;
+        group.throughput(Throughput::Elements(ops_per_thread * num_threads as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("threads", num_threads),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter(|| {
+                    let total_ops = AtomicU64::new(0);
+                    pool.install(|| {
+                        (0..num_threads).into_par_iter().for_each(|thread_id| {
+                            let mut session = store.start_session();
+                            let base_key = thread_id as u64 * ops_per_thread;
+                            for i in 0..ops_per_thread {
+                                let key = base_key + i;
+                                let value = key * 10;
+                                let _ = session.upsert(black_box(key), black_box(value));
+                            }
+                            total_ops.fetch_add(ops_per_thread, Ordering::Relaxed);
+                        });
+                    });
+                    total_ops.load(Ordering::Relaxed)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// Large Key/Value Benchmarks (using SpanByte)
+// =============================================================================
+
+/// Benchmark read performance with different value sizes
+fn bench_large_value_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_read");
+    group.measurement_time(Duration::from_secs(5));
+
+    // Test different value sizes: 1KB, 4KB, 64KB, 256KB
+    let value_sizes = [1024, 4096, 65536, 262144];
+
+    for &value_size in &value_sizes {
+        // Use larger memory for larger values
+        let memory_size = std::cmp::max(1 << 28, (value_size as u64) * 10000);
+        let store = create_spanb_store(1 << 18, memory_size);
+
+        // Pre-generate test data
+        let num_keys = 1000u64;
+        let test_data = generate_random_bytes(value_size);
+
+        // Populate store
+        {
+            let mut session = store.start_session();
+            for i in 0..num_keys {
+                let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
+                let value = SpanByte::from_vec(test_data.clone());
+                session.upsert(key, value);
+            }
+        }
+
+        group.throughput(Throughput::Bytes(value_size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("size_bytes", value_size),
+            &value_size,
+            |b, _| {
+                let mut session = store.start_session();
+                let mut rng = rand::thread_rng();
+
+                b.iter(|| {
+                    let key_num = rng.gen_range(0..num_keys);
+                    let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+                    session.read(black_box(&key))
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark write performance with different value sizes
+fn bench_large_value_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_write");
+    group.measurement_time(Duration::from_secs(5));
+
+    // Test different value sizes: 1KB, 4KB, 64KB, 256KB
+    let value_sizes = [1024, 4096, 65536, 262144];
+
+    for &value_size in &value_sizes {
+        // Use larger memory for larger values
+        let memory_size = std::cmp::max(1 << 28, (value_size as u64) * 10000);
+        let store = create_spanb_store(1 << 18, memory_size);
+
+        // Pre-generate test data
+        let test_data = generate_random_bytes(value_size);
+        let mut key_counter = 0u64;
+
+        group.throughput(Throughput::Bytes(value_size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("size_bytes", value_size),
+            &value_size,
+            |b, _| {
+                let mut session = store.start_session();
+
+                b.iter(|| {
+                    let key = SpanByte::from_vec(key_counter.to_le_bytes().to_vec());
+                    let value = SpanByte::from_vec(test_data.clone());
+                    key_counter += 1;
+                    session.upsert(black_box(key), black_box(value))
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// Real Disk I/O Benchmarks
+// =============================================================================
+
+/// Benchmark read performance with real disk I/O
+fn bench_disk_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("disk_read");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50); // Fewer samples due to slower disk I/O
+    group.throughput(Throughput::Elements(1));
+
+    // Create temporary directory for disk storage
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+
+    // Use smaller memory to force more disk activity
+    // 16MB memory means data will spill to disk
+    let store = create_disk_store(1 << 18, 1 << 24, temp_dir.path());
+
+    // Populate store with data
+    let num_keys = 50_000u64;
+    {
+        let mut session = store.start_session();
+        for i in 0..num_keys {
+            session.upsert(i, i * 10);
+        }
+    }
+
+    let mut rng = rand::thread_rng();
+
+    group.bench_function("random", |b| {
+        let mut session = store.start_session();
+
+        b.iter(|| {
+            let key = rng.gen_range(0..num_keys);
+            session.read(black_box(&key))
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark write performance with real disk I/O
+fn bench_disk_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("disk_write");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50); // Fewer samples due to slower disk I/O
+    group.throughput(Throughput::Elements(1));
+
+    // Create temporary directory for disk storage
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+
+    // Use smaller memory to force more disk activity
+    let store = create_disk_store(1 << 18, 1 << 24, temp_dir.path());
+
+    let mut key_counter = 0u64;
+
+    group.bench_function("sequential", |b| {
+        let mut session = store.start_session();
+
+        b.iter(|| {
+            let status = session.upsert(black_box(key_counter), black_box(key_counter * 10));
+            key_counter += 1;
+            status
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark mixed workload with real disk I/O
+fn bench_disk_mixed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("disk_mixed_80_20");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+    group.throughput(Throughput::Elements(1));
+
+    // Create temporary directory for disk storage
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+
+    let store = create_disk_store(1 << 18, 1 << 24, temp_dir.path());
+
+    // Populate store
+    let num_keys = 50_000u64;
+    {
+        let mut session = store.start_session();
+        for i in 0..num_keys {
+            session.upsert(i, i * 10);
+        }
+    }
+
+    let mut rng = rand::thread_rng();
+    let mut op_counter = 0u64;
+
+    group.bench_function("random_ops", |b| {
+        let mut session = store.start_session();
+
+        b.iter(|| {
+            let key = rng.gen_range(0..num_keys);
+            // 80% read, 20% write
+            if op_counter.is_multiple_of(5) {
+                let _ = session.upsert(black_box(key), black_box(key * 100));
+            } else {
+                let _ = session.read(black_box(&key));
+            }
+            op_counter += 1;
+        })
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// Benchmark Groups
+// =============================================================================
+
+// Basic single-threaded benchmarks (fast, default)
 criterion_group!(
-    benches,
+    basic_benches,
     bench_upsert,
     bench_read,
     bench_mixed_a,
@@ -175,4 +596,36 @@ criterion_group!(
     bench_rmw,
 );
 
-criterion_main!(benches);
+// Concurrent multi-threaded benchmarks
+criterion_group!(
+    name = concurrent_benches;
+    config = Criterion::default()
+        .sample_size(30)
+        .measurement_time(Duration::from_secs(10));
+    targets = bench_concurrent_read, bench_concurrent_mixed, bench_concurrent_write
+);
+
+// Large value benchmarks using SpanByte
+criterion_group!(
+    name = large_value_benches;
+    config = Criterion::default()
+        .sample_size(50)
+        .measurement_time(Duration::from_secs(5));
+    targets = bench_large_value_read, bench_large_value_write
+);
+
+// Real disk I/O benchmarks
+criterion_group!(
+    name = disk_benches;
+    config = Criterion::default()
+        .sample_size(30)
+        .measurement_time(Duration::from_secs(10));
+    targets = bench_disk_read, bench_disk_write, bench_disk_mixed
+);
+
+criterion_main!(
+    basic_benches,
+    concurrent_benches,
+    large_value_benches,
+    disk_benches
+);
