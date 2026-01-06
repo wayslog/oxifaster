@@ -119,7 +119,7 @@ impl LogPage {
     pub fn update(&mut self, page_addr: Address, current: Address, until: Address) {
         self.page_address = page_addr;
         self.current_offset = current.offset();
-        
+
         // Calculate until_offset based on whether until is in this page
         if until.page() > page_addr.page() {
             // until is in a later page, scan to end of this page
@@ -177,12 +177,14 @@ impl LogPage {
 
         // Calculate record address
         let record_addr = Address::new(self.page_address.page(), self.current_offset);
-        
+
         // Advance to next record
         let record_size = Record::<K, V>::size();
         self.current_offset += record_size as u32;
 
-        Some((record_addr, unsafe { NonNull::new_unchecked(ptr as *mut _) }))
+        Some((record_addr, unsafe {
+            NonNull::new_unchecked(ptr as *mut _)
+        }))
     }
 
     /// Check if there are more records to read
@@ -212,7 +214,7 @@ impl LogPageIterator {
     }
 
     /// Get the next page address to read
-    /// 
+    ///
     /// Returns (page_address, start_address) or None if no more pages.
     pub fn next_page(&mut self) -> Option<(Address, Address)> {
         if self.current >= self.until {
@@ -221,10 +223,10 @@ impl LogPageIterator {
 
         let start_addr = self.current;
         let page_addr = Address::new(self.current.page(), 0);
-        
+
         // Move to next page
         self.current = Address::new(self.current.page() + 1, 0);
-        
+
         Some((page_addr, start_addr))
     }
 
@@ -307,7 +309,7 @@ where
     }
 
     /// Advance to the next page
-    /// 
+    ///
     /// Returns the page address and start address to read,
     /// or None if no more pages.
     pub fn advance_page(&mut self) -> Option<(Address, Address)> {
@@ -324,7 +326,7 @@ where
     }
 
     /// Copy data into the current page buffer
-    /// 
+    ///
     /// This is used to load page data from memory or disk.
     pub fn load_page_data(&mut self, data: &[u8], start_addr: Address, until: Address) {
         if let Some(buf) = self.current_page.buffer_mut() {
@@ -332,7 +334,7 @@ where
             let copy_len = data.len().min(buf.len() - offset);
             buf[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
         }
-        
+
         let page_addr = Address::new(start_addr.page(), 0);
         self.current_page.update(page_addr, start_addr, until);
         self.current_page.set_status(LogPageStatus::Ready);
@@ -385,7 +387,7 @@ where
     }
 
     /// Advance to the next page
-    /// 
+    ///
     /// Returns the page address and start address to read,
     /// or None if no more pages.
     pub fn advance_page(&mut self) -> Option<(Address, Address)> {
@@ -402,7 +404,7 @@ where
     }
 
     /// Copy data into the current page buffer
-    /// 
+    ///
     /// This is used to load page data from memory or disk.
     pub fn load_page_data(&mut self, data: &[u8], start_addr: Address, until: Address) {
         if let Some(buf) = self.current_page.buffer_mut() {
@@ -410,7 +412,7 @@ where
             let copy_len = data.len().min(buf.len() - offset);
             buf[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
         }
-        
+
         let page_addr = Address::new(start_addr.page(), 0);
         self.current_page.update(page_addr, start_addr, until);
         self.current_page.set_status(LogPageStatus::Ready);
@@ -442,9 +444,10 @@ where
         let device_offset = page_num as u64 * self.page_size as u64;
 
         // Get the buffer and read from device
-        let buf = self.current_page.buffer_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Page buffer not available")
-        })?;
+        let buf = self
+            .current_page
+            .buffer_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Page buffer not available"))?;
 
         // Read the entire page from device
         let bytes_read = device.read_sync(device_offset, buf)?;
@@ -622,7 +625,7 @@ where
 
     /// Check if there are more records
     pub fn has_more(&self) -> bool {
-        self.pages[self.current_idx].has_more() 
+        self.pages[self.current_idx].has_more()
             || self.pages[1 - self.current_idx].has_more()
             || self.page_iter.has_more()
     }
@@ -705,7 +708,7 @@ where
 
     /// Check if there are more records
     pub fn has_more(&self) -> bool {
-        self.pages[self.current_idx].has_more() 
+        self.pages[self.current_idx].has_more()
             || self.pages[1 - self.current_idx].has_more()
             || self.page_iter.has_more()
     }
@@ -721,9 +724,9 @@ where
     ) -> io::Result<()> {
         let device_offset = page_num as u64 * page_size as u64;
 
-        let buf = page.buffer_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Page buffer not available")
-        })?;
+        let buf = page
+            .buffer_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Page buffer not available"))?;
 
         let bytes_read = device.read_sync(device_offset, buf)?;
 
@@ -763,10 +766,12 @@ where
     pub fn complete_prefetch(&mut self) -> io::Result<bool> {
         let device = match self.device.as_ref() {
             Some(d) => d,
-            None => return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No device configured for iterator",
-            )),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "No device configured for iterator",
+                ))
+            }
         };
 
         if let Some((page_num, start_addr, until)) = self.pending_prefetch.take() {
@@ -832,7 +837,7 @@ where
             } else {
                 self.range.end
             };
-            
+
             self.load_current_page(page_addr.page(), start_addr, until)?;
         } else {
             return Ok(0);
@@ -937,7 +942,7 @@ mod tests {
     fn test_log_scan_iterator_with_device() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(2, 0));
         let device = Arc::new(NullDisk::new());
-        let iter: LogScanIterator<u64, u64, NullDisk> = 
+        let iter: LogScanIterator<u64, u64, NullDisk> =
             LogScanIterator::with_device(range, 4096, device);
 
         assert_eq!(iter.records_scanned(), 0);
@@ -948,7 +953,8 @@ mod tests {
     #[test]
     fn test_double_buffered_iterator() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
-        let iter: DoubleBufferedLogIterator<u64, u64, ()> = DoubleBufferedLogIterator::new(range, 4096);
+        let iter: DoubleBufferedLogIterator<u64, u64, ()> =
+            DoubleBufferedLogIterator::new(range, 4096);
 
         assert_eq!(iter.records_scanned(), 0);
         assert!(iter.has_more());
@@ -958,7 +964,7 @@ mod tests {
     fn test_double_buffered_iterator_with_device() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
         let device = Arc::new(NullDisk::new());
-        let iter: DoubleBufferedLogIterator<u64, u64, NullDisk> = 
+        let iter: DoubleBufferedLogIterator<u64, u64, NullDisk> =
             DoubleBufferedLogIterator::with_device(range, 4096, device);
 
         assert_eq!(iter.records_scanned(), 0);

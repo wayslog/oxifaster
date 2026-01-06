@@ -124,15 +124,13 @@ where
         // Get the record
         let buffer = self.buffer.read().ok()?;
         let offset = (rc_address.control() as usize) % buffer.len();
-        
+
         if offset + Record::<K, V>::size() > buffer.len() {
             self.stats.record_miss();
             return None;
         }
 
-        let record = unsafe {
-            &*(buffer[offset..].as_ptr() as *const Record<K, V>)
-        };
+        let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
 
         // Create record info
         let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
@@ -175,18 +173,18 @@ where
         key: &K,
         value: &V,
         previous_address: Address,
-        is_cold_log_record: bool,
+        _is_cold_log_record: bool,
     ) -> Result<Address, Status> {
         self.stats.record_insert();
 
         let record_size = Record::<K, V>::size();
-        
+
         // Try to allocate space
         let new_address = self.allocate(record_size)?;
-        
+
         // Get the buffer for writing
         let mut buffer = self.buffer.write().map_err(|_| Status::Aborted)?;
-        
+
         // Ensure buffer is large enough
         let offset = (new_address.control() as usize) % self.config.mem_size as usize;
         if offset + record_size > buffer.len() {
@@ -205,33 +203,35 @@ where
                 false, // tombstone
                 false, // final_bit
             );
-            
+
             // Write header
             (*record_ptr).header = record_info;
-            
+
             // Write key
             let key_ptr = (record_ptr as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
             std::ptr::write(key_ptr, key.clone());
-            
+
             // Write value
             let value_ptr = (record_ptr as *mut u8).add(Record::<K, V>::value_offset()) as *mut V;
             std::ptr::write(value_ptr, value.clone());
         }
 
         self.stats.record_insert_success();
-        
+
         // Return address with readcache flag
-        Ok(Address::from_control(new_address.control() | Address::READCACHE_BIT))
+        Ok(Address::from_control(
+            new_address.control() | Address::READCACHE_BIT,
+        ))
     }
 
     /// Allocate space in the read cache
     fn allocate(&self, size: usize) -> Result<Address, Status> {
         let size = size as u64;
-        
+
         loop {
             let tail = self.tail_address.load(Ordering::Acquire);
             let new_tail = tail + size;
-            
+
             // Check if we need to trigger eviction
             let head = self.head_address.load(Ordering::Acquire);
             if new_tail - head > self.config.mem_size {
@@ -239,26 +239,30 @@ where
                 self.trigger_eviction()?;
                 continue;
             }
-            
+
             // Check if we're crossing a page boundary
             let current_page = tail / PAGE_SIZE;
             let new_page = new_tail / PAGE_SIZE;
-            
+
             if new_page > current_page {
                 // Would cross page boundary - need new page
                 let page_start = new_page * PAGE_SIZE;
-                if self.tail_address.compare_exchange(
-                    tail, page_start + size, Ordering::AcqRel, Ordering::Acquire
-                ).is_ok() {
+                if self
+                    .tail_address
+                    .compare_exchange(tail, page_start + size, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     return Ok(Address::from_control(page_start));
                 }
                 continue;
             }
-            
+
             // Try to allocate
-            if self.tail_address.compare_exchange(
-                tail, new_tail, Ordering::AcqRel, Ordering::Acquire
-            ).is_ok() {
+            if self
+                .tail_address
+                .compare_exchange(tail, new_tail, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 return Ok(Address::from_control(tail));
             }
         }
@@ -267,9 +271,11 @@ where
     /// Trigger eviction of old records
     fn trigger_eviction(&self) -> Result<(), Status> {
         // Try to start eviction
-        if self.eviction_in_progress.compare_exchange(
-            false, true, Ordering::AcqRel, Ordering::Acquire
-        ).is_err() {
+        if self
+            .eviction_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             // Eviction already in progress
             return Ok(());
         }
@@ -278,7 +284,7 @@ where
         let current_head = self.head_address.load(Ordering::Acquire);
         let current_tail = self.tail_address.load(Ordering::Acquire);
         let target_size = self.config.mutable_size();
-        
+
         let new_head = if current_tail > target_size {
             current_tail - target_size
         } else {
@@ -287,8 +293,11 @@ where
 
         if new_head > current_head {
             // Evict records from current_head to new_head
-            self.evict(Address::from_control(current_head), Address::from_control(new_head));
-            
+            self.evict(
+                Address::from_control(current_head),
+                Address::from_control(new_head),
+            );
+
             // Update head address
             self.head_address.store(new_head, Ordering::Release);
             self.safe_head_address.store(new_head, Ordering::Release);
@@ -296,7 +305,8 @@ where
 
         // Update read-only address
         let ro_threshold = current_tail.saturating_sub(self.config.read_only_size());
-        self.read_only_address.store(ro_threshold, Ordering::Release);
+        self.read_only_address
+            .store(ro_threshold, Ordering::Release);
 
         self.eviction_in_progress.store(false, Ordering::Release);
         Ok(())
@@ -315,17 +325,15 @@ where
 
         while current < to_address {
             let offset = (current.control() as usize) % buffer.len();
-            
+
             if offset + Record::<K, V>::size() > buffer.len() {
                 break;
             }
 
-            let record = unsafe {
-                &*(buffer[offset..].as_ptr() as *const Record<K, V>)
-            };
+            let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
 
             let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
-            
+
             if rc_info.is_null() {
                 break;
             }
@@ -355,14 +363,12 @@ where
         };
 
         let offset = (rc_address.control() as usize) % buffer.len();
-        
+
         if offset + Record::<K, V>::size() > buffer.len() {
             return Address::INVALID;
         }
 
-        let record = unsafe {
-            &*(buffer[offset..].as_ptr() as *const Record<K, V>)
-        };
+        let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
 
         let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
         rc_info.get_previous_address()
@@ -381,14 +387,12 @@ where
         };
 
         let offset = (rc_address.control() as usize) % buffer.len();
-        
+
         if offset + Record::<K, V>::size() > buffer.len() {
             return Address::INVALID;
         }
 
-        let record = unsafe {
-            &mut *(buffer[offset..].as_ptr() as *mut Record<K, V>)
-        };
+        let record = unsafe { &mut *(buffer[offset..].as_ptr() as *mut Record<K, V>) };
 
         // Check if key matches
         if unsafe { record.key() } == key {
@@ -404,7 +408,7 @@ where
         if let Ok(mut buffer) = self.buffer.write() {
             buffer.clear();
         }
-        
+
         self.tail_address.store(64, Ordering::Release);
         self.safe_head_address.store(64, Ordering::Release);
         self.head_address.store(64, Ordering::Release);
@@ -419,12 +423,12 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
     struct TestKey(u64);
-    
+
     impl Key for TestKey {
         fn size(&self) -> u32 {
             std::mem::size_of::<Self>() as u32
         }
-        
+
         fn get_hash(&self) -> u64 {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -435,7 +439,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Default)]
     struct TestValue(u64);
-    
+
     impl Value for TestValue {
         fn size(&self) -> u32 {
             std::mem::size_of::<Self>() as u32
@@ -446,7 +450,7 @@ mod tests {
     fn test_create_cache() {
         let config = ReadCacheConfig::new(1024 * 1024);
         let cache = ReadCache::<TestKey, TestValue>::new(config);
-        
+
         assert_eq!(cache.tail_address().control(), 64);
         assert_eq!(cache.stats().read_calls(), 0);
     }
@@ -455,22 +459,22 @@ mod tests {
     fn test_insert_and_read() {
         let config = ReadCacheConfig::new(1024 * 1024);
         let cache = ReadCache::<TestKey, TestValue>::new(config);
-        
+
         let key = TestKey(42);
         let value = TestValue(100);
         let prev_addr = Address::new(1, 500);
-        
+
         // Insert
         let result = cache.try_insert(&key, &value, prev_addr, false);
         assert!(result.is_ok());
-        
+
         let cache_addr = result.unwrap();
         assert!(cache_addr.in_readcache());
-        
+
         // Read
         let read_result = cache.read(cache_addr, &key);
         assert!(read_result.is_some());
-        
+
         let (read_value, rc_info) = read_result.unwrap();
         assert_eq!(read_value, value);
         assert_eq!(rc_info.get_previous_address(), prev_addr);
@@ -480,15 +484,15 @@ mod tests {
     fn test_read_miss_wrong_key() {
         let config = ReadCacheConfig::new(1024 * 1024);
         let cache = ReadCache::<TestKey, TestValue>::new(config);
-        
+
         let key = TestKey(42);
         let wrong_key = TestKey(999);
         let value = TestValue(100);
         let prev_addr = Address::new(1, 500);
-        
+
         // Insert
         let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
-        
+
         // Read with wrong key
         let result = cache.read(cache_addr, &wrong_key);
         assert!(result.is_none());
@@ -498,18 +502,18 @@ mod tests {
     fn test_skip() {
         let config = ReadCacheConfig::new(1024 * 1024);
         let cache = ReadCache::<TestKey, TestValue>::new(config);
-        
+
         let key = TestKey(42);
         let value = TestValue(100);
         let prev_addr = Address::new(1, 500);
-        
+
         // Insert
         let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
-        
+
         // Skip should return the previous address
         let skipped = cache.skip(cache_addr);
         assert_eq!(skipped, prev_addr);
-        
+
         // Skip on non-cache address should return same address
         let hlog_addr = Address::new(5, 100);
         assert_eq!(cache.skip(hlog_addr), hlog_addr);
@@ -519,14 +523,16 @@ mod tests {
     fn test_stats() {
         let config = ReadCacheConfig::new(1024 * 1024);
         let cache = ReadCache::<TestKey, TestValue>::new(config);
-        
+
         let key = TestKey(42);
         let value = TestValue(100);
-        
+
         // Insert
-        cache.try_insert(&key, &value, Address::INVALID, false).unwrap();
+        cache
+            .try_insert(&key, &value, Address::INVALID, false)
+            .unwrap();
         assert_eq!(cache.stats().insert_calls(), 1);
-        
+
         // Read
         let addr = Address::from_control(64 | Address::READCACHE_BIT);
         let _ = cache.read(addr, &key);

@@ -29,7 +29,7 @@ impl FasterLogConfig {
     /// Create a new configuration
     pub fn new(memory_size: u64, page_size: usize) -> Self {
         let memory_pages = (memory_size / page_size as u64) as u32;
-        
+
         Self {
             page_size,
             memory_pages,
@@ -67,10 +67,7 @@ impl LogEntry {
 
     /// Create a new log entry
     pub fn new(length: u32) -> Self {
-        Self {
-            length,
-            flags: 0,
-        }
+        Self { length, flags: 0 }
     }
 
     /// Get the total size including header
@@ -156,15 +153,15 @@ impl<D: StorageDevice> FasterLog<D> {
     pub fn new(config: FasterLogConfig, device: D) -> Self {
         let buffer_size = config.memory_pages;
         let page_size = config.page_size;
-        
+
         let mut pages = Vec::with_capacity(buffer_size as usize);
         let mut page_info = Vec::with_capacity(buffer_size as usize);
-        
+
         for _ in 0..buffer_size {
             pages.push(AlignedBuffer::zeroed(page_size, page_size));
             page_info.push(PageInfo::new());
         }
-        
+
         Self {
             config,
             device: Arc::new(device),
@@ -188,19 +185,19 @@ impl<D: StorageDevice> FasterLog<D> {
         }
 
         let entry_size = LogEntry::HEADER_SIZE + data.len();
-        
+
         // Reserve space
         loop {
             let page_offset = self.tail.reserve(entry_size as u32);
             let page = page_offset.page();
             let offset = page_offset.offset();
-            
+
             // Check if we fit in current page
             let new_offset = offset + entry_size as u64;
-            
+
             if new_offset <= self.config.page_size as u64 {
                 let address = Address::new(page, offset as u32);
-                
+
                 // Write entry
                 if let Some(ref buf) = self.pages[self.buffer_index(page)] {
                     let slice = unsafe {
@@ -209,23 +206,23 @@ impl<D: StorageDevice> FasterLog<D> {
                             self.config.page_size,
                         )
                     };
-                    
+
                     // Write header
                     let header = LogEntry::new(data.len() as u32);
                     slice[offset as usize..offset as usize + 4]
                         .copy_from_slice(&header.length.to_le_bytes());
                     slice[offset as usize + 4..offset as usize + 8]
                         .copy_from_slice(&header.flags.to_le_bytes());
-                    
+
                     // Write data
                     slice[offset as usize + LogEntry::HEADER_SIZE
                         ..offset as usize + LogEntry::HEADER_SIZE + data.len()]
                         .copy_from_slice(data);
                 }
-                
+
                 return Ok(address);
             }
-            
+
             // Need new page
             let (advanced, _won) = self.tail.new_page(page);
             if !advanced {
@@ -237,11 +234,11 @@ impl<D: StorageDevice> FasterLog<D> {
     /// Append multiple entries atomically
     pub fn append_batch(&self, entries: &[&[u8]]) -> Result<Vec<Address>, Status> {
         let mut addresses = Vec::with_capacity(entries.len());
-        
+
         for entry in entries {
             addresses.push(self.append(entry)?);
         }
-        
+
         Ok(addresses)
     }
 
@@ -250,25 +247,26 @@ impl<D: StorageDevice> FasterLog<D> {
     /// Makes all appended entries durable.
     pub fn commit(&self) -> Result<Address, Status> {
         let tail = self.get_tail_address();
-        
+
         // Flush all pages up to tail
         // In a full implementation, this would trigger async I/O
-        
+
         // Update committed address
         loop {
             let current = self.committed_until.load(Ordering::Acquire);
             if tail <= current {
                 break;
             }
-            
-            if self.committed_until
+
+            if self
+                .committed_until
                 .compare_exchange(current, tail, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 break;
             }
         }
-        
+
         Ok(tail)
     }
 
@@ -284,27 +282,25 @@ impl<D: StorageDevice> FasterLog<D> {
     pub fn read_entry(&self, address: Address) -> Option<Vec<u8>> {
         let page = address.page();
         let offset = address.offset() as usize;
-        
+
         if let Some(ref buf) = self.pages[self.buffer_index(page)] {
             // Read header
             let slice = buf.as_slice();
             if offset + LogEntry::HEADER_SIZE > slice.len() {
                 return None;
             }
-            
-            let length = u32::from_le_bytes(
-                slice[offset..offset + 4].try_into().ok()?,
-            ) as usize;
-            
+
+            let length = u32::from_le_bytes(slice[offset..offset + 4].try_into().ok()?) as usize;
+
             if offset + LogEntry::HEADER_SIZE + length > slice.len() {
                 return None;
             }
-            
+
             // Read data
-            let data = slice[offset + LogEntry::HEADER_SIZE
-                ..offset + LogEntry::HEADER_SIZE + length]
+            let data = slice
+                [offset + LogEntry::HEADER_SIZE..offset + LogEntry::HEADER_SIZE + length]
                 .to_vec();
-            
+
             Some(data)
         } else {
             None
@@ -348,8 +344,9 @@ impl<D: StorageDevice> FasterLog<D> {
             if address <= current {
                 return Status::Ok;
             }
-            
-            if self.begin_address
+
+            if self
+                .begin_address
                 .compare_exchange(current, address, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
@@ -361,10 +358,10 @@ impl<D: StorageDevice> FasterLog<D> {
     /// Close the log
     pub fn close(&self) -> Status {
         self.closed.store(true, Ordering::Release);
-        
+
         // Commit any pending data
         let _ = self.commit();
-        
+
         Status::Ok
     }
 
@@ -440,10 +437,10 @@ mod tests {
     #[test]
     fn test_append_and_read() {
         let log = create_test_log();
-        
+
         let data = b"Hello, World!";
         let addr = log.append(data).unwrap();
-        
+
         let read_data = log.read_entry(addr).unwrap();
         assert_eq!(&read_data, data);
     }
@@ -451,16 +448,14 @@ mod tests {
     #[test]
     fn test_append_multiple() {
         let log = create_test_log();
-        
-        let entries: Vec<_> = (0..10)
-            .map(|i| format!("Entry {}", i))
-            .collect();
-        
+
+        let entries: Vec<_> = (0..10).map(|i| format!("Entry {}", i)).collect();
+
         let addresses: Vec<_> = entries
             .iter()
             .map(|e| log.append(e.as_bytes()).unwrap())
             .collect();
-        
+
         for (i, addr) in addresses.iter().enumerate() {
             let data = log.read_entry(*addr).unwrap();
             assert_eq!(String::from_utf8(data).unwrap(), entries[i]);
@@ -470,9 +465,9 @@ mod tests {
     #[test]
     fn test_commit() {
         let log = create_test_log();
-        
+
         log.append(b"test data").unwrap();
-        
+
         let committed = log.commit().unwrap();
         assert!(committed > Address::new(0, 0));
     }
@@ -480,32 +475,32 @@ mod tests {
     #[test]
     fn test_scan() {
         let log = create_test_log();
-        
+
         let entries = vec!["one", "two", "three"];
         for entry in &entries {
             log.append(entry.as_bytes()).unwrap();
         }
-        
+
         log.commit().unwrap();
-        
+
         let mut count = 0;
         for (addr, data) in log.scan_all() {
             assert!(addr >= Address::new(0, 0));
             assert!(!data.is_empty());
             count += 1;
         }
-        
+
         assert_eq!(count, entries.len());
     }
 
     #[test]
     fn test_close() {
         let log = create_test_log();
-        
+
         assert!(!log.is_closed());
         log.close();
         assert!(log.is_closed());
-        
+
         // Append should fail after close
         let result = log.append(b"test");
         assert!(result.is_err());
@@ -514,12 +509,11 @@ mod tests {
     #[test]
     fn test_stats() {
         let log = create_test_log();
-        
+
         log.append(b"test data").unwrap();
-        
+
         let stats = log.get_stats();
         assert!(stats.tail_address > Address::new(0, 0));
         assert_eq!(stats.page_size, 4096);
     }
 }
-

@@ -5,8 +5,8 @@
 //!
 //! Based on C++ FASTER's read_cache.h implementation.
 
-mod read_cache;
 mod config;
+mod read_cache;
 mod record_info;
 mod stats;
 

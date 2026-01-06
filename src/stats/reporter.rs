@@ -72,50 +72,81 @@ impl StatsReporter {
 
     fn format_text(&self, snapshot: &StatsSnapshot) -> String {
         let mut output = String::new();
-        
+
         writeln!(output, "=== FASTER Statistics ===").unwrap();
         writeln!(output, "Elapsed: {:.2?}", snapshot.elapsed).unwrap();
         writeln!(output).unwrap();
-        
+
         writeln!(output, "Operations:").unwrap();
         writeln!(output, "  Total:    {}", snapshot.total_operations).unwrap();
-        writeln!(output, "  Reads:    {} (hits: {}, rate: {:.2}%)", 
-            snapshot.reads, snapshot.read_hits, snapshot.hit_rate * 100.0).unwrap();
+        writeln!(
+            output,
+            "  Reads:    {} (hits: {}, rate: {:.2}%)",
+            snapshot.reads,
+            snapshot.read_hits,
+            snapshot.hit_rate * 100.0
+        )
+        .unwrap();
         writeln!(output, "  Upserts:  {}", snapshot.upserts).unwrap();
         writeln!(output, "  RMWs:     {}", snapshot.rmws).unwrap();
         writeln!(output, "  Deletes:  {}", snapshot.deletes).unwrap();
         writeln!(output, "  Pending:  {}", snapshot.pending).unwrap();
         writeln!(output).unwrap();
-        
+
         writeln!(output, "Performance:").unwrap();
         writeln!(output, "  Throughput: {:.2} ops/sec", snapshot.throughput).unwrap();
         writeln!(output, "  Avg Latency: {:.2?}", snapshot.avg_latency).unwrap();
         writeln!(output).unwrap();
-        
+
         if self.detailed {
             writeln!(output, "Index:").unwrap();
             writeln!(output, "  Entries: {}", snapshot.index_entries).unwrap();
-            writeln!(output, "  Load Factor: {:.2}%", snapshot.index_load_factor * 100.0).unwrap();
+            writeln!(
+                output,
+                "  Load Factor: {:.2}%",
+                snapshot.index_load_factor * 100.0
+            )
+            .unwrap();
             writeln!(output).unwrap();
-            
+
             writeln!(output, "Memory:").unwrap();
-            writeln!(output, "  Allocated: {}", StatsSnapshot::format_bytes(snapshot.bytes_allocated)).unwrap();
-            writeln!(output, "  In Use: {}", StatsSnapshot::format_bytes(snapshot.memory_in_use)).unwrap();
-            writeln!(output, "  Peak: {}", StatsSnapshot::format_bytes(snapshot.peak_memory)).unwrap();
+            writeln!(
+                output,
+                "  Allocated: {}",
+                StatsSnapshot::format_bytes(snapshot.bytes_allocated)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "  In Use: {}",
+                StatsSnapshot::format_bytes(snapshot.memory_in_use)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "  Peak: {}",
+                StatsSnapshot::format_bytes(snapshot.peak_memory)
+            )
+            .unwrap();
             writeln!(output).unwrap();
-            
+
             writeln!(output, "I/O:").unwrap();
             writeln!(output, "  Pages Flushed: {}", snapshot.pages_flushed).unwrap();
         }
-        
+
         output
     }
 
     fn format_json(&self, snapshot: &StatsSnapshot) -> String {
         let mut output = String::new();
-        
+
         writeln!(output, "{{").unwrap();
-        writeln!(output, "  \"elapsed_ms\": {},", snapshot.elapsed.as_millis()).unwrap();
+        writeln!(
+            output,
+            "  \"elapsed_ms\": {},",
+            snapshot.elapsed.as_millis()
+        )
+        .unwrap();
         writeln!(output, "  \"operations\": {{").unwrap();
         writeln!(output, "    \"total\": {},", snapshot.total_operations).unwrap();
         writeln!(output, "    \"reads\": {},", snapshot.reads).unwrap();
@@ -128,14 +159,29 @@ impl StatsReporter {
         writeln!(output, "  \"performance\": {{").unwrap();
         writeln!(output, "    \"throughput\": {:.2},", snapshot.throughput).unwrap();
         writeln!(output, "    \"hit_rate\": {:.4},", snapshot.hit_rate).unwrap();
-        writeln!(output, "    \"avg_latency_ns\": {}", snapshot.avg_latency.as_nanos()).unwrap();
+        writeln!(
+            output,
+            "    \"avg_latency_ns\": {}",
+            snapshot.avg_latency.as_nanos()
+        )
+        .unwrap();
         writeln!(output, "  }},").unwrap();
         writeln!(output, "  \"index\": {{").unwrap();
         writeln!(output, "    \"entries\": {},", snapshot.index_entries).unwrap();
-        writeln!(output, "    \"load_factor\": {:.4}", snapshot.index_load_factor).unwrap();
+        writeln!(
+            output,
+            "    \"load_factor\": {:.4}",
+            snapshot.index_load_factor
+        )
+        .unwrap();
         writeln!(output, "  }},").unwrap();
         writeln!(output, "  \"memory\": {{").unwrap();
-        writeln!(output, "    \"bytes_allocated\": {},", snapshot.bytes_allocated).unwrap();
+        writeln!(
+            output,
+            "    \"bytes_allocated\": {},",
+            snapshot.bytes_allocated
+        )
+        .unwrap();
         writeln!(output, "    \"in_use\": {},", snapshot.memory_in_use).unwrap();
         writeln!(output, "    \"peak\": {}", snapshot.peak_memory).unwrap();
         writeln!(output, "  }},").unwrap();
@@ -143,7 +189,7 @@ impl StatsReporter {
         writeln!(output, "    \"pages_flushed\": {}", snapshot.pages_flushed).unwrap();
         writeln!(output, "  }}").unwrap();
         writeln!(output, "}}").unwrap();
-        
+
         output
     }
 
@@ -217,7 +263,7 @@ mod tests {
         let reporter = StatsReporter::text();
         let snapshot = sample_snapshot();
         let output = reporter.report_snapshot(&snapshot);
-        
+
         assert!(output.contains("FASTER Statistics"));
         assert!(output.contains("Total:    1000"));
         assert!(output.contains("Reads:    500"));
@@ -229,7 +275,7 @@ mod tests {
         let reporter = StatsReporter::json();
         let snapshot = sample_snapshot();
         let output = reporter.report_snapshot(&snapshot);
-        
+
         assert!(output.contains("\"total\": 1000"));
         assert!(output.contains("\"throughput\": 100.00"));
         assert!(output.contains("\"hit_rate\": 0.8000"));
@@ -240,7 +286,7 @@ mod tests {
         let reporter = StatsReporter::new(ReportFormat::Csv);
         let snapshot = sample_snapshot();
         let output = reporter.report_snapshot(&snapshot);
-        
+
         // CSV should be a single line with comma-separated values
         assert!(!output.contains('\n'));
         let values: Vec<&str> = output.split(',').collect();
@@ -252,7 +298,7 @@ mod tests {
         let reporter = StatsReporter::new(ReportFormat::Compact);
         let snapshot = sample_snapshot();
         let output = reporter.report_snapshot(&snapshot);
-        
+
         assert!(output.contains("ops=1000"));
         assert!(output.contains("tput=100/s"));
         assert!(output.contains("hit=80.0%"));
@@ -272,7 +318,7 @@ mod tests {
         let reporter = StatsReporter::text().with_detailed(false);
         let snapshot = sample_snapshot();
         let output = reporter.report_snapshot(&snapshot);
-        
+
         // Should not contain detailed sections
         assert!(!output.contains("Index:"));
         assert!(!output.contains("Memory:"));

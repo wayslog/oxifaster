@@ -26,19 +26,19 @@ pub struct RecordInfo {
 impl RecordInfo {
     /// Mask for the previous address (48 bits)
     const PREV_ADDR_MASK: u64 = (1 << 48) - 1;
-    
+
     /// Shift for checkpoint version
     const VERSION_SHIFT: u32 = 48;
     /// Mask for checkpoint version (13 bits)
     const VERSION_MASK: u64 = (1 << 13) - 1;
-    
+
     /// Bit position for invalid flag
     const INVALID_BIT: u64 = 1 << 61;
     /// Bit position for tombstone flag
     const TOMBSTONE_BIT: u64 = 1 << 62;
     /// Bit position for final flag
     const FINAL_BIT: u64 = 1 << 63;
-    
+
     /// Read cache bit in the address portion
     const READ_CACHE_BIT: u64 = 1 << 47;
 
@@ -90,7 +90,8 @@ impl RecordInfo {
     pub fn set_previous_address(&self, addr: Address) {
         let mut current = self.control.load(Ordering::Acquire);
         loop {
-            let new_val = (current & !Self::PREV_ADDR_MASK) | (addr.control() & Self::PREV_ADDR_MASK);
+            let new_val =
+                (current & !Self::PREV_ADDR_MASK) | (addr.control() & Self::PREV_ADDR_MASK);
             match self.control.compare_exchange_weak(
                 current,
                 new_val,
@@ -137,7 +138,8 @@ impl RecordInfo {
         if tombstone {
             self.control.fetch_or(Self::TOMBSTONE_BIT, Ordering::AcqRel);
         } else {
-            self.control.fetch_and(!Self::TOMBSTONE_BIT, Ordering::AcqRel);
+            self.control
+                .fetch_and(!Self::TOMBSTONE_BIT, Ordering::AcqRel);
         }
     }
 
@@ -310,7 +312,10 @@ impl<K, V> Record<K, V> {
     pub fn size_with_sizes(key_size: u32, value_size: u32) -> u32 {
         let key_offset = pad_alignment(mem::size_of::<RecordInfo>(), mem::align_of::<K>());
         let value_offset = pad_alignment(key_offset + key_size as usize, mem::align_of::<V>());
-        let total = pad_alignment(value_offset + value_size as usize, mem::align_of::<RecordInfo>());
+        let total = pad_alignment(
+            value_offset + value_size as usize,
+            mem::align_of::<RecordInfo>(),
+        );
         total as u32
     }
 
@@ -459,7 +464,7 @@ mod tests {
     fn test_record_info_creation() {
         let prev_addr = Address::new(10, 1000);
         let info = RecordInfo::new(prev_addr, 5, false, false, false);
-        
+
         assert_eq!(info.previous_address(), prev_addr);
         assert_eq!(info.checkpoint_version(), 5);
         assert!(!info.is_invalid());
@@ -470,7 +475,7 @@ mod tests {
     #[test]
     fn test_record_info_flags() {
         let info = RecordInfo::new(Address::INVALID, 0, true, true, true);
-        
+
         assert!(info.is_invalid());
         assert!(info.is_tombstone());
         assert!(info.is_final());
@@ -479,11 +484,11 @@ mod tests {
     #[test]
     fn test_record_info_set_flags() {
         let info = RecordInfo::new(Address::INVALID, 0, false, false, false);
-        
+
         assert!(!info.is_invalid());
         info.set_invalid(true);
         assert!(info.is_invalid());
-        
+
         assert!(!info.is_tombstone());
         info.set_tombstone(true);
         assert!(info.is_tombstone());
@@ -492,7 +497,7 @@ mod tests {
     #[test]
     fn test_record_size() {
         type TestRecord = Record<u64, u64>;
-        
+
         // With 8-byte aligned key and value, size should be:
         // 8 (header) + 8 (key) + 8 (value) = 24 bytes
         assert_eq!(TestRecord::size(), 24);
@@ -505,7 +510,7 @@ mod tests {
         let key1: u64 = 12345;
         let key2: u64 = 12345;
         let key3: u64 = 54321;
-        
+
         assert_eq!(key1.get_hash(), key2.get_hash());
         assert_ne!(key1.get_hash(), key3.get_hash());
     }
@@ -532,7 +537,7 @@ mod tests {
         let key1: Vec<u8> = vec![1, 2, 3];
         let key2: Vec<u8> = vec![1, 2, 3];
         let key3: Vec<u8> = vec![3, 2, 1];
-        
+
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key3));
     }
@@ -550,7 +555,7 @@ mod tests {
         let key1: Vec<i32> = vec![100, 200, 300];
         let key2: Vec<i32> = vec![100, 200, 300];
         let key3: Vec<i32> = vec![100, 200, 301];
-        
+
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key3));
     }
@@ -567,7 +572,7 @@ mod tests {
         let key1: Vec<u64> = vec![u64::MAX, 0, 12345];
         let key2: Vec<u64> = vec![u64::MAX, 0, 12345];
         let key3: Vec<u64> = vec![u64::MAX, 0, 12346];
-        
+
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key3));
     }
@@ -577,7 +582,7 @@ mod tests {
         let key1: Vec<String> = vec!["hello".to_string(), "world".to_string()];
         let key2: Vec<String> = vec!["hello".to_string(), "world".to_string()];
         let key3: Vec<String> = vec!["hello".to_string(), "rust".to_string()];
-        
+
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key3));
     }
@@ -626,7 +631,7 @@ mod tests {
         struct LargeStruct {
             _data: [u8; 128],
         }
-        
+
         let value: Vec<LargeStruct> = vec![
             LargeStruct { _data: [0; 128] },
             LargeStruct { _data: [1; 128] },
@@ -642,7 +647,7 @@ mod tests {
         let key1: Vec<u8> = vec![1, 2, 3];
         let key2: Vec<u8> = vec![1, 2, 3];
         let key3: Vec<u8> = vec![1, 2, 4];
-        
+
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
     }
@@ -651,7 +656,7 @@ mod tests {
     fn test_vec_key_clone() {
         let key1: Vec<i32> = vec![10, 20, 30];
         let key2 = key1.clone();
-        
+
         assert_eq!(key1, key2);
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
     }
@@ -661,10 +666,7 @@ mod tests {
     #[test]
     fn test_nested_vec_as_value_size() {
         // Vec<Vec<u8>> - nested vectors
-        let value: Vec<Vec<u8>> = vec![
-            vec![1, 2, 3],
-            vec![4, 5],
-        ];
+        let value: Vec<Vec<u8>> = vec![vec![1, 2, 3], vec![4, 5]];
         // Outer vec: size_of::<usize>() + 2 * size_of::<Vec<u8>>()
         let expected = (mem::size_of::<usize>() + 2 * mem::size_of::<Vec<u8>>()) as u32;
         assert_eq!(Value::size(&value), expected);
@@ -675,7 +677,7 @@ mod tests {
         let key1: Vec<Vec<u8>> = vec![vec![1, 2], vec![3, 4]];
         let key2: Vec<Vec<u8>> = vec![vec![1, 2], vec![3, 4]];
         let key3: Vec<Vec<u8>> = vec![vec![1, 2], vec![3, 5]];
-        
+
         assert_eq!(Key::get_hash(&key1), Key::get_hash(&key2));
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key3));
     }
@@ -687,7 +689,7 @@ mod tests {
         let key: Vec<u64> = vec![42];
         let expected = (mem::size_of::<usize>() + mem::size_of::<u64>()) as u32;
         assert_eq!(Key::size(&key), expected);
-        
+
         // Hash should be consistent
         let key2: Vec<u64> = vec![42];
         assert_eq!(Key::get_hash(&key), Key::get_hash(&key2));
@@ -697,7 +699,7 @@ mod tests {
     fn test_vec_hash_order_matters() {
         let key1: Vec<u8> = vec![1, 2, 3];
         let key2: Vec<u8> = vec![3, 2, 1];
-        
+
         // Different order should produce different hash
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key2));
     }
@@ -706,7 +708,7 @@ mod tests {
     fn test_vec_hash_length_matters() {
         let key1: Vec<u8> = vec![1, 2];
         let key2: Vec<u8> = vec![1, 2, 0];
-        
+
         // Different length should produce different hash
         assert_ne!(Key::get_hash(&key1), Key::get_hash(&key2));
     }
@@ -718,7 +720,7 @@ mod tests {
         // Vec<u8> implements both Key and Value with same size calculation
         let data: Vec<u8> = vec![1, 2, 3, 4, 5];
         let expected = (mem::size_of::<usize>() + 5 * mem::size_of::<u8>()) as u32;
-        
+
         assert_eq!(Key::size(&data), expected);
         assert_eq!(Value::size(&data), expected);
         assert_eq!(Key::size(&data), Value::size(&data));
@@ -728,9 +730,8 @@ mod tests {
     fn test_vec_i32_key_and_value_size_same() {
         let data: Vec<i32> = vec![100, 200, 300];
         let expected = (mem::size_of::<usize>() + 3 * mem::size_of::<i32>()) as u32;
-        
+
         assert_eq!(Key::size(&data), expected);
         assert_eq!(Value::size(&data), expected);
     }
 }
-

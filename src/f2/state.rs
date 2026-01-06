@@ -171,9 +171,7 @@ impl F2CheckpointState {
 
     /// Create a new checkpoint state
     pub fn new() -> Self {
-        let persistent_serial_nums = (0..Self::MAX_THREADS)
-            .map(|_| AtomicU64::new(0))
-            .collect();
+        let persistent_serial_nums = (0..Self::MAX_THREADS).map(|_| AtomicU64::new(0)).collect();
 
         Self {
             phase: AtomicCheckpointPhase::default(),
@@ -192,15 +190,19 @@ impl F2CheckpointState {
         self.token = token;
         // Increment version for this new checkpoint
         self.version.fetch_add(1, Ordering::AcqRel);
-        self.threads_pending_hot_store.store(num_active_threads, Ordering::Release);
-        self.threads_pending_callback.store(num_active_threads, Ordering::Release);
-        
+        self.threads_pending_hot_store
+            .store(num_active_threads, Ordering::Release);
+        self.threads_pending_callback
+            .store(num_active_threads, Ordering::Release);
+
         for psn in &self.persistent_serial_nums {
             psn.store(0, Ordering::Release);
         }
-        
-        self.hot_store_status.store(StoreCheckpointStatus::Idle, Ordering::Release);
-        self.cold_store_status.store(StoreCheckpointStatus::Idle, Ordering::Release);
+
+        self.hot_store_status
+            .store(StoreCheckpointStatus::Idle, Ordering::Release);
+        self.cold_store_status
+            .store(StoreCheckpointStatus::Idle, Ordering::Release);
     }
 
     /// Get the checkpoint token
@@ -223,13 +225,15 @@ impl F2CheckpointState {
         self.token = Uuid::nil();
         self.threads_pending_hot_store.store(0, Ordering::Release);
         self.threads_pending_callback.store(0, Ordering::Release);
-        
+
         for psn in &self.persistent_serial_nums {
             psn.store(0, Ordering::Release);
         }
-        
-        self.hot_store_status.store(StoreCheckpointStatus::Idle, Ordering::Release);
-        self.cold_store_status.store(StoreCheckpointStatus::Idle, Ordering::Release);
+
+        self.hot_store_status
+            .store(StoreCheckpointStatus::Idle, Ordering::Release);
+        self.cold_store_status
+            .store(StoreCheckpointStatus::Idle, Ordering::Release);
         self.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
     }
 
@@ -251,7 +255,8 @@ impl F2CheckpointState {
 
     /// Decrement and get threads pending hot store persistence
     pub fn decrement_pending_hot_store(&self) -> u32 {
-        self.threads_pending_hot_store.fetch_sub(1, Ordering::AcqRel)
+        self.threads_pending_hot_store
+            .fetch_sub(1, Ordering::AcqRel)
     }
 
     /// Decrement and get threads pending callback
@@ -278,7 +283,10 @@ mod tests {
     #[test]
     fn test_checkpoint_phase() {
         assert_eq!(F2CheckpointPhase::from_u8(0), Some(F2CheckpointPhase::Rest));
-        assert_eq!(F2CheckpointPhase::from_u8(1), Some(F2CheckpointPhase::HotStoreCheckpoint));
+        assert_eq!(
+            F2CheckpointPhase::from_u8(1),
+            Some(F2CheckpointPhase::HotStoreCheckpoint)
+        );
         assert_eq!(F2CheckpointPhase::from_u8(5), None);
     }
 
@@ -294,23 +302,28 @@ mod tests {
     fn test_atomic_phase() {
         let phase = AtomicCheckpointPhase::new(F2CheckpointPhase::Rest);
         assert_eq!(phase.load(Ordering::Acquire), F2CheckpointPhase::Rest);
-        
+
         phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
-        assert_eq!(phase.load(Ordering::Acquire), F2CheckpointPhase::HotStoreCheckpoint);
+        assert_eq!(
+            phase.load(Ordering::Acquire),
+            F2CheckpointPhase::HotStoreCheckpoint
+        );
     }
 
     #[test]
     fn test_checkpoint_state_lifecycle() {
         let mut state = F2CheckpointState::new();
         assert!(!state.is_in_progress());
-        
+
         let token = Uuid::new_v4();
         state.initialize(token, 4);
         assert_eq!(state.token(), token);
-        
-        state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+
+        state
+            .phase
+            .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
         assert!(state.is_in_progress());
-        
+
         state.reset();
         assert!(!state.is_in_progress());
         assert_eq!(state.token(), Uuid::nil());
@@ -319,10 +332,10 @@ mod tests {
     #[test]
     fn test_persistent_serial_nums() {
         let state = F2CheckpointState::new();
-        
+
         state.set_persistent_serial_num(0, 100);
         state.set_persistent_serial_num(1, 200);
-        
+
         assert_eq!(state.get_persistent_serial_num(0), 100);
         assert_eq!(state.get_persistent_serial_num(1), 200);
         assert_eq!(state.get_persistent_serial_num(99), 0); // Out of range

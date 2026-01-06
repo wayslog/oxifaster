@@ -12,9 +12,9 @@
 //! Based on C++ FASTER's f2.h implementation.
 
 mod config;
-mod store;
 mod state;
+mod store;
 
-pub use config::{F2Config, F2CompactionConfig, HotStoreConfig, ColdStoreConfig};
-pub use store::{F2Kv, StoreType, ReadOperationStage, RmwOperationStage, StoreStats};
+pub use config::{ColdStoreConfig, F2CompactionConfig, F2Config, HotStoreConfig};
 pub use state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
+pub use store::{F2Kv, ReadOperationStage, RmwOperationStage, StoreStats, StoreType};

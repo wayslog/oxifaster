@@ -32,10 +32,7 @@ fn main() {
         ));
 
     println!("  索引大小: {} 桶", hot_config.index_size);
-    println!(
-        "  日志内存: {} MB",
-        hot_config.log_mem_size / (1024 * 1024)
-    );
+    println!("  日志内存: {} MB", hot_config.log_mem_size / (1024 * 1024));
     println!("  可变区域: {:.0}%", hot_config.mutable_fraction * 100.0);
     println!("  日志路径: {:?}", hot_config.log_path);
     println!(
@@ -150,8 +147,14 @@ fn main() {
     // 设置持久化序列号
     cp_state.set_persistent_serial_num(0, 100);
     cp_state.set_persistent_serial_num(1, 200);
-    println!("    线程 0 序列号: {}", cp_state.get_persistent_serial_num(0));
-    println!("    线程 1 序列号: {}\n", cp_state.get_persistent_serial_num(1));
+    println!(
+        "    线程 0 序列号: {}",
+        cp_state.get_persistent_serial_num(0)
+    );
+    println!(
+        "    线程 1 序列号: {}\n",
+        cp_state.get_persistent_serial_num(1)
+    );
 
     // 8. F2CheckpointPhase 演示
     println!("--- 8. 检查点阶段 ---");
@@ -208,13 +211,17 @@ fn main() {
 
     // 11. 可变区域边界
     println!("\n--- 11. 可变区域边界 ---");
-    let config_clamp = HotStoreConfig::new()
-        .with_mutable_fraction(1.5); // 会被 clamp 到 1.0
-    println!("  设置 mutable_fraction=1.5 后: {}", config_clamp.mutable_fraction);
+    let config_clamp = HotStoreConfig::new().with_mutable_fraction(1.5); // 会被 clamp 到 1.0
+    println!(
+        "  设置 mutable_fraction=1.5 后: {}",
+        config_clamp.mutable_fraction
+    );
 
-    let config_zero = HotStoreConfig::new()
-        .with_mutable_fraction(-0.5); // 会被 clamp 到 0.0
-    println!("  设置 mutable_fraction=-0.5 后: {}", config_zero.mutable_fraction);
+    let config_zero = HotStoreConfig::new().with_mutable_fraction(-0.5); // 会被 clamp 到 0.0
+    println!(
+        "  设置 mutable_fraction=-0.5 后: {}",
+        config_zero.mutable_fraction
+    );
 
     println!("\n=== 示例完成 ===");
 }

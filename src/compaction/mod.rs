@@ -21,8 +21,8 @@ mod contexts;
 
 pub use compact::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
 pub use concurrent::{
-    ConcurrentCompactionConfig, ConcurrentCompactionContext, ConcurrentCompactionResult,
-    ConcurrentCompactionState, ConcurrentCompactor, ConcurrentLogPageIterator,
-    CompactionWorkerHandle, PageChunk,
+    CompactionWorkerHandle, ConcurrentCompactionConfig, ConcurrentCompactionContext,
+    ConcurrentCompactionResult, ConcurrentCompactionState, ConcurrentCompactor,
+    ConcurrentLogPageIterator, PageChunk,
 };
 pub use contexts::{CompactionContext, CompactionInsertContext};

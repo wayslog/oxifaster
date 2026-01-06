@@ -5,6 +5,4 @@
 
 mod log_iterator;
 
-pub use log_iterator::{
-    LogScanIterator, LogPageIterator, LogPage, LogPageStatus, ScanRange,
-};
+pub use log_iterator::{LogPage, LogPageIterator, LogPageStatus, LogScanIterator, ScanRange};

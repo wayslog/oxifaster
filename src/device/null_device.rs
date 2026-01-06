@@ -62,7 +62,7 @@ impl SyncStorageDevice for NullDisk {
                 break;
             }
         }
-        
+
         // Discard the data
         Ok(buf.len())
     }
@@ -89,7 +89,7 @@ mod tests {
     fn test_null_disk_read() {
         let disk = NullDisk::new();
         let mut buf = [1u8; 100];
-        
+
         let result = disk.read_sync(0, &mut buf);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 100);
@@ -100,11 +100,11 @@ mod tests {
     fn test_null_disk_write() {
         let disk = NullDisk::new();
         let buf = [42u8; 100];
-        
+
         let result = disk.write_sync(0, &buf);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 100);
-        
+
         // Size should be updated
         assert_eq!(disk.size_sync().unwrap(), 100);
     }
@@ -113,9 +113,8 @@ mod tests {
     fn test_null_disk_size() {
         let disk = NullDisk::with_size(1024);
         assert_eq!(disk.size_sync().unwrap(), 1024);
-        
+
         disk.truncate_sync(512).unwrap();
         assert_eq!(disk.size_sync().unwrap(), 512);
     }
 }
-

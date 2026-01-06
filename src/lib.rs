@@ -35,6 +35,7 @@ pub mod allocator;
 pub mod cache;
 pub mod checkpoint;
 pub mod compaction;
+pub mod delta_log;
 pub mod device;
 pub mod epoch;
 pub mod f2;
@@ -85,4 +86,3 @@ pub mod prelude {
     pub use crate::status::{OperationStatus, Status};
     pub use crate::store::FasterKv;
 }
-

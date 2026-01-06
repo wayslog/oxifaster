@@ -191,8 +191,8 @@ fn test_hash_bucket_entry_various_addresses() {
 
 #[test]
 fn test_config_chained_building() {
-    let config = ColdIndexConfig::new(1 << 16, 128 * 1024 * 1024, 0.7)
-        .with_root_path("/custom/path");
+    let config =
+        ColdIndexConfig::new(1 << 16, 128 * 1024 * 1024, 0.7).with_root_path("/custom/path");
 
     assert_eq!(config.table_size, 1 << 16);
     assert_eq!(config.in_mem_size, 128 * 1024 * 1024);

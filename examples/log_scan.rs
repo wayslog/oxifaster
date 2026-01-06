@@ -27,16 +27,10 @@ fn main() {
     println!("  相同地址 (5,0) -> (5,0): 空={}", empty_range1.is_empty());
 
     let empty_range2 = ScanRange::new(Address::new(10, 0), Address::new(5, 0));
-    println!(
-        "  反向地址 (10,0) -> (5,0): 空={}",
-        empty_range2.is_empty()
-    );
+    println!("  反向地址 (10,0) -> (5,0): 空={}", empty_range2.is_empty());
 
     let valid_range = ScanRange::new(Address::new(0, 0), Address::new(1, 0));
-    println!(
-        "  有效地址 (0,0) -> (1,0): 空={}\n",
-        valid_range.is_empty()
-    );
+    println!("  有效地址 (0,0) -> (1,0): 空={}\n", valid_range.is_empty());
 
     // 3. LogPageStatus 状态
     println!("--- 3. LogPageStatus 状态 ---");

@@ -46,7 +46,10 @@ fn main() {
     let total_writes = Arc::new(AtomicU64::new(0));
     let successful_reads = Arc::new(AtomicU64::new(0));
 
-    println!("启动 {} 个线程，每个执行 {} 次操作...\n", num_threads, ops_per_thread);
+    println!(
+        "启动 {} 个线程，每个执行 {} 次操作...\n",
+        num_threads, ops_per_thread
+    );
     let start = Instant::now();
 
     // 创建工作线程
@@ -64,7 +67,8 @@ fn main() {
                 let mut local_success = 0u64;
 
                 for i in 0..ops_per_thread {
-                    let key = ((thread_id as u64 * ops_per_thread as u64 + i as u64) % key_range) + 1;
+                    let key =
+                        ((thread_id as u64 * ops_per_thread as u64 + i as u64) % key_range) + 1;
 
                     // 混合读写: 80% 读, 20% 写
                     if i % 5 == 0 {
@@ -125,4 +129,3 @@ fn main() {
 
     println!("\n=== 示例完成 ===");
 }
-

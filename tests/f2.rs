@@ -197,15 +197,30 @@ fn test_store_type_debug() {
 
 #[test]
 fn test_read_operation_stage_values() {
-    assert_eq!(ReadOperationStage::HotLogRead, ReadOperationStage::HotLogRead);
-    assert_eq!(ReadOperationStage::ColdLogRead, ReadOperationStage::ColdLogRead);
-    assert_ne!(ReadOperationStage::HotLogRead, ReadOperationStage::ColdLogRead);
+    assert_eq!(
+        ReadOperationStage::HotLogRead,
+        ReadOperationStage::HotLogRead
+    );
+    assert_eq!(
+        ReadOperationStage::ColdLogRead,
+        ReadOperationStage::ColdLogRead
+    );
+    assert_ne!(
+        ReadOperationStage::HotLogRead,
+        ReadOperationStage::ColdLogRead
+    );
 }
 
 #[test]
 fn test_read_operation_stage_debug() {
-    assert_eq!(format!("{:?}", ReadOperationStage::HotLogRead), "HotLogRead");
-    assert_eq!(format!("{:?}", ReadOperationStage::ColdLogRead), "ColdLogRead");
+    assert_eq!(
+        format!("{:?}", ReadOperationStage::HotLogRead),
+        "HotLogRead"
+    );
+    assert_eq!(
+        format!("{:?}", ReadOperationStage::ColdLogRead),
+        "ColdLogRead"
+    );
 }
 
 // ============ RmwOperationStage Tests ============
@@ -213,7 +228,10 @@ fn test_read_operation_stage_debug() {
 #[test]
 fn test_rmw_operation_stage_values() {
     assert_eq!(RmwOperationStage::HotLogRmw, RmwOperationStage::HotLogRmw);
-    assert_eq!(RmwOperationStage::ColdLogRead, RmwOperationStage::ColdLogRead);
+    assert_eq!(
+        RmwOperationStage::ColdLogRead,
+        RmwOperationStage::ColdLogRead
+    );
     assert_eq!(
         RmwOperationStage::HotLogConditionalInsert,
         RmwOperationStage::HotLogConditionalInsert
@@ -223,7 +241,10 @@ fn test_rmw_operation_stage_values() {
 #[test]
 fn test_rmw_operation_stage_debug() {
     assert_eq!(format!("{:?}", RmwOperationStage::HotLogRmw), "HotLogRmw");
-    assert_eq!(format!("{:?}", RmwOperationStage::ColdLogRead), "ColdLogRead");
+    assert_eq!(
+        format!("{:?}", RmwOperationStage::ColdLogRead),
+        "ColdLogRead"
+    );
     assert_eq!(
         format!("{:?}", RmwOperationStage::HotLogConditionalInsert),
         "HotLogConditionalInsert"
@@ -243,7 +264,10 @@ fn test_checkpoint_phase_from_u8() {
         F2CheckpointPhase::from_u8(2),
         Some(F2CheckpointPhase::ColdStoreCheckpoint)
     );
-    assert_eq!(F2CheckpointPhase::from_u8(3), Some(F2CheckpointPhase::Recover));
+    assert_eq!(
+        F2CheckpointPhase::from_u8(3),
+        Some(F2CheckpointPhase::Recover)
+    );
     assert_eq!(F2CheckpointPhase::from_u8(4), None);
     assert_eq!(F2CheckpointPhase::from_u8(255), None);
 }
@@ -258,11 +282,26 @@ fn test_checkpoint_phase_default() {
 
 #[test]
 fn test_checkpoint_status_from_u8() {
-    assert_eq!(StoreCheckpointStatus::from_u8(0), Some(StoreCheckpointStatus::Idle));
-    assert_eq!(StoreCheckpointStatus::from_u8(1), Some(StoreCheckpointStatus::Requested));
-    assert_eq!(StoreCheckpointStatus::from_u8(2), Some(StoreCheckpointStatus::Active));
-    assert_eq!(StoreCheckpointStatus::from_u8(3), Some(StoreCheckpointStatus::Finished));
-    assert_eq!(StoreCheckpointStatus::from_u8(4), Some(StoreCheckpointStatus::Failed));
+    assert_eq!(
+        StoreCheckpointStatus::from_u8(0),
+        Some(StoreCheckpointStatus::Idle)
+    );
+    assert_eq!(
+        StoreCheckpointStatus::from_u8(1),
+        Some(StoreCheckpointStatus::Requested)
+    );
+    assert_eq!(
+        StoreCheckpointStatus::from_u8(2),
+        Some(StoreCheckpointStatus::Active)
+    );
+    assert_eq!(
+        StoreCheckpointStatus::from_u8(3),
+        Some(StoreCheckpointStatus::Finished)
+    );
+    assert_eq!(
+        StoreCheckpointStatus::from_u8(4),
+        Some(StoreCheckpointStatus::Failed)
+    );
     assert_eq!(StoreCheckpointStatus::from_u8(5), None);
 }
 
@@ -331,7 +370,9 @@ fn test_checkpoint_state_reset() {
     let token = uuid::Uuid::new_v4();
 
     state.initialize(token, 4);
-    state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
 
     state.reset();
 
@@ -341,17 +382,23 @@ fn test_checkpoint_state_reset() {
 
 #[test]
 fn test_checkpoint_state_is_in_progress() {
-    let mut state = F2CheckpointState::new();
+    let state = F2CheckpointState::new();
 
     assert!(!state.is_in_progress());
 
-    state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
     assert!(state.is_in_progress());
 
-    state.phase.store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
     assert!(state.is_in_progress());
 
-    state.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::Rest, Ordering::Release);
     assert!(!state.is_in_progress());
 }
 
@@ -400,17 +447,24 @@ fn test_checkpoint_state_decrement_pending() {
 
 #[test]
 fn test_checkpoint_state_phase_through_state() {
-    let mut state = F2CheckpointState::new();
+    let state = F2CheckpointState::new();
 
     // Initial phase is Rest
     assert!(!state.is_in_progress());
 
     // Change phase through state's phase field
-    state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
     assert!(state.is_in_progress());
-    assert_eq!(state.phase.load(Ordering::Acquire), F2CheckpointPhase::HotStoreCheckpoint);
+    assert_eq!(
+        state.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::HotStoreCheckpoint
+    );
 
-    state.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::Rest, Ordering::Release);
     assert!(!state.is_in_progress());
 }
 
@@ -420,14 +474,23 @@ fn test_checkpoint_state_status_through_state() {
     state.initialize(uuid::Uuid::new_v4(), 1);
 
     // Test hot store status
-    state.hot_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
-    assert_eq!(state.hot_store_status.load(Ordering::Acquire), StoreCheckpointStatus::Active);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Active, Ordering::Release);
+    assert_eq!(
+        state.hot_store_status.load(Ordering::Acquire),
+        StoreCheckpointStatus::Active
+    );
 
-    state.hot_store_status.store(StoreCheckpointStatus::Finished, Ordering::Release);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Finished, Ordering::Release);
     assert!(state.hot_store_status.load(Ordering::Acquire).is_done());
 
     // Test cold store status
-    state.cold_store_status.store(StoreCheckpointStatus::Failed, Ordering::Release);
+    state
+        .cold_store_status
+        .store(StoreCheckpointStatus::Failed, Ordering::Release);
     assert!(state.cold_store_status.load(Ordering::Acquire).is_done());
 }
 
@@ -442,23 +505,37 @@ fn test_typical_checkpoint_flow() {
     state.initialize(token, 2);
 
     // Hot store checkpoint begins
-    state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
-    state.hot_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Active, Ordering::Release);
 
     assert!(state.is_in_progress());
 
     // Hot store checkpoint completes
-    state.hot_store_status.store(StoreCheckpointStatus::Finished, Ordering::Release);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
     // Cold store checkpoint begins
-    state.phase.store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
-    state.cold_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
+    state
+        .cold_store_status
+        .store(StoreCheckpointStatus::Active, Ordering::Release);
 
     // Cold store checkpoint completes
-    state.cold_store_status.store(StoreCheckpointStatus::Finished, Ordering::Release);
+    state
+        .cold_store_status
+        .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
     // All done
-    state.phase.store(F2CheckpointPhase::Rest, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::Rest, Ordering::Release);
     assert!(!state.is_in_progress());
     assert!(state.hot_store_status.load(Ordering::Acquire).is_done());
     assert!(state.cold_store_status.load(Ordering::Acquire).is_done());
@@ -468,11 +545,17 @@ fn test_typical_checkpoint_flow() {
 fn test_checkpoint_failure_handling() {
     let state = F2CheckpointState::new();
 
-    state.phase.store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
-    state.hot_store_status.store(StoreCheckpointStatus::Active, Ordering::Release);
+    state
+        .phase
+        .store(F2CheckpointPhase::HotStoreCheckpoint, Ordering::Release);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Active, Ordering::Release);
 
     // Simulate failure
-    state.hot_store_status.store(StoreCheckpointStatus::Failed, Ordering::Release);
+    state
+        .hot_store_status
+        .store(StoreCheckpointStatus::Failed, Ordering::Release);
 
     assert!(state.hot_store_status.load(Ordering::Acquire).is_done());
     assert_eq!(

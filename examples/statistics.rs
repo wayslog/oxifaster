@@ -92,7 +92,7 @@ fn main() {
     // 注意: FasterKv 内部使用统计收集器
     // 这里展示如何使用独立的收集器
 
-    let mut collector = StatsCollector::new(StatsConfig::new().with_enabled(true));
+    let collector = StatsCollector::new(StatsConfig::new().with_enabled(true));
     // 模拟一些操作记录
     let snapshot = collector.snapshot();
 
@@ -104,13 +104,34 @@ fn main() {
     // 6. 启用/禁用统计
     println!("--- 6. 启用/禁用统计 ---");
     let collector = StatsCollector::with_defaults();
-    println!("  初始状态: {}", if collector.is_enabled() { "启用" } else { "禁用" });
+    println!(
+        "  初始状态: {}",
+        if collector.is_enabled() {
+            "启用"
+        } else {
+            "禁用"
+        }
+    );
 
     collector.disable();
-    println!("  禁用后: {}", if collector.is_enabled() { "启用" } else { "禁用" });
+    println!(
+        "  禁用后: {}",
+        if collector.is_enabled() {
+            "启用"
+        } else {
+            "禁用"
+        }
+    );
 
     collector.enable();
-    println!("  重新启用: {}\n", if collector.is_enabled() { "启用" } else { "禁用" });
+    println!(
+        "  重新启用: {}\n",
+        if collector.is_enabled() {
+            "启用"
+        } else {
+            "禁用"
+        }
+    );
 
     // 7. 索引统计
     println!("--- 7. 索引统计 ---");
@@ -136,7 +157,10 @@ fn main() {
     // 记录一些操作后重置
     collector.reset();
     let snapshot_after_reset = collector.snapshot();
-    println!("  重置后总操作数: {}", snapshot_after_reset.total_operations);
+    println!(
+        "  重置后总操作数: {}",
+        snapshot_after_reset.total_operations
+    );
     println!("  重置后运行时间: {:?}", snapshot_after_reset.elapsed);
 
     println!("\n=== 示例完成 ===");

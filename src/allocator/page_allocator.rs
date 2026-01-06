@@ -268,15 +268,15 @@ mod tests {
     #[test]
     fn test_atomic_full_page_status() {
         let atomic = AtomicFullPageStatus::default();
-        
+
         let loaded = atomic.load(Ordering::Relaxed);
         assert!(loaded.is_flushed());
         assert!(loaded.is_open());
-        
+
         let mut new_status = FullPageStatus::new();
         new_status.flush_status = FlushStatus::InProgress as u8;
         atomic.store(new_status, Ordering::Relaxed);
-        
+
         let loaded2 = atomic.load(Ordering::Relaxed);
         assert!(!loaded2.is_flushed());
         assert_eq!(loaded2.flush(), FlushStatus::InProgress);
@@ -285,18 +285,17 @@ mod tests {
     #[test]
     fn test_page_info() {
         let info = PageInfo::new();
-        
+
         let status = info.status.load(Ordering::Relaxed);
         assert!(status.is_flushed());
-        
+
         info.dirty_start.store(100, Ordering::Relaxed);
         info.dirty_end.store(200, Ordering::Relaxed);
-        
+
         assert_eq!(info.dirty_start.load(Ordering::Relaxed), 100);
         assert_eq!(info.dirty_end.load(Ordering::Relaxed), 200);
-        
+
         info.reset();
         assert_eq!(info.dirty_start.load(Ordering::Relaxed), 0);
     }
 }
-

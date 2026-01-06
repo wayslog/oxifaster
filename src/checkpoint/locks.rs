@@ -106,10 +106,8 @@ impl AtomicCheckpointLock {
         // Only proceed if no new locks are held (mutual exclusion invariant)
         while expected.new_lock_count == 0 {
             // Preserve new_lock_count (which we know is 0) for clarity and robustness
-            let desired = CheckpointLock::with_counts(
-                expected.old_lock_count + 1,
-                expected.new_lock_count,
-            );
+            let desired =
+                CheckpointLock::with_counts(expected.old_lock_count + 1, expected.new_lock_count);
 
             match self.control.compare_exchange_weak(
                 expected.to_control(),
@@ -157,10 +155,8 @@ impl AtomicCheckpointLock {
         // Only proceed if no old locks are held (mutual exclusion invariant)
         while expected.old_lock_count == 0 {
             // Preserve old_lock_count (which we know is 0) for clarity and robustness
-            let desired = CheckpointLock::with_counts(
-                expected.old_lock_count,
-                expected.new_lock_count + 1,
-            );
+            let desired =
+                CheckpointLock::with_counts(expected.old_lock_count, expected.new_lock_count + 1);
 
             match self.control.compare_exchange_weak(
                 expected.to_control(),

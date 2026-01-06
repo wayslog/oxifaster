@@ -24,7 +24,7 @@ pub struct HotStoreConfig {
 impl Default for HotStoreConfig {
     fn default() -> Self {
         Self {
-            index_size: 1 << 20, // 1M buckets
+            index_size: 1 << 20,             // 1M buckets
             log_mem_size: 512 * 1024 * 1024, // 512 MB
             log_path: PathBuf::from("hot_store.log"),
             mutable_fraction: 0.6,
@@ -86,7 +86,7 @@ pub struct ColdStoreConfig {
 impl Default for ColdStoreConfig {
     fn default() -> Self {
         Self {
-            index_size: 1 << 22, // 4M buckets
+            index_size: 1 << 22,             // 4M buckets
             log_mem_size: 256 * 1024 * 1024, // 256 MB
             log_path: PathBuf::from("cold_store.log"),
             mutable_fraction: 0.0, // Cold store is read-only in memory
@@ -147,7 +147,7 @@ impl Default for F2CompactionConfig {
         Self {
             hot_store_enabled: true,
             cold_store_enabled: true,
-            hot_log_size_budget: 1 << 30, // 1 GB
+            hot_log_size_budget: 1 << 30,   // 1 GB
             cold_log_size_budget: 10 << 30, // 10 GB
             trigger_percentage: 0.9,
             compact_percentage: 0.2,
@@ -250,21 +250,22 @@ impl F2Config {
     pub fn validate(&self) -> Result<(), String> {
         // Minimum log size budget
         const MIN_LOG_SIZE: u64 = 64 * 1024 * 1024; // 64 MB
-        
+
         if self.compaction.hot_store_enabled && self.compaction.hot_log_size_budget < MIN_LOG_SIZE {
             return Err(format!(
                 "Hot log size budget too small (min: {} MB)",
                 MIN_LOG_SIZE / (1024 * 1024)
             ));
         }
-        
-        if self.compaction.cold_store_enabled && self.compaction.cold_log_size_budget < MIN_LOG_SIZE {
+
+        if self.compaction.cold_store_enabled && self.compaction.cold_log_size_budget < MIN_LOG_SIZE
+        {
             return Err(format!(
                 "Cold log size budget too small (min: {} MB)",
                 MIN_LOG_SIZE / (1024 * 1024)
             ));
         }
-        
+
         Ok(())
     }
 }
@@ -300,7 +301,7 @@ mod tests {
     fn test_f2_config_validation() {
         let config = F2Config::default();
         assert!(config.validate().is_ok());
-        
+
         // Invalid config
         let mut config = F2Config::default();
         config.compaction.hot_log_size_budget = 1 << 20; // 1 MB - too small
@@ -313,12 +314,9 @@ mod tests {
             .with_hot_store(
                 HotStoreConfig::new()
                     .with_index_size(1 << 18)
-                    .with_log_mem_size(128 * 1024 * 1024)
+                    .with_log_mem_size(128 * 1024 * 1024),
             )
-            .with_compaction(
-                F2CompactionConfig::new()
-                    .with_hot_store_enabled(false)
-            );
+            .with_compaction(F2CompactionConfig::new().with_hot_store_enabled(false));
 
         assert_eq!(config.hot_store.index_size, 1 << 18);
         assert!(!config.compaction.hot_store_enabled);

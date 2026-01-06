@@ -85,7 +85,7 @@ fn test_checkpoint_and_recover_data() {
         // Note: With NullDisk, the actual data won't persist because NullDisk
         // doesn't actually store data. This test verifies the recovery flow
         // works without errors. Full data verification requires a real disk.
-        
+
         // Verify recovery completed and store is operational
         let state = recovered.system_state();
         assert_eq!(state.phase, Phase::Rest);
@@ -337,4 +337,3 @@ fn test_concurrent_reads_during_checkpoint() {
     let result = checkpoint_handle.join().unwrap();
     assert!(result.is_ok());
 }
-

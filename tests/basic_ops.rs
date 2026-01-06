@@ -147,7 +147,7 @@ fn test_concurrent_sessions() {
             let store = store.clone();
             thread::spawn(move || {
                 let mut session = store.start_session();
-                
+
                 for i in 0..ops_per_thread {
                     let key = (t * ops_per_thread + i) as u64 % 1000;
                     let _ = session.read(&key);
@@ -230,4 +230,3 @@ fn test_log_stats() {
     println!("{}", stats);
     assert!(stats.tail_address > stats.begin_address);
 }
-

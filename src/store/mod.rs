@@ -22,4 +22,3 @@ pub use state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 
 /// Callback type for async operations
 pub type AsyncCallback = Box<dyn FnOnce(crate::Status) + Send + 'static>;
-

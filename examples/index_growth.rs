@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use oxifaster::device::NullDisk;
 use oxifaster::index::{
-    GrowConfig, GrowResult, GrowState, MemHashIndex, MemHashIndexConfig, calculate_num_chunks,
-    get_chunk_bounds, HASH_TABLE_CHUNK_SIZE,
+    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState, MemHashIndex,
+    MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
 };
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
@@ -24,12 +24,22 @@ fn main() {
         .with_growth_factor(2)
         .with_auto_grow(false); // 手动触发
 
-    println!("  最小负载因子: {:.0}%", grow_config.min_load_factor * 100.0);
-    println!("  最大负载因子: {:.0}%", grow_config.max_load_factor * 100.0);
+    println!(
+        "  最小负载因子: {:.0}%",
+        grow_config.min_load_factor * 100.0
+    );
+    println!(
+        "  最大负载因子: {:.0}%",
+        grow_config.max_load_factor * 100.0
+    );
     println!("  扩容倍数: {}x", grow_config.growth_factor);
     println!(
         "  自动扩容: {}\n",
-        if grow_config.auto_grow { "启用" } else { "禁用" }
+        if grow_config.auto_grow {
+            "启用"
+        } else {
+            "禁用"
+        }
     );
 
     // 2. 创建哈希索引
@@ -44,7 +54,7 @@ fn main() {
     // 3. 插入数据来增加负载因子
     println!("--- 3. 插入数据 ---");
     let store_config = FasterKvConfig {
-        table_size: 1 << 10, // 匹配索引大小
+        table_size: 1 << 10,      // 匹配索引大小
         log_memory_size: 1 << 22, // 4 MB
         page_size_bits: 14,
         mutable_fraction: 0.9,
@@ -87,7 +97,12 @@ fn main() {
         }
     }
     let (completed, total) = grow_state.progress();
-    println!("  进度: {}/{} ({}%)\n", completed, total, completed * 100 / total);
+    println!(
+        "  进度: {}/{} ({}%)\n",
+        completed,
+        total,
+        completed * 100 / total
+    );
 
     // 5. 计算扩容块数
     println!("--- 5. 扩容块计算 ---");
@@ -125,16 +140,15 @@ fn main() {
 
     // 带数据丢失警告的结果
     let result_with_warning = GrowResult::with_data_loss_tracking(
-        1024,
-        2048,
-        780,
-        60,
-        15,  // overflow_buckets_skipped
-        5,   // rehash_failures
+        1024, 2048, 780, 60, 15, // overflow_buckets_skipped
+        5,  // rehash_failures
     );
     println!("\n  带警告的结果:");
     println!("    成功: {}", result_with_warning.success);
-    println!("    跳过的溢出桶: {}", result_with_warning.overflow_buckets_skipped);
+    println!(
+        "    跳过的溢出桶: {}",
+        result_with_warning.overflow_buckets_skipped
+    );
     println!("    rehash 失败: {}", result_with_warning.rehash_failures);
     println!(
         "    有数据丢失警告: {}\n",
@@ -153,14 +167,20 @@ fn main() {
         println!(
             "  负载因子 {:.0}%: {}",
             factor * 100.0,
-            if should { "应该扩容" } else { "不需扩容" }
+            if should {
+                "应该扩容"
+            } else {
+                "不需扩容"
+            }
         );
     }
 
     // 9. MemHashIndex 扩容状态
     println!("\n--- 9. MemHashIndex 扩容状态 ---");
     let mut index2 = MemHashIndex::with_grow_config(
-        GrowConfig::new().with_auto_grow(true).with_max_load_factor(0.9),
+        GrowConfig::new()
+            .with_auto_grow(true)
+            .with_max_load_factor(0.9),
     );
     let config2 = MemHashIndexConfig::new(1024);
     index2.initialize(&config2);
@@ -168,19 +188,22 @@ fn main() {
     println!("  索引大小: {}", index2.size());
     println!("  版本: {}", index2.version());
     println!("  扩容中: {}", index2.is_grow_in_progress());
-    println!(
-        "  应该扩容: {} (基于当前负载因子)\n",
-        index2.should_grow()
-    );
+    println!("  应该扩容: {} (基于当前负载因子)\n", index2.should_grow());
 
     // 10. 扩容配置的边界情况
     println!("--- 10. 配置边界情况 ---");
     let clamped_config = GrowConfig::new()
         .with_max_load_factor(1.5) // 会被 clamp 到 1.0
-        .with_growth_factor(1);    // 会被 clamp 到 2
+        .with_growth_factor(1); // 会被 clamp 到 2
 
-    println!("  设置 max_load_factor=1.5 后: {}", clamped_config.max_load_factor);
-    println!("  设置 growth_factor=1 后: {}", clamped_config.growth_factor);
+    println!(
+        "  设置 max_load_factor=1.5 后: {}",
+        clamped_config.max_load_factor
+    );
+    println!(
+        "  设置 growth_factor=1 后: {}",
+        clamped_config.growth_factor
+    );
 
     println!("\n=== 示例完成 ===");
 }

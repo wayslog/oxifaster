@@ -52,9 +52,18 @@ impl InternalHashTable {
     /// Panics if size is not a power of two or exceeds i32::MAX
     pub fn initialize(&mut self, new_size: u64, alignment: usize) -> Status {
         assert!(new_size < i32::MAX as u64, "Hash table size too large");
-        assert!(is_power_of_two(new_size), "Hash table size must be power of 2");
-        assert!(is_power_of_two(alignment as u64), "Alignment must be power of 2");
-        assert!(alignment >= CACHE_LINE_BYTES, "Alignment must be >= cache line size");
+        assert!(
+            is_power_of_two(new_size),
+            "Hash table size must be power of 2"
+        );
+        assert!(
+            is_power_of_two(alignment as u64),
+            "Alignment must be power of 2"
+        );
+        assert!(
+            alignment >= CACHE_LINE_BYTES,
+            "Alignment must be >= cache line size"
+        );
 
         if self.size != new_size {
             // Free existing buckets if any
@@ -76,11 +85,7 @@ impl InternalHashTable {
         } else if let Some(ptr) = self.buckets {
             // Clear existing buckets
             unsafe {
-                std::ptr::write_bytes(
-                    ptr.as_ptr(),
-                    0,
-                    new_size as usize,
-                );
+                std::ptr::write_bytes(ptr.as_ptr(), 0, new_size as usize);
             }
         }
 
@@ -158,12 +163,16 @@ impl InternalHashTable {
 
     /// Get a raw pointer to the bucket array
     pub fn as_ptr(&self) -> *const HashBucket {
-        self.buckets.map(|p| p.as_ptr() as *const _).unwrap_or(std::ptr::null())
+        self.buckets
+            .map(|p| p.as_ptr() as *const _)
+            .unwrap_or(std::ptr::null())
     }
 
     /// Get a mutable raw pointer to the bucket array
     pub fn as_mut_ptr(&mut self) -> *mut HashBucket {
-        self.buckets.map(|p| p.as_ptr()).unwrap_or(std::ptr::null_mut())
+        self.buckets
+            .map(|p| p.as_ptr())
+            .unwrap_or(std::ptr::null_mut())
     }
 
     /// Start a checkpoint operation
@@ -171,13 +180,14 @@ impl InternalHashTable {
         if self.checkpoint_pending.load(Ordering::Acquire) {
             return Err(Status::Aborted);
         }
-        
+
         debug_assert_eq!(self.pending_checkpoint_writes.load(Ordering::Relaxed), 0);
-        
+
         self.checkpoint_failed.store(false, Ordering::Release);
         self.checkpoint_pending.store(true, Ordering::Release);
-        self.pending_checkpoint_writes.store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
-        
+        self.pending_checkpoint_writes
+            .store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
+
         Ok(())
     }
 
@@ -186,8 +196,12 @@ impl InternalHashTable {
         if !success {
             self.checkpoint_failed.store(true, Ordering::Release);
         }
-        
-        if self.pending_checkpoint_writes.fetch_sub(1, Ordering::AcqRel) == 1 {
+
+        if self
+            .pending_checkpoint_writes
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
             self.checkpoint_pending.store(false, Ordering::Release);
         }
     }
@@ -199,7 +213,7 @@ impl InternalHashTable {
                 std::thread::yield_now();
             }
         }
-        
+
         if !self.checkpoint_pending.load(Ordering::Acquire) {
             if self.checkpoint_failed.load(Ordering::Acquire) {
                 Status::IoError
@@ -216,13 +230,14 @@ impl InternalHashTable {
         if self.recover_pending.load(Ordering::Acquire) {
             return Err(Status::Aborted);
         }
-        
+
         debug_assert_eq!(self.pending_recover_reads.load(Ordering::Relaxed), 0);
-        
+
         self.recover_failed.store(false, Ordering::Release);
         self.recover_pending.store(true, Ordering::Release);
-        self.pending_recover_reads.store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
-        
+        self.pending_recover_reads
+            .store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
+
         Ok(())
     }
 
@@ -231,7 +246,7 @@ impl InternalHashTable {
         if !success {
             self.recover_failed.store(true, Ordering::Release);
         }
-        
+
         if self.pending_recover_reads.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.recover_pending.store(false, Ordering::Release);
         }
@@ -244,7 +259,7 @@ impl InternalHashTable {
                 std::thread::yield_now();
             }
         }
-        
+
         if !self.recover_pending.load(Ordering::Acquire) {
             if self.recover_failed.load(Ordering::Acquire) {
                 Status::IoError
@@ -296,7 +311,7 @@ mod tests {
     #[test]
     fn test_hash_table_initialize() {
         let mut table = InternalHashTable::new();
-        
+
         let result = table.initialize(1024, CACHE_LINE_BYTES);
         assert_eq!(result, Status::Ok);
         assert!(table.is_initialized());
@@ -307,7 +322,7 @@ mod tests {
     fn test_hash_table_bucket_access() {
         let mut table = InternalHashTable::new();
         table.initialize(1024, CACHE_LINE_BYTES);
-        
+
         let hash = KeyHash::new(12345);
         let _bucket = table.bucket(hash);
         let _bucket_mut = table.bucket_mut(hash);
@@ -317,7 +332,7 @@ mod tests {
     fn test_hash_table_uninitialize() {
         let mut table = InternalHashTable::new();
         table.initialize(1024, CACHE_LINE_BYTES);
-        
+
         table.uninitialize();
         assert!(!table.is_initialized());
         assert_eq!(table.size(), 0);
@@ -330,4 +345,3 @@ mod tests {
         table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
     }
 }
-

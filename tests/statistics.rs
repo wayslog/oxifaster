@@ -76,7 +76,10 @@ fn test_stats_collector_config() {
     let config = StatsConfig::new().with_collection_interval(Duration::from_secs(10));
     let collector = StatsCollector::new(config);
 
-    assert_eq!(collector.config().collection_interval, Duration::from_secs(10));
+    assert_eq!(
+        collector.config().collection_interval,
+        Duration::from_secs(10)
+    );
 }
 
 #[test]

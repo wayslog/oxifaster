@@ -93,13 +93,12 @@ mod tests {
 
     #[test]
     fn test_region_sizes() {
-        let config = ReadCacheConfig::new(100 * 1024 * 1024)
-            .with_mutable_fraction(0.9);
+        let config = ReadCacheConfig::new(100 * 1024 * 1024).with_mutable_fraction(0.9);
 
         // Allow for floating point rounding
         let mutable = config.mutable_size();
         let read_only = config.read_only_size();
-        
+
         assert!(mutable >= 89 * 1024 * 1024 && mutable <= 91 * 1024 * 1024);
         assert!(read_only >= 9 * 1024 * 1024 && read_only <= 11 * 1024 * 1024);
         assert!(mutable + read_only <= 100 * 1024 * 1024);

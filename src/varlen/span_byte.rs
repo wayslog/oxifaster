@@ -114,7 +114,10 @@ impl SpanByte {
     /// Panics if `new_len` exceeds MAX_SPAN_BYTE_LENGTH or the underlying data capacity.
     #[inline]
     pub fn set_length(&mut self, new_len: usize) {
-        assert!(new_len <= MAX_SPAN_BYTE_LENGTH as usize, "length exceeds maximum");
+        assert!(
+            new_len <= MAX_SPAN_BYTE_LENGTH as usize,
+            "length exceeds maximum"
+        );
         assert!(new_len <= self.data.len(), "length exceeds data capacity");
         // Preserve header flags (upper 2 bits), update length (lower 30 bits)
         let header_flags = self.length & HEADER_MASK;
@@ -222,7 +225,11 @@ impl SpanByte {
         let payload_len = (header & !HEADER_MASK) as usize;
         let has_metadata = (header & EXTRA_METADATA_BIT_MASK) != 0;
 
-        let metadata_size = if has_metadata { SPAN_BYTE_METADATA_SIZE } else { 0 };
+        let metadata_size = if has_metadata {
+            SPAN_BYTE_METADATA_SIZE
+        } else {
+            0
+        };
         let total_size = SPAN_BYTE_HEADER_SIZE + metadata_size + payload_len;
 
         if buffer.len() < total_size {

@@ -128,10 +128,10 @@ fn main() {
     println!("\n--- 更新用户 ---");
     let update_id = UserId::new('A', 1001);
     let updated_info = UserInfo::new("张三丰", 26, 90.0);
-    
+
     if session.upsert(update_id.clone(), updated_info.clone()) == Status::Ok {
         println!("  更新成功: {:?}", update_id);
-        
+
         // 验证更新
         if let Ok(Some(info)) = session.read(&update_id) {
             println!(
@@ -144,10 +144,10 @@ fn main() {
     // 删除用户
     println!("\n--- 删除用户 ---");
     let delete_id = UserId::new('B', 2002);
-    
+
     if session.delete(&delete_id) == Status::Ok {
         println!("  删除成功: {:?}", delete_id);
-        
+
         // 验证删除
         match session.read(&delete_id) {
             Ok(None) => println!("  验证: 用户已删除"),
@@ -164,4 +164,3 @@ fn main() {
 
     println!("\n=== 示例完成 ===");
 }
-

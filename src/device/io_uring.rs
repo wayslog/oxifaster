@@ -184,37 +184,41 @@ impl IoUringStats {
         self.reads_completed += 1;
         self.bytes_read += bytes;
         self.total_read_latency_ns += latency_ns;
-        self.avg_read_latency_us = (self.total_read_latency_ns / self.reads_completed.max(1)) / 1000;
+        self.avg_read_latency_us =
+            (self.total_read_latency_ns / self.reads_completed.max(1)) / 1000;
     }
-    
+
     /// Record a successful write completion
     pub fn record_write_complete(&mut self, bytes: u64, latency_ns: u64) {
         self.writes_completed += 1;
         self.bytes_written += bytes;
         self.total_write_latency_ns += latency_ns;
-        self.avg_write_latency_us = (self.total_write_latency_ns / self.writes_completed.max(1)) / 1000;
+        self.avg_write_latency_us =
+            (self.total_write_latency_ns / self.writes_completed.max(1)) / 1000;
     }
-    
+
     /// Record a read error
     pub fn record_read_error(&mut self) {
         self.read_errors += 1;
     }
-    
+
     /// Record a write error
     pub fn record_write_error(&mut self) {
         self.write_errors += 1;
     }
-    
+
     /// Get pending read count
     pub fn pending_reads(&self) -> u64 {
-        self.reads_submitted.saturating_sub(self.reads_completed + self.read_errors)
+        self.reads_submitted
+            .saturating_sub(self.reads_completed + self.read_errors)
     }
-    
+
     /// Get pending write count
     pub fn pending_writes(&self) -> u64 {
-        self.writes_submitted.saturating_sub(self.writes_completed + self.write_errors)
+        self.writes_submitted
+            .saturating_sub(self.writes_completed + self.write_errors)
     }
-    
+
     /// Reset all statistics
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -390,22 +394,22 @@ impl IoUringDevice {
     pub fn stats(&self) -> &IoUringStats {
         &self.stats
     }
-    
+
     /// Get mutable statistics
     pub fn stats_mut(&mut self) -> &mut IoUringStats {
         &mut self.stats
     }
-    
+
     /// Check if the device is initialized
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
-    
+
     /// Get pending operation count
     pub fn pending_operations(&self) -> u32 {
         self.pending_ops
     }
-    
+
     /// Check if there is space for more submissions
     pub fn can_submit(&self) -> bool {
         self.pending_ops < self.max_pending_ops
@@ -419,7 +423,7 @@ impl IoUringDevice {
         // Note: In a full implementation, this would call io_uring_submit
         Ok(0)
     }
-    
+
     /// Submit and wait for completions
     pub fn submit_and_wait(&mut self, min_complete: u32) -> Result<u32, Status> {
         if !self.initialized {
@@ -465,7 +469,7 @@ impl IoUringDevice {
         let _ = offset;
         let _ = buffer;
         let _ = callback;
-        
+
         self.pending_ops += 1;
         self.stats.reads_submitted += 1;
         Ok(())
@@ -494,12 +498,12 @@ impl IoUringDevice {
         let _ = offset;
         let _ = buffer;
         let _ = callback;
-        
+
         self.pending_ops += 1;
         self.stats.writes_submitted += 1;
         Ok(())
     }
-    
+
     /// Submit async fsync
     pub fn submit_fsync(
         &mut self,
@@ -515,7 +519,7 @@ impl IoUringDevice {
         // Note: In a full implementation, this would prepare IORING_OP_FSYNC
         let _ = file;
         let _ = callback;
-        
+
         self.pending_ops += 1;
         Ok(())
     }
@@ -532,7 +536,7 @@ impl IoUringDevice {
         // 4. Decrement pending_ops for each completion
         0
     }
-    
+
     /// Poll for completions without blocking
     pub fn poll_completions(&mut self) -> u32 {
         self.process_completions()
@@ -554,7 +558,7 @@ impl IoUringDevice {
             false
         }
     }
-    
+
     /// Get the supported features on this system
     pub fn supported_features() -> IoUringFeatures {
         IoUringFeatures {
@@ -722,7 +726,7 @@ mod tests {
     fn test_device_creation() {
         let config = IoUringConfig::default();
         let device = IoUringDevice::new("/tmp", config);
-        
+
         assert!(!device.initialized);
         assert_eq!(device.stats().reads_submitted, 0);
     }
@@ -731,19 +735,19 @@ mod tests {
     fn test_device_initialization() {
         let config = IoUringConfig::default();
         let mut device = IoUringDevice::new("/tmp", config);
-        
+
         let result = device.initialize();
         assert!(result.is_ok());
         assert!(device.initialized);
         assert!(device.is_initialized());
     }
-    
+
     #[test]
     fn test_device_can_submit() {
         let config = IoUringConfig::default();
         let mut device = IoUringDevice::new("/tmp", config);
         device.initialize().unwrap();
-        
+
         assert!(device.can_submit());
         assert_eq!(device.pending_operations(), 0);
     }
@@ -754,15 +758,15 @@ mod tests {
         assert!(!file.is_open);
         assert_eq!(file.size, 0);
     }
-    
+
     #[test]
     fn test_file_open_close() {
         let mut file = IoUringFile::new("/tmp/test.dat");
         assert!(!file.is_open());
-        
+
         file.open().unwrap();
         assert!(file.is_open());
-        
+
         file.close();
         assert!(!file.is_open());
     }
@@ -775,40 +779,40 @@ mod tests {
         assert_eq!(stats.bytes_read, 0);
         assert_eq!(stats.bytes_written, 0);
     }
-    
+
     #[test]
     fn test_stats_recording() {
         let mut stats = IoUringStats::default();
-        
+
         stats.record_read_complete(4096, 1000000); // 1ms
         assert_eq!(stats.reads_completed, 1);
         assert_eq!(stats.bytes_read, 4096);
         assert_eq!(stats.avg_read_latency_us, 1000);
-        
+
         stats.record_write_complete(8192, 2000000); // 2ms
         assert_eq!(stats.writes_completed, 1);
         assert_eq!(stats.bytes_written, 8192);
         assert_eq!(stats.avg_write_latency_us, 2000);
     }
-    
+
     #[test]
     fn test_stats_pending() {
         let mut stats = IoUringStats::default();
         stats.reads_submitted = 10;
         stats.reads_completed = 5;
         stats.read_errors = 2;
-        
+
         assert_eq!(stats.pending_reads(), 3);
     }
-    
+
     #[test]
     fn test_stats_reset() {
         let mut stats = IoUringStats::default();
         stats.reads_submitted = 100;
         stats.writes_completed = 50;
-        
+
         stats.reset();
-        
+
         assert_eq!(stats.reads_submitted, 0);
         assert_eq!(stats.writes_completed, 0);
     }
@@ -822,7 +826,7 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         assert!(!available);
     }
-    
+
     #[test]
     fn test_supported_features() {
         let features = IoUringDevice::supported_features();
@@ -833,7 +837,7 @@ mod tests {
             assert!(!features.fixed_buffers);
         }
     }
-    
+
     #[test]
     fn test_operation_type() {
         assert_ne!(IoOperation::Read, IoOperation::Write);

@@ -32,9 +32,9 @@ fn main() {
     // 2. 创建带 Read Cache 的 FasterKV 存储
     println!("--- 2. 创建存储 ---");
     let store_config = FasterKvConfig {
-        table_size: 1 << 14, // 16K 哈希桶
+        table_size: 1 << 14,      // 16K 哈希桶
         log_memory_size: 1 << 22, // 4 MB 日志内存
-        page_size_bits: 18,  // 256 KB 页面
+        page_size_bits: 18,       // 256 KB 页面
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();

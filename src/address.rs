@@ -308,8 +308,10 @@ impl PageOffset {
     #[inline]
     pub const fn new(page: u32, offset: u64) -> Self {
         debug_assert!(page <= Address::MAX_PAGE);
-        Self((offset & ((1u64 << (64 - Address::PAGE_BITS)) - 1))
-            | ((page as u64) << (64 - Address::PAGE_BITS)))
+        Self(
+            (offset & ((1u64 << (64 - Address::PAGE_BITS)) - 1))
+                | ((page as u64) << (64 - Address::PAGE_BITS)),
+        )
     }
 
     /// Get the page number
@@ -490,7 +492,7 @@ mod tests {
     #[test]
     fn test_atomic_address() {
         let atomic = AtomicAddress::new(Address::new(5, 500));
-        
+
         let loaded = atomic.load(AtomicOrdering::Relaxed);
         assert_eq!(loaded.page(), 5);
         assert_eq!(loaded.offset(), 500);
@@ -504,7 +506,7 @@ mod tests {
     #[test]
     fn test_page_offset_reserve() {
         let atomic = AtomicPageOffset::new(PageOffset::new(0, 0));
-        
+
         let prev = atomic.reserve(100);
         assert_eq!(prev.page(), 0);
         assert_eq!(prev.offset(), 0);
@@ -518,10 +520,9 @@ mod tests {
     fn test_address_read_cache() {
         let addr = Address::from_control(Address::READ_CACHE_MASK | 0x1234);
         assert!(addr.in_read_cache());
-        
+
         let non_rc_addr = addr.read_cache_address();
         assert!(!non_rc_addr.in_read_cache());
         assert_eq!(non_rc_addr.control(), 0x1234);
     }
 }
-

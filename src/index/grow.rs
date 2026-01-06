@@ -203,9 +203,12 @@ impl GrowState {
         overflow_buckets_skipped: u64,
         rehash_failures: u64,
     ) {
-        self.entries_migrated.fetch_add(entries_migrated, Ordering::AcqRel);
-        self.overflow_buckets_skipped.fetch_add(overflow_buckets_skipped, Ordering::AcqRel);
-        self.rehash_failures.fetch_add(rehash_failures, Ordering::AcqRel);
+        self.entries_migrated
+            .fetch_add(entries_migrated, Ordering::AcqRel);
+        self.overflow_buckets_skipped
+            .fetch_add(overflow_buckets_skipped, Ordering::AcqRel);
+        self.rehash_failures
+            .fetch_add(rehash_failures, Ordering::AcqRel);
     }
 
     /// Get accumulated overflow buckets skipped
@@ -230,7 +233,7 @@ impl GrowState {
         let failures = self.get_rehash_failures();
         let migrated = self.get_entries_migrated();
         self.reset();
-        
+
         if remaining == 0 {
             GrowResult::with_data_loss_tracking(0, 0, migrated, 0, overflow, failures)
         } else {
@@ -308,7 +311,7 @@ impl GrowResult {
     }
 
     /// Create a result with both overflow and rehash failure tracking
-    /// 
+    ///
     /// Success is false if either overflow buckets were skipped or rehash failures occurred,
     /// as both indicate potential data loss.
     pub fn with_data_loss_tracking(
@@ -457,13 +460,13 @@ mod tests {
 
         // Complete chunks
         assert_eq!(state.remaining_chunks(), 3);
-        
+
         assert!(!state.complete_chunk());
         assert_eq!(state.remaining_chunks(), 2);
-        
+
         assert!(!state.complete_chunk());
         assert_eq!(state.remaining_chunks(), 1);
-        
+
         assert!(state.complete_chunk()); // Last chunk
         assert_eq!(state.remaining_chunks(), 0);
     }
@@ -479,18 +482,18 @@ mod tests {
     #[test]
     fn test_get_chunk_bounds() {
         let total = 50000u64;
-        
+
         let (start0, end0) = get_chunk_bounds(0, total);
         assert_eq!(start0, 0);
         assert_eq!(end0, HASH_TABLE_CHUNK_SIZE);
-        
+
         let (start1, end1) = get_chunk_bounds(1, total);
         assert_eq!(start1, HASH_TABLE_CHUNK_SIZE);
         assert_eq!(end1, HASH_TABLE_CHUNK_SIZE * 2);
-        
+
         // Last partial chunk
         let last_chunk = calculate_num_chunks(total) - 1;
-        let (start_last, end_last) = get_chunk_bounds(last_chunk, total);
+        let (_start_last, end_last) = get_chunk_bounds(last_chunk, total);
         assert_eq!(end_last, total);
     }
 

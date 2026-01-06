@@ -7,8 +7,7 @@
 use std::sync::Arc;
 
 use oxifaster::compaction::{
-    CompactionConfig, CompactionStats, ConcurrentCompactionConfig, ConcurrentCompactor,
-    Compactor,
+    CompactionConfig, CompactionStats, Compactor, ConcurrentCompactionConfig, ConcurrentCompactor,
 };
 use oxifaster::device::NullDisk;
 use oxifaster::scan::ScanRange;
@@ -34,9 +33,9 @@ fn main() {
     // 2. 创建带压缩配置的存储
     println!("--- 2. 创建存储 ---");
     let store_config = FasterKvConfig {
-        table_size: 1 << 10, // 1K 哈希桶
+        table_size: 1 << 10,      // 1K 哈希桶
         log_memory_size: 1 << 18, // 256 KB 日志内存 (小一点便于触发压缩)
-        page_size_bits: 14,  // 16 KB 页面
+        page_size_bits: 14,       // 16 KB 页面
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
@@ -138,7 +137,10 @@ fn main() {
 
     let concurrent_compactor = ConcurrentCompactor::new(concurrent_config);
     println!("  ConcurrentCompactor 已创建");
-    println!("  是否正在压缩: {}\n", concurrent_compactor.is_in_progress());
+    println!(
+        "  是否正在压缩: {}\n",
+        concurrent_compactor.is_in_progress()
+    );
 
     // 8. ScanRange 演示
     println!("--- 8. ScanRange 使用 ---");
@@ -193,10 +195,7 @@ fn main() {
 
     // 旧版本 -> 应该跳过
     let should3 = compactor.should_compact_record(addr1, addr2, false);
-    println!(
-        "  旧版本: {}",
-        if should3 { "压缩" } else { "跳过" }
-    );
+    println!("  旧版本: {}", if should3 { "压缩" } else { "跳过" });
 
     println!("\n=== 示例完成 ===");
 }

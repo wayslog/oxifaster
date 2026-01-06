@@ -7,8 +7,8 @@ use std::thread;
 
 use oxifaster::device::NullDisk;
 use oxifaster::index::{
-    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
-    MemHashIndex, MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
+    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState, MemHashIndex,
+    MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
 };
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
@@ -331,7 +331,9 @@ fn test_index_creation() {
 
 #[test]
 fn test_index_with_grow_config() {
-    let config = GrowConfig::new().with_auto_grow(true).with_max_load_factor(0.7);
+    let config = GrowConfig::new()
+        .with_auto_grow(true)
+        .with_max_load_factor(0.7);
     let index = create_index_with_grow_config(1024, config);
 
     assert!(index.grow_config().auto_grow);

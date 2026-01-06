@@ -12,7 +12,9 @@ use std::time::Instant;
 use crate::address::Address;
 use crate::checkpoint::IndexMetadata;
 use crate::constants::CACHE_LINE_BYTES;
-use crate::index::grow::{calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState};
+use crate::index::grow::{
+    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
+};
 use crate::index::{
     AtomicHashBucketEntry, HashBucket, HashBucketEntry, HashBucketOverflowEntry,
     IndexHashBucketEntry, InternalHashTable, KeyHash,
@@ -226,7 +228,7 @@ impl MemHashIndex {
     ///
     /// # Returns
     /// `GrowResult` with details about the grow operation.
-    /// 
+    ///
     /// # Warning
     /// If `GrowResult::overflow_buckets_skipped > 0`, some entries stored in
     /// overflow buckets were NOT migrated and are lost.
@@ -358,7 +360,7 @@ impl MemHashIndex {
     /// This function migrates all entries from the primary bucket slots.
     /// For each entry, it calls the rehash callback to get the full hash,
     /// then uses that hash to compute the correct new bucket index.
-    /// 
+    ///
     /// # Warning
     /// Currently, overflow bucket chains are NOT followed because there is no
     /// overflow bucket allocator implementation. If overflow buckets exist
@@ -427,7 +429,7 @@ impl MemHashIndex {
             if !overflow.is_unused() {
                 // Count the overflow bucket - entries here will be lost
                 overflow_buckets_skipped += 1;
-                
+
                 // TODO: Once overflow bucket allocator is implemented, follow
                 // the chain and migrate all entries using rehash_fn for each
             }
@@ -1418,19 +1420,24 @@ mod tests {
 
         // Grow the index with proper rehash callback
         let hash_map_ref = hash_map.clone();
-        let result = index.grow_with_rehash(|addr| {
-            hash_map_ref.read().unwrap().get(&addr.control()).copied()
-        });
-        
+        let result = index
+            .grow_with_rehash(|addr| hash_map_ref.read().unwrap().get(&addr.control()).copied());
+
         assert_eq!(result.old_size, 256);
         assert_eq!(result.new_size, 512);
         assert!(result.entries_migrated > 0, "Should have migrated entries");
-        assert_eq!(result.rehash_failures, 0, "All entries should be rehashed successfully");
+        assert_eq!(
+            result.rehash_failures, 0,
+            "All entries should be rehashed successfully"
+        );
 
         // Verify all entries can still be found after grow
         for hash in test_hashes.iter() {
             let find_result = index.find_entry(*hash);
-            assert!(find_result.found(), "Entry should still be findable after grow");
+            assert!(
+                find_result.found(),
+                "Entry should still be findable after grow"
+            );
         }
 
         let new_stats = index.dump_distribution();

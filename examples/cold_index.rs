@@ -20,9 +20,9 @@ fn main() {
     // 1. ColdIndexConfig 配置
     println!("--- 1. Cold Index 配置 ---");
     let config = ColdIndexConfig::new(
-        1 << 14, // 16K 块 (table_size)
+        1 << 14,          // 16K 块 (table_size)
         32 * 1024 * 1024, // 32 MB 内存
-        0.5, // 50% 可变区域
+        0.5,              // 50% 可变区域
     )
     .with_root_path(PathBuf::from("cold_index_data"));
 
@@ -53,7 +53,10 @@ fn main() {
         "  默认内存: {} MB",
         default_config.in_mem_size / (1024 * 1024)
     );
-    println!("  默认可变区域: {:.0}%", default_config.mutable_fraction * 100.0);
+    println!(
+        "  默认可变区域: {:.0}%",
+        default_config.mutable_fraction * 100.0
+    );
     println!("  默认路径: {:?}\n", default_config.root_path);
 
     // 4. 块和条目结构
@@ -72,7 +75,10 @@ fn main() {
 
     println!("  原始哈希值: 0x{:016X}", hash_value);
     println!("  tag (14位): 0x{:04X}", key_hash.tag());
-    println!("  hash_table_index (用于定位): {}\n", key_hash.hash_table_index(1024));
+    println!(
+        "  hash_table_index (用于定位): {}\n",
+        key_hash.hash_table_index(1024)
+    );
 
     // 6. HashBucketEntry 演示
     println!("--- 6. HashBucketEntry 演示 ---");
@@ -101,12 +107,10 @@ fn main() {
 
     // 8. 路径配置
     println!("--- 8. 路径配置 ---");
-    let config_custom_path = ColdIndexConfig::default()
-        .with_root_path("/data/cold_index");
+    let config_custom_path = ColdIndexConfig::default().with_root_path("/data/cold_index");
     println!("  自定义路径: {:?}", config_custom_path.root_path);
 
-    let config_relative = ColdIndexConfig::default()
-        .with_root_path("./local_cold_index");
+    let config_relative = ColdIndexConfig::default().with_root_path("./local_cold_index");
     println!("  相对路径: {:?}\n", config_relative.root_path);
 
     // 9. 表大小建议

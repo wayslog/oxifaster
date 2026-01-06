@@ -91,26 +91,26 @@ impl VarLenValue for super::SpanByte {
     fn try_in_place_update(&mut self, new_value: &Self) -> bool {
         let new_len = new_value.len();
         let old_len = self.len();
-        
+
         // Can update in place if new value is not larger
         if new_len <= old_len {
             // Access the underlying mutable slice (full buffer) for in-place update
             // We must do this BEFORE calling set_length() which truncates the buffer
             let data = self.as_mut_slice();
-            
+
             // Copy the new data into the beginning of the buffer
             data[..new_len].copy_from_slice(new_value.as_slice());
-            
+
             // Clear trailing stale bytes to avoid data leakage and hash corruption
             // This must happen before truncation
             if new_len < old_len {
                 data[new_len..old_len].fill(0);
             }
-            
+
             // Update the length field and truncate buffer to the new size
             // This is critical: len()/total_size()/serialization must use the new length
             self.set_length(new_len);
-            
+
             true
         } else {
             false
@@ -172,7 +172,7 @@ mod tests {
     fn test_var_len_value_in_place_update_length_correctness() {
         // Regression test: ensure in-place shrink updates length correctly
         let mut span = SpanByte::from_slice(b"0123456789"); // 10 bytes
-        let new_value = SpanByte::from_slice(b"ab");        // 2 bytes
+        let new_value = SpanByte::from_slice(b"ab"); // 2 bytes
 
         let old_len = span.len();
         assert_eq!(old_len, 10);
@@ -186,15 +186,25 @@ mod tests {
 
         // total_size() and serialization must also use the new length
         let expected_total = 4 + 2; // header (4) + payload (2), no metadata
-        assert_eq!(span.total_size(), expected_total, "total_size() incorrect after shrink");
+        assert_eq!(
+            span.total_size(),
+            expected_total,
+            "total_size() incorrect after shrink"
+        );
 
         // Verify serialization uses correct length (no stale trailing bytes)
         let serialized_size = span.serialized_size();
-        assert_eq!(serialized_size, expected_total, "serialized_size() incorrect");
+        assert_eq!(
+            serialized_size, expected_total,
+            "serialized_size() incorrect"
+        );
 
         let mut buffer = vec![0xFFu8; 20]; // fill with 0xFF to detect stale bytes
         let written = span.serialize(&mut buffer);
-        assert_eq!(written, expected_total, "serialize() wrote wrong number of bytes");
+        assert_eq!(
+            written, expected_total,
+            "serialize() wrote wrong number of bytes"
+        );
 
         // Deserialize and verify round-trip correctness
         let deserialized = SpanByte::deserialize(&buffer[..written]).unwrap();
@@ -206,7 +216,7 @@ mod tests {
     fn test_var_len_value_in_place_update_clears_stale_bytes() {
         // Ensure trailing bytes are zeroed after shrink
         let mut span = SpanByte::from_slice(b"ABCDEFGHIJ"); // 10 bytes
-        let new_value = SpanByte::from_slice(b"xy");        // 2 bytes
+        let new_value = SpanByte::from_slice(b"xy"); // 2 bytes
 
         assert!(span.try_in_place_update(&new_value));
 

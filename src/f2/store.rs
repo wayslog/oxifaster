@@ -753,7 +753,7 @@ where
         // At least one of hot or cold store must exist for a valid checkpoint
         let hot_exists = hot_dir.exists();
         let cold_exists = cold_dir.exists();
-        
+
         if !hot_exists && !cold_exists {
             // Neither store checkpoint exists - this is not a valid checkpoint
             self.checkpoint
@@ -785,7 +785,9 @@ where
             }
 
             // Get version from hot store log metadata
-            if let Ok(log_meta) = crate::checkpoint::LogMetadata::read_from_file(&hot_dir.join("log.meta")) {
+            if let Ok(log_meta) =
+                crate::checkpoint::LogMetadata::read_from_file(&hot_dir.join("log.meta"))
+            {
                 version = log_meta.version;
             }
         }
@@ -813,7 +815,9 @@ where
             // Get version from cold store log metadata if not already set from hot store
             // This handles the case where only cold store checkpoint exists
             if version == 0 {
-                if let Ok(log_meta) = crate::checkpoint::LogMetadata::read_from_file(&cold_dir.join("log.meta")) {
+                if let Ok(log_meta) =
+                    crate::checkpoint::LogMetadata::read_from_file(&cold_dir.join("log.meta"))
+                {
                     version = log_meta.version;
                 }
             }
@@ -849,22 +853,30 @@ where
         let checkpoint_version = self.checkpoint.version();
 
         // Checkpoint hot store index
-        let _hot_index_meta = self.hot_store.hash_index
+        let _hot_index_meta = self
+            .hot_store
+            .hash_index
             .checkpoint(&hot_dir, token)
             .map_err(|_| Status::Corruption)?;
 
         // Checkpoint hot store hybrid log (writes both metadata and snapshot)
-        let _hot_log_meta = self.hot_store.hlog()
+        let _hot_log_meta = self
+            .hot_store
+            .hlog()
             .checkpoint(&hot_dir, token, checkpoint_version)
             .map_err(|_| Status::Corruption)?;
 
         // Checkpoint cold store index
-        let _cold_index_meta = self.cold_store.hash_index
+        let _cold_index_meta = self
+            .cold_store
+            .hash_index
             .checkpoint(&cold_dir, token)
             .map_err(|_| Status::Corruption)?;
 
         // Checkpoint cold store hybrid log (writes both metadata and snapshot)
-        let _cold_log_meta = self.cold_store.hlog()
+        let _cold_log_meta = self
+            .cold_store
+            .hlog()
             .checkpoint(&cold_dir, token, checkpoint_version)
             .map_err(|_| Status::Corruption)?;
 
@@ -1081,23 +1093,29 @@ where
                 self.checkpoint
                     .hot_store_status
                     .store(StoreCheckpointStatus::Active, Ordering::Release);
-                
+
                 // Actually checkpoint hot store - index first
                 let token = self.checkpoint.token();
                 let checkpoint_version = self.checkpoint.version();
                 let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
                     let hot_dir = cp_dir.join(token.to_string()).join("hot");
                     let dir_created = std::fs::create_dir_all(&hot_dir).is_ok();
-                    
+
                     if dir_created {
                         // Checkpoint hot store index
-                        let index_ok = self.hot_store.hash_index.checkpoint(&hot_dir, token).is_ok();
-                        
+                        let index_ok = self
+                            .hot_store
+                            .hash_index
+                            .checkpoint(&hot_dir, token)
+                            .is_ok();
+
                         // Checkpoint hot store hybrid log (writes both metadata and snapshot)
-                        let log_ok = self.hot_store.hlog()
+                        let log_ok = self
+                            .hot_store
+                            .hlog()
                             .checkpoint(&hot_dir, token, checkpoint_version)
                             .is_ok();
-                        
+
                         index_ok && log_ok
                     } else {
                         false
@@ -1107,7 +1125,7 @@ where
                     // Cannot checkpoint without a directory
                     false
                 };
-                
+
                 if checkpoint_success {
                     self.checkpoint
                         .hot_store_status
@@ -1139,23 +1157,29 @@ where
                 self.checkpoint
                     .cold_store_status
                     .store(StoreCheckpointStatus::Active, Ordering::Release);
-                
+
                 // Actually checkpoint cold store
                 let token = self.checkpoint.token();
                 let checkpoint_version = self.checkpoint.version();
                 let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
                     let cold_dir = cp_dir.join(token.to_string()).join("cold");
                     let dir_created = std::fs::create_dir_all(&cold_dir).is_ok();
-                    
+
                     if dir_created {
                         // Checkpoint cold store index
-                        let index_ok = self.cold_store.hash_index.checkpoint(&cold_dir, token).is_ok();
-                        
+                        let index_ok = self
+                            .cold_store
+                            .hash_index
+                            .checkpoint(&cold_dir, token)
+                            .is_ok();
+
                         // Checkpoint cold store hybrid log (writes both metadata and snapshot)
-                        let log_ok = self.cold_store.hlog()
+                        let log_ok = self
+                            .cold_store
+                            .hlog()
                             .checkpoint(&cold_dir, token, checkpoint_version)
                             .is_ok();
-                        
+
                         index_ok && log_ok
                     } else {
                         false
@@ -1164,7 +1188,7 @@ where
                     // No checkpoint directory configured - this is an error condition
                     false
                 };
-                
+
                 if checkpoint_success {
                     self.checkpoint
                         .cold_store_status

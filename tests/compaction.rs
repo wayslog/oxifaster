@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::thread;
 
 use oxifaster::compaction::{
-    CompactionConfig, CompactionResult, CompactionStats, ConcurrentCompactionConfig,
-    ConcurrentCompactionContext, ConcurrentCompactor, Compactor,
+    CompactionConfig, CompactionResult, CompactionStats, Compactor, ConcurrentCompactionConfig,
+    ConcurrentCompactionContext, ConcurrentCompactor,
 };
 use oxifaster::device::NullDisk;
 use oxifaster::scan::ScanRange;

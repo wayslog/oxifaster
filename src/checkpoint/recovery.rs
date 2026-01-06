@@ -7,7 +7,8 @@
 //! 2. Load index and log metadata from the checkpoint
 //! 3. Recover the hash index from the checkpoint data
 //! 4. Recover the hybrid log from the checkpoint snapshot
-//! 5. Restore session states for continuation
+//! 5. For incremental checkpoints, apply delta logs
+//! 6. Restore session states for continuation
 
 use std::fs;
 use std::io;
@@ -16,7 +17,10 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::address::Address;
-use crate::checkpoint::{CheckpointToken, IndexMetadata, LogMetadata, SessionState};
+use crate::checkpoint::{
+    delta_log_path, delta_metadata_path, CheckpointToken, DeltaLogMetadata, IndexMetadata,
+    LogMetadata, SessionState,
+};
 use crate::status::Status;
 
 /// Status of a recovery operation
@@ -70,6 +74,10 @@ pub struct CheckpointInfo {
     pub directory: PathBuf,
     /// Creation time (from metadata file mtime)
     pub created_at: Option<std::time::SystemTime>,
+    /// Delta log metadata (for incremental checkpoints)
+    pub delta_metadata: Option<DeltaLogMetadata>,
+    /// Base snapshot checkpoint directory (for incremental checkpoints)
+    pub base_checkpoint_dir: Option<PathBuf>,
 }
 
 impl CheckpointInfo {
@@ -81,6 +89,8 @@ impl CheckpointInfo {
             log_metadata: None,
             directory,
             created_at: None,
+            delta_metadata: None,
+            base_checkpoint_dir: None,
         }
     }
 
@@ -90,7 +100,7 @@ impl CheckpointInfo {
         let index_path = self.directory.join("index.meta");
         if index_path.exists() {
             self.index_metadata = Some(IndexMetadata::read_from_file(&index_path)?);
-            
+
             // Get file modification time
             if let Ok(metadata) = fs::metadata(&index_path) {
                 self.created_at = metadata.modified().ok();
@@ -103,6 +113,12 @@ impl CheckpointInfo {
             self.log_metadata = Some(LogMetadata::read_from_file(&log_path)?);
         }
 
+        // Load delta metadata if this is an incremental checkpoint
+        let delta_path = delta_metadata_path(&self.directory);
+        if delta_path.exists() {
+            self.delta_metadata = Some(DeltaLogMetadata::read_from_file(&delta_path)?);
+        }
+
         Ok(())
     }
 
@@ -111,12 +127,35 @@ impl CheckpointInfo {
         self.index_metadata.is_some() && self.log_metadata.is_some()
     }
 
+    /// Check if this is an incremental checkpoint
+    pub fn is_incremental(&self) -> bool {
+        if let Some(ref log_meta) = self.log_metadata {
+            log_meta.is_incremental
+        } else {
+            false
+        }
+    }
+
+    /// Get the base snapshot token for incremental checkpoints
+    pub fn base_snapshot_token(&self) -> Option<CheckpointToken> {
+        self.log_metadata
+            .as_ref()
+            .and_then(|m| m.prev_snapshot_token)
+    }
+
     /// Check if all checkpoint files exist
     pub fn files_exist(&self) -> bool {
-        self.directory.join("index.meta").exists()
+        let has_basic = self.directory.join("index.meta").exists()
             && self.directory.join("index.dat").exists()
-            && self.directory.join("log.meta").exists()
-            && self.directory.join("log.snapshot").exists()
+            && self.directory.join("log.meta").exists();
+
+        if self.is_incremental() {
+            // Incremental checkpoints need delta log instead of full snapshot
+            has_basic && delta_log_path(&self.directory, 0).exists()
+        } else {
+            // Full checkpoints need log snapshot
+            has_basic && self.directory.join("log.snapshot").exists()
+        }
     }
 
     /// Get the checkpoint version
@@ -130,6 +169,37 @@ impl CheckpointInfo {
             .as_ref()
             .map(|m| m.session_states.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Resolve the base checkpoint directory for incremental checkpoints
+    ///
+    /// # Arguments
+    /// * `checkpoint_base_dir` - Base directory containing all checkpoints
+    pub fn resolve_base_checkpoint(&mut self, checkpoint_base_dir: &Path) -> io::Result<()> {
+        if !self.is_incremental() {
+            return Ok(());
+        }
+
+        let base_token = self.base_snapshot_token().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Incremental checkpoint missing base snapshot token",
+            )
+        })?;
+
+        let base_dir = checkpoint_base_dir.join(base_token.to_string());
+        if !base_dir.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Base checkpoint directory not found: {}",
+                    base_dir.display()
+                ),
+            ));
+        }
+
+        self.base_checkpoint_dir = Some(base_dir);
+        Ok(())
     }
 }
 
@@ -213,7 +283,7 @@ impl RecoveryState {
         // Load checkpoint info
         let cp_dir = checkpoint_dir.join(token.to_string());
         let mut info = CheckpointInfo::new(token, cp_dir);
-        
+
         if let Err(e) = info.load() {
             self.status = RecoveryStatus::Failed;
             self.error_message = Some(format!("Failed to load checkpoint metadata: {}", e));
@@ -299,20 +369,21 @@ impl Default for RecoveryState {
 }
 
 /// Find the latest checkpoint in a directory
-/// 
+///
 /// Scans the base directory for valid checkpoint subdirectories
 /// and returns the one with the highest version number.
 pub fn find_latest_checkpoint(base_dir: &Path) -> Option<CheckpointInfo> {
     let checkpoints = list_checkpoints(base_dir);
-    
+
     // Find checkpoint with highest version
-    checkpoints.into_iter()
+    checkpoints
+        .into_iter()
         .filter(|c| c.is_valid())
         .max_by_key(|c| c.version().unwrap_or(0))
 }
 
 /// List all checkpoints in a directory
-/// 
+///
 /// Scans the base directory for valid checkpoint subdirectories
 /// (those with UUID names that contain valid checkpoint files).
 pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
@@ -329,7 +400,7 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        
+
         if !path.is_dir() {
             continue;
         }
@@ -338,7 +409,7 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if let Ok(token) = Uuid::parse_str(name) {
                 let mut info = CheckpointInfo::new(token, path);
-                
+
                 // Try to load metadata (ignore errors - invalid checkpoints are filtered)
                 if info.load().is_ok() && info.is_valid() {
                     checkpoints.push(info);
@@ -348,9 +419,7 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
     }
 
     // Sort by version (newest first)
-    checkpoints.sort_by(|a, b| {
-        b.version().unwrap_or(0).cmp(&a.version().unwrap_or(0))
-    });
+    checkpoints.sort_by(|a, b| b.version().unwrap_or(0).cmp(&a.version().unwrap_or(0)));
 
     checkpoints
 }
@@ -358,7 +427,7 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
 /// Validate that a checkpoint directory contains all required files
 pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
     let required_files = ["index.meta", "index.dat", "log.meta", "log.snapshot"];
-    
+
     for file in &required_files {
         let path = checkpoint_dir.join(file);
         if !path.exists() {
@@ -368,8 +437,135 @@ pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
             ));
         }
     }
-    
+
     Ok(())
+}
+
+/// Validate that a checkpoint directory contains all required files for an incremental checkpoint
+pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
+    let required_files = ["index.meta", "index.dat", "log.meta"];
+
+    for file in &required_files {
+        let path = checkpoint_dir.join(file);
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Missing checkpoint file: {}", file),
+            ));
+        }
+    }
+
+    // Check for delta log
+    let delta_path = delta_log_path(checkpoint_dir, 0);
+    if !delta_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Missing delta log file",
+        ));
+    }
+
+    // Check for delta metadata
+    let delta_meta_path = delta_metadata_path(checkpoint_dir);
+    if !delta_meta_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Missing delta metadata file",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Build the complete incremental checkpoint chain for recovery
+///
+/// Given an incremental checkpoint, this function finds all checkpoints in the chain
+/// back to the base snapshot.
+///
+/// # Arguments
+/// * `base_dir` - Base directory containing all checkpoints
+/// * `target_token` - The target checkpoint token to recover to
+///
+/// # Returns
+/// Vector of CheckpointInfo in order from base snapshot to target (base first)
+pub fn build_incremental_chain(
+    base_dir: &Path,
+    target_token: CheckpointToken,
+) -> io::Result<Vec<CheckpointInfo>> {
+    let mut chain = Vec::new();
+    let mut current_token = target_token;
+
+    loop {
+        let cp_dir = base_dir.join(current_token.to_string());
+        let mut info = CheckpointInfo::new(current_token, cp_dir);
+        info.load()?;
+
+        if !info.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid checkpoint in chain: {}", current_token),
+            ));
+        }
+
+        if info.is_incremental() {
+            // Add to chain and continue to base
+            let base_token = info.base_snapshot_token().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Incremental checkpoint missing base token",
+                )
+            })?;
+            chain.push(info);
+            current_token = base_token;
+        } else {
+            // Found the base snapshot
+            chain.push(info);
+            break;
+        }
+    }
+
+    // Reverse to get base-first order
+    chain.reverse();
+    Ok(chain)
+}
+
+/// Get information about the incremental checkpoint chain
+#[derive(Debug, Clone)]
+pub struct IncrementalRecoveryInfo {
+    /// The base snapshot checkpoint
+    pub base_checkpoint: CheckpointInfo,
+    /// Incremental checkpoints in order (after base)
+    pub incrementals: Vec<CheckpointInfo>,
+    /// Total number of delta log entries to apply
+    pub total_delta_entries: u64,
+}
+
+impl IncrementalRecoveryInfo {
+    /// Build recovery info from a checkpoint chain
+    pub fn from_chain(mut chain: Vec<CheckpointInfo>) -> io::Result<Self> {
+        if chain.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Empty checkpoint chain",
+            ));
+        }
+
+        // Take the first element as base checkpoint
+        let base_checkpoint = chain.remove(0);
+        let incrementals = chain;
+
+        // Calculate total delta entries
+        let total_delta_entries = incrementals
+            .iter()
+            .filter_map(|c| c.delta_metadata.as_ref())
+            .map(|m| m.num_entries)
+            .sum();
+
+        Ok(Self {
+            base_checkpoint,
+            incrementals,
+            total_delta_entries,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -403,7 +599,7 @@ mod tests {
     fn test_checkpoint_info() {
         let token = Uuid::new_v4();
         let info = CheckpointInfo::new(token, PathBuf::from("/tmp/checkpoint"));
-        
+
         assert_eq!(info.token, token);
         assert!(!info.is_valid()); // No metadata loaded
         assert!(info.session_states().is_empty());
@@ -413,10 +609,10 @@ mod tests {
     #[test]
     fn test_recovery_state_lifecycle() {
         let mut state = RecoveryState::new();
-        
+
         // Cannot progress from NotStarted without starting
         assert_eq!(state.index_recovered(), Status::Aborted);
-        
+
         // Reset works from any state
         state.reset();
         assert_eq!(state.status(), RecoveryStatus::NotStarted);
@@ -426,7 +622,7 @@ mod tests {
     fn test_recovery_state_failure() {
         let mut state = RecoveryState::new();
         state.fail_recovery("Test error");
-        
+
         assert_eq!(state.status(), RecoveryStatus::Failed);
         assert_eq!(state.error_message(), Some("Test error"));
     }
@@ -458,4 +654,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

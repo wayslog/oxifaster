@@ -87,13 +87,13 @@ where
     pub fn new(record: &Record<K, V>, original_address: Address) -> Self {
         let record_size = Record::<K, V>::size();
         let mut record_data = vec![0u8; record_size];
-        
+
         // Copy record data
         unsafe {
             let src = record as *const Record<K, V> as *const u8;
             std::ptr::copy_nonoverlapping(src, record_data.as_mut_ptr(), record_size);
         }
-        
+
         Self {
             original_address,
             record_data,
@@ -143,16 +143,16 @@ mod tests {
     #[test]
     fn test_compaction_context() {
         let mut ctx = CompactionContext::new(Address::new(0, 0), Address::new(10, 0));
-        
+
         assert!(ctx.is_valid());
         assert_eq!(ctx.records_scanned, 0);
-        
+
         ctx.record_scanned();
         ctx.record_scanned();
         ctx.record_compacted();
         ctx.record_skipped();
         ctx.record_tombstone();
-        
+
         assert_eq!(ctx.records_scanned, 2);
         assert_eq!(ctx.records_compacted, 1);
         assert_eq!(ctx.records_skipped, 1);

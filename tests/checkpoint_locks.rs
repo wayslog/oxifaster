@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::thread;
 
-use oxifaster::checkpoint::{AtomicCheckpointLock, CheckpointLock, CheckpointLockGuard, CheckpointLocks};
+use oxifaster::checkpoint::{
+    AtomicCheckpointLock, CheckpointLock, CheckpointLockGuard, CheckpointLocks,
+};
 use oxifaster::index::KeyHash;
 
 // ============ CheckpointLock Tests ============
@@ -139,10 +141,10 @@ fn test_atomic_checkpoint_lock_old_locked() {
     let lock = AtomicCheckpointLock::new();
 
     assert!(!lock.old_locked());
-    
+
     assert!(lock.try_lock_old());
     assert!(lock.old_locked());
-    
+
     lock.unlock_old();
     assert!(!lock.old_locked());
 }
@@ -152,10 +154,10 @@ fn test_atomic_checkpoint_lock_new_locked() {
     let lock = AtomicCheckpointLock::new();
 
     assert!(!lock.new_locked());
-    
+
     assert!(lock.try_lock_new());
     assert!(lock.new_locked());
-    
+
     lock.unlock_new();
     assert!(!lock.new_locked());
 }
@@ -165,16 +167,16 @@ fn test_atomic_checkpoint_lock_is_locked() {
     let lock = AtomicCheckpointLock::new();
 
     assert!(!lock.is_locked());
-    
+
     assert!(lock.try_lock_old());
     assert!(lock.is_locked());
-    
+
     lock.unlock_old();
     assert!(!lock.is_locked());
-    
+
     assert!(lock.try_lock_new());
     assert!(lock.is_locked());
-    
+
     lock.unlock_new();
     assert!(!lock.is_locked());
 }
@@ -226,7 +228,7 @@ fn test_checkpoint_locks_initialize() {
 fn test_checkpoint_locks_get_lock() {
     let locks = CheckpointLocks::with_size(1024);
     let hash = KeyHash::new(12345);
-    
+
     let lock = locks.get_lock(hash);
     assert!(lock.try_lock_old());
     lock.unlock_old();
@@ -235,7 +237,7 @@ fn test_checkpoint_locks_get_lock() {
 #[test]
 fn test_checkpoint_locks_get_lock_by_hash() {
     let locks = CheckpointLocks::with_size(1024);
-    
+
     let lock = locks.get_lock_by_hash(12345);
     assert!(lock.try_lock_old());
     lock.unlock_old();
@@ -309,9 +311,9 @@ fn test_lock_guard_try_lock_new() {
 fn test_lock_guard_from_locks_table() {
     let locks = CheckpointLocks::with_size(256);
     let hash = KeyHash::new(42);
-    
+
     let mut guard = CheckpointLockGuard::new(&locks, hash);
-    
+
     assert!(guard.has_lock());
     assert!(guard.try_lock_old());
     guard.unlock_old();
@@ -320,12 +322,12 @@ fn test_lock_guard_from_locks_table() {
 #[test]
 fn test_lock_guard_drop_releases_old() {
     let lock = AtomicCheckpointLock::new();
-    
+
     {
         let mut guard = CheckpointLockGuard::from_lock(&lock);
         assert!(guard.try_lock_old());
     } // Guard dropped here, should release lock
-    
+
     // Lock should be free now
     assert!(!lock.old_locked());
 }
@@ -333,12 +335,12 @@ fn test_lock_guard_drop_releases_old() {
 #[test]
 fn test_lock_guard_drop_releases_new() {
     let lock = AtomicCheckpointLock::new();
-    
+
     {
         let mut guard = CheckpointLockGuard::from_lock(&lock);
         assert!(guard.try_lock_new());
     } // Guard dropped here, should release lock
-    
+
     // Lock should be free now
     assert!(!lock.new_locked());
 }

@@ -73,7 +73,8 @@ impl OperationStats {
 
     /// Record operation latency
     pub fn record_latency(&self, duration: Duration) {
-        self.total_latency_ns.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+        self.total_latency_ns
+            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
         self.latency_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -263,16 +264,18 @@ impl AllocatorStats {
         self.total_allocated.fetch_add(size, Ordering::Relaxed);
         let current = self.current_in_use.fetch_add(size, Ordering::Relaxed) + size;
         self.allocation_count.fetch_add(1, Ordering::Relaxed);
-        
+
         // Update peak if necessary
         loop {
             let peak = self.peak_usage.load(Ordering::Relaxed);
             if current <= peak {
                 break;
             }
-            if self.peak_usage.compare_exchange(
-                peak, current, Ordering::Relaxed, Ordering::Relaxed
-            ).is_ok() {
+            if self
+                .peak_usage
+                .compare_exchange(peak, current, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 break;
             }
         }
@@ -388,13 +391,13 @@ mod tests {
     #[test]
     fn test_operation_stats() {
         let stats = OperationStats::new();
-        
+
         stats.record_read(true);
         stats.record_read(false);
         stats.record_upsert();
         stats.record_rmw();
         stats.record_delete();
-        
+
         assert_eq!(stats.reads.load(Ordering::Relaxed), 2);
         assert_eq!(stats.read_hits.load(Ordering::Relaxed), 1);
         assert_eq!(stats.upserts.load(Ordering::Relaxed), 1);
@@ -405,11 +408,11 @@ mod tests {
     #[test]
     fn test_hash_index_stats() {
         let stats = HashIndexStats::new();
-        
+
         stats.num_buckets.store(1000, Ordering::Relaxed);
         stats.num_entries.store(500, Ordering::Relaxed);
         stats.overflow_buckets.store(50, Ordering::Relaxed);
-        
+
         assert_eq!(stats.load_factor(), 0.5);
         assert_eq!(stats.overflow_ratio(), 0.05);
     }
@@ -417,11 +420,11 @@ mod tests {
     #[test]
     fn test_hybrid_log_stats() {
         let stats = HybridLogStats::new();
-        
+
         stats.record_allocation(100);
         stats.record_flush(4096);
         stats.record_read(4096);
-        
+
         assert_eq!(stats.records_written.load(Ordering::Relaxed), 1);
         assert_eq!(stats.pages_flushed.load(Ordering::Relaxed), 1);
         assert_eq!(stats.pages_read.load(Ordering::Relaxed), 1);
@@ -430,14 +433,14 @@ mod tests {
     #[test]
     fn test_allocator_stats() {
         let stats = AllocatorStats::new();
-        
+
         stats.record_allocation(1000);
         stats.record_allocation(2000);
-        
+
         assert_eq!(stats.total_allocated.load(Ordering::Relaxed), 3000);
         assert_eq!(stats.current_in_use.load(Ordering::Relaxed), 3000);
         assert_eq!(stats.peak_usage.load(Ordering::Relaxed), 3000);
-        
+
         stats.record_free(1000);
         assert_eq!(stats.current_in_use.load(Ordering::Relaxed), 2000);
         assert_eq!(stats.peak_usage.load(Ordering::Relaxed), 3000); // Peak unchanged
@@ -446,12 +449,12 @@ mod tests {
     #[test]
     fn test_session_stats() {
         let stats = SessionStats::new();
-        
+
         stats.record_operation();
         stats.record_operation();
         stats.record_pending();
         stats.record_completed();
-        
+
         assert_eq!(stats.operations.load(Ordering::Relaxed), 2);
         assert_eq!(stats.completed_operations.load(Ordering::Relaxed), 1);
     }
@@ -459,15 +462,15 @@ mod tests {
     #[test]
     fn test_store_stats() {
         let stats = StoreStats::new();
-        
+
         stats.operations.record_read(true);
         stats.hash_index.num_entries.store(100, Ordering::Relaxed);
-        
+
         assert_eq!(stats.operations.reads.load(Ordering::Relaxed), 1);
         assert_eq!(stats.hash_index.num_entries.load(Ordering::Relaxed), 100);
-        
+
         stats.reset();
-        
+
         assert_eq!(stats.operations.reads.load(Ordering::Relaxed), 0);
         assert_eq!(stats.hash_index.num_entries.load(Ordering::Relaxed), 0);
     }

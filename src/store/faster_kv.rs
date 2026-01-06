@@ -18,10 +18,12 @@ use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
 use crate::cache::{ReadCache, ReadCacheConfig};
 use crate::checkpoint::{
-    create_checkpoint_directory, CheckpointToken, CheckpointType, IndexMetadata, LogMetadata,
-    RecoveryState, SessionState,
+    create_checkpoint_directory, delta_log_path, delta_metadata_path, CheckpointState,
+    CheckpointToken, CheckpointType, DeltaLogMetadata, IndexMetadata, LogMetadata, RecoveryState,
+    SessionState,
 };
 use crate::compaction::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
+use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
 use crate::epoch::{get_thread_id, LightEpoch};
 use crate::index::{GrowResult, GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
@@ -109,6 +111,9 @@ where
     /// Active session states registry
     /// Maps session GUID to session state for checkpoint persistence
     session_registry: RwLock<HashMap<Uuid, SessionState>>,
+    /// Last snapshot checkpoint state for incremental checkpoints
+    /// Used to track the base snapshot for incremental checkpoints
+    last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
     /// Type markers
     _marker: PhantomData<(K, V)>,
 }
@@ -204,6 +209,7 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(HashMap::new()),
+            last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
         }
     }
@@ -441,8 +447,14 @@ where
         if !result.found() {
             // Record miss statistics
             if self.stats_collector.is_enabled() {
-                self.stats_collector.store_stats.operations.record_read(false);
-                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                self.stats_collector
+                    .store_stats
+                    .operations
+                    .record_read(false);
+                self.stats_collector
+                    .store_stats
+                    .operations
+                    .record_latency(start.elapsed());
             }
             return Ok(None);
         }
@@ -454,8 +466,14 @@ where
             if let Some(value) = self.try_read_from_cache(address, key) {
                 // Record hit statistics
                 if self.stats_collector.is_enabled() {
-                    self.stats_collector.store_stats.operations.record_read(true);
-                    self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                    self.stats_collector
+                        .store_stats
+                        .operations
+                        .record_read(true);
+                    self.stats_collector
+                        .store_stats
+                        .operations
+                        .record_latency(start.elapsed());
                 }
                 return Ok(Some(value));
             }
@@ -470,8 +488,14 @@ where
                 if let Some(value) = self.try_read_from_cache(address, key) {
                     // Record hit statistics
                     if self.stats_collector.is_enabled() {
-                        self.stats_collector.store_stats.operations.record_read(true);
-                        self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_read(true);
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_latency(start.elapsed());
                     }
                     return Ok(Some(value));
                 }
@@ -507,8 +531,14 @@ where
                     if record.header.is_tombstone() {
                         // Record miss (tombstone found)
                         if self.stats_collector.is_enabled() {
-                            self.stats_collector.store_stats.operations.record_read(false);
-                            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_read(false);
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_latency(start.elapsed());
                         }
                         return Ok(None);
                     }
@@ -526,8 +556,14 @@ where
 
                     // Record hit statistics
                     if self.stats_collector.is_enabled() {
-                        self.stats_collector.store_stats.operations.record_read(true);
-                        self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_read(true);
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_latency(start.elapsed());
                     }
 
                     return Ok(Some(value.clone()));
@@ -542,14 +578,20 @@ where
 
         // Record miss statistics
         if self.stats_collector.is_enabled() {
-            self.stats_collector.store_stats.operations.record_read(false);
-            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_read(false);
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_latency(start.elapsed());
         }
         Ok(None)
     }
 
     /// Internal upsert implementation without statistics recording.
-    /// 
+    ///
     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
     /// operation statistics when RMW creates a new record via upsert.
     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
@@ -591,7 +633,8 @@ where
 
                 // Initialize header - use the underlying HybridLog address, not cache address
                 let hlog_old_address = self.skip_read_cache(old_address);
-                let header = RecordInfo::new(hlog_old_address, ctx.version as u16, false, false, false);
+                let header =
+                    RecordInfo::new(hlog_old_address, ctx.version as u16, false, false, false);
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
@@ -632,15 +675,21 @@ where
     /// Inserts or updates a key-value pair.
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
         let start = Instant::now();
-        
+
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
         // Record upsert statistics
         if self.stats_collector.is_enabled() {
             self.stats_collector.store_stats.operations.record_upsert();
-            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_latency(start.elapsed());
             if record_size > 0 {
-                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+                self.stats_collector
+                    .store_stats
+                    .hybrid_log
+                    .record_allocation(record_size as u64);
             }
         }
 
@@ -687,7 +736,8 @@ where
 
                 // Initialize header with tombstone flag - use underlying HybridLog address
                 let hlog_old_address = self.skip_read_cache(old_address);
-                let header = RecordInfo::new(hlog_old_address, ctx.version as u16, false, true, false);
+                let header =
+                    RecordInfo::new(hlog_old_address, ctx.version as u16, false, true, false);
                 ptr::write(&mut (*record).header, header);
 
                 // Write key
@@ -707,8 +757,14 @@ where
             // Record delete statistics
             if self.stats_collector.is_enabled() {
                 self.stats_collector.store_stats.operations.record_delete();
-                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
-                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+                self.stats_collector
+                    .store_stats
+                    .operations
+                    .record_latency(start.elapsed());
+                self.stats_collector
+                    .store_stats
+                    .hybrid_log
+                    .record_allocation(record_size as u64);
             }
 
             Status::Ok
@@ -754,7 +810,10 @@ where
                             // Record RMW statistics (in-place update)
                             if self.stats_collector.is_enabled() {
                                 self.stats_collector.store_stats.operations.record_rmw();
-                                self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+                                self.stats_collector
+                                    .store_stats
+                                    .operations
+                                    .record_latency(start.elapsed());
                             }
                             return Status::Ok;
                         }
@@ -794,9 +853,15 @@ where
         // Record RMW statistics only (not upsert stats)
         if self.stats_collector.is_enabled() {
             self.stats_collector.store_stats.operations.record_rmw();
-            self.stats_collector.store_stats.operations.record_latency(start.elapsed());
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_latency(start.elapsed());
             if record_size > 0 {
-                self.stats_collector.store_stats.hybrid_log.record_allocation(record_size as u64);
+                self.stats_collector
+                    .store_stats
+                    .hybrid_log
+                    .record_allocation(record_size as u64);
             }
         }
 
@@ -1304,6 +1369,40 @@ where
         self.checkpoint_with_action(checkpoint_dir, Action::CheckpointHybridLog)
     }
 
+    /// Create an incremental checkpoint
+    ///
+    /// If there's a previous snapshot available, this creates an incremental checkpoint
+    /// that only stores changes since the last snapshot. Otherwise, it falls back to
+    /// creating a full snapshot checkpoint.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Base directory for checkpoints
+    ///
+    /// # Returns
+    /// The checkpoint token on success, or an error
+    pub fn checkpoint_incremental(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
+        // Check if we have a previous snapshot to base the incremental checkpoint on
+        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let can_use_incremental = prev_snapshot.is_some();
+        drop(prev_snapshot);
+
+        if can_use_incremental {
+            self.checkpoint_with_action(checkpoint_dir, Action::CheckpointIncremental)
+        } else {
+            // No previous snapshot, create a full checkpoint instead
+            // This will also set up the last_snapshot_checkpoint for future incrementals
+            let token = self.checkpoint(checkpoint_dir)?;
+            Ok(token)
+        }
+    }
+
+    /// Force a full snapshot checkpoint and set it as the base for future incrementals
+    ///
+    /// This is useful when you want to start a new incremental chain.
+    pub fn checkpoint_full_snapshot(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
+        self.checkpoint_with_action(checkpoint_dir, Action::CheckpointFull)
+    }
+
     /// Create a checkpoint with a specific action
     fn checkpoint_with_action(
         &self,
@@ -1358,6 +1457,7 @@ where
     ) -> io::Result<()> {
         let mut index_metadata: Option<IndexMetadata> = None;
         let mut log_metadata: Option<LogMetadata> = None;
+        let is_incremental = action == Action::CheckpointIncremental;
 
         loop {
             let current_state = self.system_state.load(Ordering::Acquire);
@@ -1384,11 +1484,19 @@ where
                 Phase::InProgress => {
                     // Phase 4: Checkpoint in progress
                     // Version is already incremented by state machine
-                    log_metadata = Some(self.handle_in_progress_checkpoint(
-                        cp_dir,
-                        token,
-                        current_state.version,
-                    )?);
+                    if is_incremental {
+                        log_metadata = Some(self.handle_incremental_checkpoint(
+                            cp_dir,
+                            token,
+                            current_state.version,
+                        )?);
+                    } else {
+                        log_metadata = Some(self.handle_in_progress_checkpoint(
+                            cp_dir,
+                            token,
+                            current_state.version,
+                        )?);
+                    }
                 }
 
                 Phase::WaitPending => {
@@ -1398,7 +1506,11 @@ where
 
                 Phase::WaitFlush => {
                     // Phase 6: Wait for flush to complete
-                    self.handle_wait_flush()?;
+                    if is_incremental {
+                        self.handle_incremental_wait_flush(cp_dir, token, current_state.version)?;
+                    } else {
+                        self.handle_wait_flush()?;
+                    }
                 }
 
                 Phase::PersistenceCallback => {
@@ -1409,6 +1521,22 @@ where
                         index_metadata.as_ref(),
                         log_metadata.as_ref(),
                     )?;
+
+                    // Save checkpoint state for future incremental checkpoints
+                    if !is_incremental && log_metadata.is_some() {
+                        let mut state = CheckpointState::new(CheckpointType::Snapshot);
+                        if let Some(ref log_meta) = log_metadata {
+                            state.log_metadata = log_meta.clone();
+                        }
+                        if let Some(ref index_meta) = index_metadata {
+                            state.index_metadata = index_meta.clone();
+                        }
+                        // Set tokens AFTER cloning to ensure they're not overwritten
+                        // Both index and log metadata must have the same token for consistency
+                        state.index_metadata.token = token;
+                        state.log_metadata.token = token;
+                        *self.last_snapshot_checkpoint.write().unwrap() = Some(state);
+                    }
                 }
 
                 Phase::Rest => {
@@ -1496,6 +1624,110 @@ where
         Ok(())
     }
 
+    /// Handle IN_PROGRESS phase for incremental checkpoint
+    fn handle_incremental_checkpoint(
+        &self,
+        cp_dir: &Path,
+        token: CheckpointToken,
+        version: u32,
+    ) -> io::Result<LogMetadata> {
+        // Get the previous snapshot state
+        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No previous snapshot for incremental checkpoint",
+            )
+        })?;
+
+        let prev_token = prev_state.token();
+        let prev_final_address = prev_state.log_metadata.final_address;
+
+        drop(prev_snapshot);
+
+        // Collect session states for persistence
+        let session_states = self.get_session_states();
+
+        // Create metadata for incremental checkpoint
+        let mut metadata = unsafe { (*self.hlog.get()).checkpoint_metadata(token, version, true) };
+        metadata.session_states = session_states;
+        metadata.num_threads = metadata.session_states.len() as u32;
+
+        // Mark as incremental
+        metadata.is_incremental = true;
+        metadata.prev_snapshot_token = Some(prev_token);
+        metadata.start_logical_address = prev_final_address;
+
+        // Write log metadata
+        let meta_path = cp_dir.join("log.meta");
+        metadata.write_to_file(&meta_path)?;
+
+        Ok(metadata)
+    }
+
+    /// Handle WAIT_FLUSH phase for incremental checkpoint
+    fn handle_incremental_wait_flush(&self, cp_dir: &Path, token: CheckpointToken, version: u32) -> io::Result<()> {
+        // Get the previous snapshot state
+        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No previous snapshot for incremental checkpoint",
+            )
+        })?;
+
+        let prev_token = prev_state.token();
+        let prev_final_address = prev_state.log_metadata.final_address;
+
+        drop(prev_snapshot);
+
+        // Get current log addresses
+        let (flushed_address, final_address) = unsafe {
+            let hlog = &*self.hlog.get();
+            (hlog.get_flushed_until_address(), hlog.get_tail_address())
+        };
+
+        // Create delta log device (using a file in the checkpoint directory)
+        let delta_path = delta_log_path(cp_dir, 0);
+        let delta_device = Arc::new(crate::device::FileSystemDisk::single_file(&delta_path)?);
+        let delta_config = DeltaLogConfig::new(22); // 4MB pages
+        let delta_log = DeltaLog::new(delta_device.clone(), delta_config, 0);
+
+        // Flush delta records
+        let num_entries = unsafe {
+            (*self.hlog.get()).flush_delta_to_device(
+                flushed_address,
+                final_address,
+                prev_final_address,
+                version,
+                &delta_log,
+            )?
+        };
+
+        // Write delta log metadata (use checkpoint token, not a random UUID)
+        let delta_meta = DeltaLogMetadata {
+            token: token.to_string(),
+            base_snapshot_token: prev_token.to_string(),
+            version,
+            delta_tail_address: delta_log.tail_address(),
+            prev_snapshot_final_address: prev_final_address.control(),
+            current_final_address: final_address.control(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            num_entries,
+        };
+        delta_meta.write_to_file(&delta_metadata_path(cp_dir))?;
+
+        // Flush the regular log as well
+        unsafe {
+            (*self.hlog.get()).flush_to_disk()?;
+        }
+
+        Ok(())
+    }
+
     /// Handle PERSISTENCE_CALLBACK phase
     fn handle_persistence_callback(
         &self,
@@ -1529,6 +1761,8 @@ where
             }
             CheckpointType::IndexOnly => Action::CheckpointIndex,
             CheckpointType::HybridLogOnly => Action::CheckpointHybridLog,
+            // IncrementalSnapshot is handled via checkpoint_incremental()
+            CheckpointType::IncrementalSnapshot => Action::CheckpointFull,
         };
         self.checkpoint_with_action(checkpoint_dir, action)
     }
@@ -1700,6 +1934,7 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(session_registry),
+            last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
         })
     }
@@ -1875,6 +2110,7 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(HashMap::new()),
+            last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
         })
     }
@@ -1950,6 +2186,7 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(session_registry),
+            last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
         })
     }

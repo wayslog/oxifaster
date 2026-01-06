@@ -9,14 +9,14 @@ mod hash_bucket;
 mod hash_table;
 mod mem_index;
 
-pub use grow::{
-    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
-    HASH_TABLE_CHUNK_SIZE,
-};
 pub use cold_index::{
     ColdIndex, ColdIndexConfig, ColdIndexFindResult, ColdIndexStats, DefaultHashIndexChunk,
     GcStateColdIndex, HashIndexChunk, HashIndexChunkKey, HashIndexChunkPos, HashIndexOp,
     IndexOperationType, DEFAULT_NUM_BUCKETS_PER_CHUNK, ENTRIES_PER_BUCKET,
+};
+pub use grow::{
+    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
+    HASH_TABLE_CHUNK_SIZE,
 };
 pub use hash_bucket::{
     AtomicHashBucketEntry, ColdHashBucket, HashBucket, HashBucketEntry, HashBucketOverflowEntry,
@@ -88,4 +88,3 @@ impl Default for IndexConfig {
         }
     }
 }
-

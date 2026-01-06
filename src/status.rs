@@ -131,19 +131,28 @@ impl OperationStatus {
     /// Check if the operation succeeded
     #[inline]
     pub const fn is_success(&self) -> bool {
-        matches!(self, OperationStatus::Success | OperationStatus::SuccessUnmark)
+        matches!(
+            self,
+            OperationStatus::Success | OperationStatus::SuccessUnmark
+        )
     }
 
     /// Check if the key was not found
     #[inline]
     pub const fn is_not_found(&self) -> bool {
-        matches!(self, OperationStatus::NotFound | OperationStatus::NotFoundUnmark)
+        matches!(
+            self,
+            OperationStatus::NotFound | OperationStatus::NotFoundUnmark
+        )
     }
 
     /// Check if a retry is needed
     #[inline]
     pub const fn needs_retry(&self) -> bool {
-        matches!(self, OperationStatus::RetryNow | OperationStatus::RetryLater)
+        matches!(
+            self,
+            OperationStatus::RetryNow | OperationStatus::RetryLater
+        )
     }
 
     /// Check if the record is on disk
@@ -264,11 +273,11 @@ mod tests {
     fn test_status_checks() {
         assert!(Status::Ok.is_ok());
         assert!(!Status::Ok.is_error());
-        
+
         assert!(Status::Pending.is_pending());
-        
+
         assert!(Status::NotFound.is_not_found());
-        
+
         assert!(Status::IoError.is_error());
         assert!(Status::Corruption.is_error());
         assert!(Status::Aborted.is_error());
@@ -282,4 +291,3 @@ mod tests {
         assert_eq!(OperationStatus::Aborted.to_status(), Status::Aborted);
     }
 }
-

@@ -417,4 +417,3 @@ mod tests {
         assert_eq!(state.serial_num, 42);
     }
 }
-

@@ -11,4 +11,4 @@ pub use collector::{StatsCollector, StatsConfig, StatsSnapshot};
 pub use metrics::{
     AllocatorStats, HashIndexStats, HybridLogStats, OperationStats, SessionStats, StoreStats,
 };
-pub use reporter::{StatsReporter, ReportFormat};
+pub use reporter::{ReportFormat, StatsReporter};

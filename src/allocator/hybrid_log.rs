@@ -14,6 +14,7 @@ use crate::address::{Address, AtomicAddress, AtomicPageOffset};
 use crate::allocator::page_allocator::PageInfo;
 use crate::checkpoint::LogMetadata;
 use crate::constants::PAGE_SIZE;
+use crate::delta_log::{DeltaLog, DeltaLogEntry, DeltaLogEntryType};
 use crate::device::StorageDevice;
 use crate::status::Status;
 use crate::utility::{is_power_of_two, AlignedBuffer};
@@ -36,7 +37,7 @@ impl HybridLogConfig {
     pub fn new(memory_size: u64, page_size_bits: u32) -> Self {
         let page_size = 1 << page_size_bits;
         let memory_pages = (memory_size / page_size as u64) as u32;
-        
+
         Self {
             page_size,
             memory_pages,
@@ -71,12 +72,12 @@ impl PageArray {
     fn new(buffer_size: u32) -> Self {
         let mut buffers = Vec::with_capacity(buffer_size as usize);
         let mut info = Vec::with_capacity(buffer_size as usize);
-        
+
         for _ in 0..buffer_size {
             buffers.push(None);
             info.push(PageInfo::new());
         }
-        
+
         Self {
             buffers,
             info,
@@ -96,7 +97,7 @@ impl PageArray {
         if self.buffers[idx].is_some() {
             return true;
         }
-        
+
         match AlignedBuffer::zeroed(page_size, page_size) {
             Some(buf) => {
                 self.buffers[idx] = Some(buf);
@@ -172,12 +173,12 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     pub fn new(config: HybridLogConfig, device: Arc<D>) -> Self {
         let buffer_size = config.memory_pages;
         let page_size = config.page_size;
-        
+
         assert!(is_power_of_two(page_size as u64));
         assert!(buffer_size > 0);
-        
+
         let mut pages = PageArray::new(buffer_size);
-        
+
         // Pre-allocate all pages
         for i in 0..buffer_size {
             pages.allocate_page(i, page_size);
@@ -253,13 +254,13 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// If the page overflows, triggers a new page allocation.
     pub fn allocate(&self, num_slots: u32) -> Result<Address, Status> {
         debug_assert!(num_slots <= Address::MAX_OFFSET);
-        
+
         loop {
             // Get current position
             let page_offset = self.tail_page_offset.reserve(num_slots);
             let page = page_offset.page();
             let offset = page_offset.offset();
-            
+
             // Check if offset exceeds Address::MAX_OFFSET (which is smaller than u32::MAX)
             // If so, we need to move to a new page before checking page size
             if offset > Address::MAX_OFFSET as u64 {
@@ -272,10 +273,10 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 }
                 continue;
             }
-            
+
             // Check if we fit in the current page
             let new_offset = offset + num_slots as u64;
-            
+
             if new_offset <= self.config.page_size as u64 {
                 // Safe to cast: we've verified offset <= Address::MAX_OFFSET above
                 // Also verify offset doesn't exceed u32 range (defensive check)
@@ -284,26 +285,26 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                     // but we check for safety
                     return Err(Status::Corruption);
                 }
-                
+
                 // Calculate address - safe cast since offset <= Address::MAX_OFFSET
                 let address = Address::new(page, offset as u32);
                 return Ok(address);
             }
-            
+
             // Need to move to new page
             let (advanced, won_cas) = self.tail_page_offset.new_page(page);
-            
+
             if !advanced {
                 continue;
             }
-            
+
             if won_cas {
                 // We won - need to handle page transition
                 if let Err(status) = self.on_page_full(page) {
                     return Err(status);
                 }
             }
-            
+
             // Retry allocation
         }
     }
@@ -316,7 +317,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     pub unsafe fn get(&self, address: Address) -> Option<NonNull<u8>> {
         let page = address.page();
         let offset = address.offset() as usize;
-        
+
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page(page) {
             let ptr = buf.as_ptr().add(offset) as *mut u8;
@@ -334,7 +335,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     pub unsafe fn get_mut(&mut self, address: Address) -> Option<NonNull<u8>> {
         let page = address.page();
         let offset = address.offset() as usize;
-        
+
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page_mut(page) {
             let ptr = buf.as_mut_ptr().add(offset);
@@ -365,17 +366,14 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Handle a full page
     fn on_page_full(&self, page: u32) -> Result<(), Status> {
         // Update read-only boundary if needed
-        let new_read_only = Address::new(
-            page.saturating_sub(self.config.mutable_pages),
-            0,
-        );
-        
+        let new_read_only = Address::new(page.saturating_sub(self.config.mutable_pages), 0);
+
         loop {
             let current = self.read_only_address.load(Ordering::Acquire);
             if new_read_only <= current {
                 break;
             }
-            
+
             match self.read_only_address.compare_exchange(
                 current,
                 new_read_only,
@@ -389,7 +387,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 Err(_) => continue,
             }
         }
-        
+
         Ok(())
     }
 
@@ -400,7 +398,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if new_address <= current {
                 return;
             }
-            
+
             if self
                 .read_only_address
                 .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
@@ -418,7 +416,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if new_address <= current {
                 return;
             }
-            
+
             if self
                 .head_address
                 .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
@@ -436,7 +434,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if new_address <= current {
                 return;
             }
-            
+
             if self
                 .begin_address
                 .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
@@ -456,11 +454,16 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     pub fn initialize_from_address(&self, begin_address: Address, head_address: Address) {
         self.begin_address.store(begin_address, Ordering::Release);
         self.head_address.store(head_address, Ordering::Release);
-        self.safe_head_address.store(head_address, Ordering::Release);
-        self.read_only_address.store(head_address, Ordering::Release);
-        self.safe_read_only_address.store(head_address, Ordering::Release);
-        self.flushed_until_address.store(head_address, Ordering::Release);
-        self.tail_page_offset.store_address(head_address, Ordering::Release);
+        self.safe_head_address
+            .store(head_address, Ordering::Release);
+        self.read_only_address
+            .store(head_address, Ordering::Release);
+        self.safe_read_only_address
+            .store(head_address, Ordering::Release);
+        self.flushed_until_address
+            .store(head_address, Ordering::Release);
+        self.tail_page_offset
+            .store_address(head_address, Ordering::Release);
     }
 
     /// Get log statistics
@@ -469,7 +472,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         let read_only = self.get_read_only_address();
         let head = self.get_head_address();
         let begin = self.get_begin_address();
-        
+
         LogStats {
             tail_address: tail,
             read_only_address: read_only,
@@ -519,7 +522,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Ok(()) on success, or an I/O error
     pub fn flush_until(&self, until_address: Address) -> io::Result<()> {
         let current_flushed = self.get_flushed_until_address();
-        
+
         if until_address <= current_flushed {
             return Ok(());
         }
@@ -541,7 +544,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             if until_address <= current {
                 break;
             }
-            
+
             if self
                 .flushed_until_address
                 .compare_exchange(current, until_address, Ordering::AcqRel, Ordering::Acquire)
@@ -714,7 +717,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         // Load metadata if not provided
         let meta_path = checkpoint_dir.join("log.meta");
         let loaded_metadata;
-        let metadata = match metadata {
+        let _metadata = match metadata {
             Some(m) => m,
             None => {
                 loaded_metadata = LogMetadata::read_from_file(&meta_path)?;
@@ -741,7 +744,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Initialize addresses from snapshot and metadata after successful snapshot read
         // This ensures we only set addresses if the snapshot data is valid
-        // 
+        //
         // For recovery, all data loaded from snapshot is in memory, so:
         // - begin_address: start of the log (from snapshot)
         // - head_address: should be begin_address (all data is in memory, nothing on disk)
@@ -749,11 +752,16 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         // - tail_address: end of the log (from snapshot)
         self.begin_address.store(snapshot_begin, Ordering::Release);
         self.head_address.store(snapshot_begin, Ordering::Release);
-        self.safe_head_address.store(snapshot_begin, Ordering::Release);
-        self.read_only_address.store(snapshot_tail, Ordering::Release);
-        self.safe_read_only_address.store(snapshot_tail, Ordering::Release);
-        self.flushed_until_address.store(snapshot_tail, Ordering::Release);
-        self.tail_page_offset.store_address(snapshot_tail, Ordering::Release);
+        self.safe_head_address
+            .store(snapshot_begin, Ordering::Release);
+        self.read_only_address
+            .store(snapshot_tail, Ordering::Release);
+        self.safe_read_only_address
+            .store(snapshot_tail, Ordering::Release);
+        self.flushed_until_address
+            .store(snapshot_tail, Ordering::Release);
+        self.tail_page_offset
+            .store_address(snapshot_tail, Ordering::Release);
 
         Ok(())
     }
@@ -824,7 +832,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
             // Copy to page array - ensure page is allocated first
             let page = page_num as u32;
-            
+
             // Allocate the page buffer if it doesn't exist
             if !self.pages.allocate_page(page, self.config.page_size) {
                 return Err(io::Error::new(
@@ -832,7 +840,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                     format!("Failed to allocate page {} during recovery", page),
                 ));
             }
-            
+
             // Now copy the data - the page is guaranteed to exist
             if let Some(dest) = self.pages.get_page_mut(page) {
                 dest.copy_from_slice(&page_data);
@@ -851,6 +859,203 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Get a reference to the device
     pub fn device(&self) -> &Arc<D> {
         &self.device
+    }
+
+    /// Flush delta records to the delta log for incremental checkpoint
+    ///
+    /// This method writes changed records between `start_address` and `end_address`
+    /// to the provided delta log. Only records that have changed since `prev_end_address`
+    /// are written.
+    ///
+    /// # Arguments
+    /// * `start_address` - Start address for scanning
+    /// * `end_address` - End address for scanning
+    /// * `prev_end_address` - End address of the previous snapshot (records after this are new)
+    /// * `version` - Current version number
+    /// * `delta_log` - Delta log to write records to
+    ///
+    /// # Returns
+    /// Number of delta records written
+    pub fn flush_delta_to_device<DeltaDevice: StorageDevice>(
+        &self,
+        start_address: Address,
+        end_address: Address,
+        prev_end_address: Address,
+        _version: u32,
+        delta_log: &DeltaLog<DeltaDevice>,
+    ) -> io::Result<u64> {
+        // For incremental checkpoints, we only need to write records that have changed
+        // since the last snapshot. Records between start_address and prev_end_address
+        // are already in the base snapshot.
+
+        let actual_start = if start_address < prev_end_address {
+            prev_end_address
+        } else {
+            start_address
+        };
+
+        if actual_start >= end_address {
+            // No new records to flush
+            return Ok(0);
+        }
+
+        delta_log.init_for_writes();
+
+        let mut count = 0u64;
+        let page_size = self.config.page_size;
+
+        let start_page = actual_start.page();
+        let end_page = end_address.page();
+
+        for page in start_page..=end_page {
+            if let Some(page_data) = self.pages.get_page(page) {
+                // Determine the range within this page to write
+                let write_start = if page == start_page {
+                    actual_start.offset() as usize
+                } else {
+                    0
+                };
+
+                let write_end = if page == end_page {
+                    end_address.offset() as usize
+                } else {
+                    page_size
+                };
+
+                if write_start >= write_end {
+                    continue;
+                }
+
+                // Create delta entry with page header + data
+                // Format: [page_number: 8 bytes][offset: 4 bytes][length: 4 bytes][data]
+                let data_len = write_end - write_start;
+                let entry_size = 8 + 4 + 4 + data_len; // page_num + offset + length + data
+
+                let mut entry_data = Vec::with_capacity(entry_size);
+                entry_data.extend_from_slice(&(page as u64).to_le_bytes()); // Page number
+                entry_data.extend_from_slice(&(write_start as u32).to_le_bytes()); // Offset
+                entry_data.extend_from_slice(&(data_len as u32).to_le_bytes()); // Length
+                entry_data.extend_from_slice(&page_data[write_start..write_end]); // Data
+
+                let entry = DeltaLogEntry::delta(entry_data);
+                delta_log.write_entry(&entry)?;
+                count += 1;
+            }
+        }
+
+        // Flush any remaining data
+        delta_log.flush()?;
+
+        Ok(count)
+    }
+
+    /// Asynchronously flush delta records to the delta log
+    ///
+    /// # Arguments
+    /// * `start_address` - Start address for scanning
+    /// * `end_address` - End address for scanning
+    /// * `prev_end_address` - End address of the previous snapshot
+    /// * `version` - Current version number
+    /// * `delta_log` - Delta log to write records to
+    ///
+    /// # Returns
+    /// Number of delta records written
+    pub async fn flush_delta_to_device_async<DeltaDevice: StorageDevice>(
+        &self,
+        start_address: Address,
+        end_address: Address,
+        prev_end_address: Address,
+        version: u32,
+        delta_log: &DeltaLog<DeltaDevice>,
+    ) -> io::Result<u64> {
+        // For now, use sync version since the actual writes are small
+        // In a full implementation, this would use async I/O
+        self.flush_delta_to_device(
+            start_address,
+            end_address,
+            prev_end_address,
+            version,
+            delta_log,
+        )
+    }
+
+    /// Apply delta records from a delta log during recovery
+    ///
+    /// This method reads delta records from the delta log and applies them
+    /// to reconstruct the log state.
+    ///
+    /// # Arguments
+    /// * `delta_log` - Delta log to read records from
+    ///
+    /// # Returns
+    /// Number of delta records applied
+    pub fn apply_delta_records<DeltaDevice: StorageDevice>(
+        &mut self,
+        delta_log: Arc<DeltaLog<DeltaDevice>>,
+    ) -> io::Result<u64> {
+        use crate::delta_log::DeltaLogIterator;
+
+        delta_log.init_for_reads();
+
+        let mut count = 0u64;
+        let mut iter = DeltaLogIterator::all(delta_log);
+
+        while let Some((_addr, entry)) = iter.get_next()? {
+            if entry.entry_type() != Some(DeltaLogEntryType::Delta) {
+                continue;
+            }
+
+            let payload = &entry.payload;
+            if payload.len() < 16 {
+                continue; // Invalid entry
+            }
+
+            // Parse entry header
+            let page_num = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
+            let offset = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
+            let length = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+
+            if payload.len() < 16 + length {
+                continue; // Invalid entry
+            }
+
+            let data = &payload[16..16 + length];
+
+            // Ensure page is allocated
+            if !self.pages.allocate_page(page_num, self.config.page_size) {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!("Failed to allocate page {} during delta recovery", page_num),
+                ));
+            }
+
+            // Apply delta to page
+            if let Some(page_data) = self.pages.get_page_mut(page_num) {
+                if offset + length <= page_data.len() {
+                    page_data[offset..offset + length].copy_from_slice(data);
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Write incremental checkpoint metadata to the delta log
+    ///
+    /// # Arguments
+    /// * `delta_log` - Delta log to write to
+    /// * `metadata` - Log metadata to serialize
+    pub fn write_incremental_metadata<DeltaDevice: StorageDevice>(
+        &self,
+        delta_log: &DeltaLog<DeltaDevice>,
+        metadata: &LogMetadata,
+    ) -> io::Result<()> {
+        let metadata_bytes = metadata.serialize_json()?;
+        let entry = DeltaLogEntry::checkpoint_metadata(metadata_bytes);
+        delta_log.write_entry(&entry)?;
+        delta_log.flush()?;
+        Ok(())
     }
 }
 
@@ -909,11 +1114,11 @@ mod tests {
     #[test]
     fn test_allocate_basic() {
         let allocator = create_test_allocator();
-        
+
         let addr1 = allocator.allocate(100).unwrap();
         assert_eq!(addr1.page(), 0);
         assert_eq!(addr1.offset(), 0);
-        
+
         let addr2 = allocator.allocate(100).unwrap();
         assert_eq!(addr2.page(), 0);
         assert_eq!(addr2.offset(), 100);
@@ -923,11 +1128,11 @@ mod tests {
     fn test_allocate_page_overflow() {
         let allocator = create_test_allocator();
         let page_size = allocator.page_size();
-        
+
         // Fill the first page
         let addr1 = allocator.allocate((page_size - 100) as u32).unwrap();
         assert_eq!(addr1.page(), 0);
-        
+
         // This should trigger a new page
         let addr2 = allocator.allocate(200).unwrap();
         assert_eq!(addr2.page(), 1);
@@ -937,12 +1142,12 @@ mod tests {
     #[test]
     fn test_get_addresses() {
         let allocator = create_test_allocator();
-        
+
         let tail = allocator.get_tail_address();
         let read_only = allocator.get_read_only_address();
         let head = allocator.get_head_address();
         let begin = allocator.get_begin_address();
-        
+
         // Initially all should be at 0
         assert_eq!(tail, Address::new(0, 0));
         assert_eq!(read_only, Address::new(0, 0));
@@ -953,20 +1158,20 @@ mod tests {
     #[test]
     fn test_shift_addresses() {
         let allocator = create_test_allocator();
-        
+
         let new_addr = Address::new(5, 0);
         allocator.shift_read_only_address(new_addr);
-        
+
         assert_eq!(allocator.get_read_only_address(), new_addr);
     }
 
     #[test]
     fn test_log_stats() {
         let allocator = create_test_allocator();
-        
+
         // Allocate some space
         allocator.allocate(1000).unwrap();
-        
+
         let stats = allocator.get_stats();
         assert!(stats.tail_address > Address::new(0, 0));
     }
@@ -974,16 +1179,16 @@ mod tests {
     #[test]
     fn test_is_mutable() {
         let allocator = create_test_allocator();
-        
+
         // Allocate some space
         let addr = allocator.allocate(100).unwrap();
-        
+
         // Should be mutable (in mutable region)
         assert!(allocator.is_mutable(addr));
-        
+
         // Shift read-only past this address
         allocator.shift_read_only_address(Address::new(1, 0));
-        
+
         // Should no longer be mutable
         assert!(!allocator.is_mutable(addr));
     }
@@ -993,13 +1198,13 @@ mod tests {
     #[test]
     fn test_checkpoint_metadata() {
         let allocator = create_test_allocator();
-        
+
         // Allocate some space
         allocator.allocate(1000).unwrap();
-        
+
         let token = uuid::Uuid::new_v4();
         let metadata = allocator.checkpoint_metadata(token, 1, true);
-        
+
         assert_eq!(metadata.token, token);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.begin_address, Address::new(0, 0));
@@ -1010,14 +1215,14 @@ mod tests {
     #[test]
     fn test_flush_until() {
         let allocator = create_test_allocator();
-        
+
         // Allocate some space
         let addr = allocator.allocate(1000).unwrap();
-        
+
         // Flush to beyond the allocated address
         let flush_addr = Address::new(addr.page() + 1, 0);
         allocator.flush_until(flush_addr).unwrap();
-        
+
         // Flushed address should be updated
         assert!(allocator.get_flushed_until_address() >= flush_addr);
     }
@@ -1025,98 +1230,112 @@ mod tests {
     #[test]
     fn test_checkpoint_and_recover_empty() {
         let allocator = create_test_allocator();
-        
+
         let temp_dir = tempfile::tempdir().unwrap();
         let token = uuid::Uuid::new_v4();
-        
+
         let metadata = allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
-        
+
         assert_eq!(metadata.token, token);
         assert_eq!(metadata.version, 1);
-        
+
         // Create new allocator and recover
         let mut recovered = create_test_allocator();
         recovered.recover(temp_dir.path(), Some(&metadata)).unwrap();
-        
+
         assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
     }
 
     #[test]
     fn test_checkpoint_and_recover_with_data() {
         let mut allocator = create_test_allocator();
-        
+
         // Allocate and write some data
         let addr1 = allocator.allocate(100).unwrap();
         let addr2 = allocator.allocate(200).unwrap();
-        
+
         // Write some test data to the pages
         unsafe {
-            let ptr1 = allocator.get_mut(addr1).expect("addr1 should be accessible");
+            let ptr1 = allocator
+                .get_mut(addr1)
+                .expect("addr1 should be accessible");
             std::ptr::write_bytes(ptr1.as_ptr(), 0xAB, 100);
-            
-            let ptr2 = allocator.get_mut(addr2).expect("addr2 should be accessible");
+
+            let ptr2 = allocator
+                .get_mut(addr2)
+                .expect("addr2 should be accessible");
             std::ptr::write_bytes(ptr2.as_ptr(), 0xCD, 200);
         }
-        
+
         let temp_dir = tempfile::tempdir().unwrap();
         let token = uuid::Uuid::new_v4();
-        
+
         let metadata = allocator.checkpoint(temp_dir.path(), token, 2).unwrap();
-        
+
         // Create new allocator and recover
         let mut recovered = create_test_allocator();
         recovered.recover(temp_dir.path(), Some(&metadata)).unwrap();
-        
+
         // Verify addresses are restored
         assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
-        
+
         // Verify data is restored - use expect() to ensure pages are accessible
         unsafe {
-            let ptr1 = recovered.get(addr1).expect("recovered addr1 should be accessible");
+            let ptr1 = recovered
+                .get(addr1)
+                .expect("recovered addr1 should be accessible");
             let data1 = std::slice::from_raw_parts(ptr1.as_ptr(), 100);
-            assert!(data1.iter().all(|&b| b == 0xAB), "Data at addr1 not correctly recovered");
-            
-            let ptr2 = recovered.get(addr2).expect("recovered addr2 should be accessible");
+            assert!(
+                data1.iter().all(|&b| b == 0xAB),
+                "Data at addr1 not correctly recovered"
+            );
+
+            let ptr2 = recovered
+                .get(addr2)
+                .expect("recovered addr2 should be accessible");
             let data2 = std::slice::from_raw_parts(ptr2.as_ptr(), 200);
-            assert!(data2.iter().all(|&b| b == 0xCD), "Data at addr2 not correctly recovered");
+            assert!(
+                data2.iter().all(|&b| b == 0xCD),
+                "Data at addr2 not correctly recovered"
+            );
         }
     }
 
     #[test]
     fn test_recover_without_preloaded_metadata() {
         let allocator = create_test_allocator();
-        
+
         // Allocate some space
         allocator.allocate(500).unwrap();
-        
+
         let temp_dir = tempfile::tempdir().unwrap();
         let token = uuid::Uuid::new_v4();
-        
+
         allocator.checkpoint(temp_dir.path(), token, 3).unwrap();
-        
+
         // Recover without providing metadata
         let mut recovered = create_test_allocator();
         recovered.recover(temp_dir.path(), None).unwrap();
-        
+
         assert_eq!(recovered.get_begin_address(), allocator.get_begin_address());
     }
 
     #[test]
     fn test_checkpoint_preserves_stats() {
         let allocator = create_test_allocator();
-        
+
         // Fill up some pages
         for _ in 0..10 {
             allocator.allocate(1000).unwrap();
         }
-        
+
         let original_stats = allocator.get_stats();
-        
+
         let temp_dir = tempfile::tempdir().unwrap();
         let token = uuid::Uuid::new_v4();
-        
+
         let metadata = allocator.checkpoint(temp_dir.path(), token, 1).unwrap();
-        
+
         // Stats from metadata should match
         assert_eq!(metadata.begin_address, original_stats.begin_address);
         assert_eq!(metadata.final_address, original_stats.tail_address);
@@ -1153,8 +1372,11 @@ mod tests {
         let mut smaller_allocator = PersistentMemoryMalloc::new(smaller_config, device);
 
         let result = smaller_allocator.recover(temp_dir.path(), None);
-        assert!(result.is_err(), "Recovery should fail with smaller buffer size");
-        
+        assert!(
+            result.is_err(),
+            "Recovery should fail with smaller buffer size"
+        );
+
         if let Err(e) = result {
             assert!(
                 e.to_string().contains("Buffer size mismatch"),
@@ -1195,7 +1417,10 @@ mod tests {
         let mut larger_allocator = PersistentMemoryMalloc::new(larger_config, device);
 
         let result = larger_allocator.recover(temp_dir.path(), None);
-        assert!(result.is_ok(), "Recovery should succeed with larger buffer size");
+        assert!(
+            result.is_ok(),
+            "Recovery should succeed with larger buffer size"
+        );
     }
 
     #[test]
@@ -1214,16 +1439,19 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let token = uuid::Uuid::new_v4();
-        
+
         // Create checkpoint directory structure (as FasterKv does)
         let cp_dir = temp_dir.path().join(token.to_string());
         std::fs::create_dir_all(&cp_dir).unwrap();
-        
+
         allocator.checkpoint(&cp_dir, token, 1).unwrap();
 
         // Delete the snapshot file to simulate incomplete/corrupted checkpoint
         let snapshot_path = cp_dir.join("log.snapshot");
-        assert!(snapshot_path.exists(), "Snapshot should exist before deletion");
+        assert!(
+            snapshot_path.exists(),
+            "Snapshot should exist before deletion"
+        );
         std::fs::remove_file(&snapshot_path).unwrap();
 
         // Try to recover - should fail because snapshot is missing
@@ -1239,12 +1467,15 @@ mod tests {
         );
 
         let result = recovered.recover(&cp_dir, None);
-        assert!(result.is_err(), "Recovery should fail when snapshot file is missing");
+        assert!(
+            result.is_err(),
+            "Recovery should fail when snapshot file is missing"
+        );
 
         if let Err(e) = result {
             assert!(
-                e.to_string().contains("Log snapshot file missing") || 
-                e.to_string().contains("snapshot"),
+                e.to_string().contains("Log snapshot file missing")
+                    || e.to_string().contains("snapshot"),
                 "Error should mention missing snapshot, got: {}",
                 e
             );
@@ -1268,10 +1499,14 @@ mod tests {
         let addr2 = allocator.allocate(200).unwrap();
 
         unsafe {
-            let ptr1 = allocator.get_mut(addr1).expect("addr1 should be accessible");
+            let ptr1 = allocator
+                .get_mut(addr1)
+                .expect("addr1 should be accessible");
             std::ptr::write_bytes(ptr1.as_ptr(), 0xAA, 100);
 
-            let ptr2 = allocator.get_mut(addr2).expect("addr2 should be accessible");
+            let ptr2 = allocator
+                .get_mut(addr2)
+                .expect("addr2 should be accessible");
             std::ptr::write_bytes(ptr2.as_ptr(), 0xBB, 200);
         }
 
@@ -1315,14 +1550,23 @@ mod tests {
 
         // Verify data is accessible
         unsafe {
-            let ptr1 = recovered.get(addr1).expect("recovered addr1 should be accessible");
+            let ptr1 = recovered
+                .get(addr1)
+                .expect("recovered addr1 should be accessible");
             let data1 = std::slice::from_raw_parts(ptr1.as_ptr(), 100);
-            assert!(data1.iter().all(|&b| b == 0xAA), "Data at addr1 not correctly recovered");
+            assert!(
+                data1.iter().all(|&b| b == 0xAA),
+                "Data at addr1 not correctly recovered"
+            );
 
-            let ptr2 = recovered.get(addr2).expect("recovered addr2 should be accessible");
+            let ptr2 = recovered
+                .get(addr2)
+                .expect("recovered addr2 should be accessible");
             let data2 = std::slice::from_raw_parts(ptr2.as_ptr(), 200);
-            assert!(data2.iter().all(|&b| b == 0xBB), "Data at addr2 not correctly recovered");
+            assert!(
+                data2.iter().all(|&b| b == 0xBB),
+                "Data at addr2 not correctly recovered"
+            );
         }
     }
 }
-

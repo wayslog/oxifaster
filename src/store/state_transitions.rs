@@ -38,6 +38,8 @@ pub enum Action {
     GC = 5,
     /// Index growth (rehashing)
     GrowIndex = 6,
+    /// Incremental checkpoint (delta log)
+    CheckpointIncremental = 7,
 }
 
 impl Default for Action {
@@ -56,6 +58,7 @@ impl From<u8> for Action {
             4 => Action::Recover,
             5 => Action::GC,
             6 => Action::GrowIndex,
+            7 => Action::CheckpointIncremental,
             _ => Action::None,
         }
     }
@@ -82,19 +85,19 @@ pub enum Phase {
     Rest = 6,
     /// Persistence callback
     PersistenceCallback = 7,
-    
+
     // Garbage collection phases
     /// GC I/O pending - finish outstanding I/Os
     GcIoPending = 8,
     /// GC in progress - cleaning hash table
     GcInProgress = 9,
-    
+
     // Grow index phases
     /// Grow prepare - wait for threads to complete operations
     GrowPrepare = 10,
     /// Grow in progress - copying hash table
     GrowInProgress = 11,
-    
+
     /// Invalid phase
     Invalid = 255,
 }
@@ -172,7 +175,7 @@ impl SystemState {
     pub fn get_next_state(&self) -> Option<SystemState> {
         match self.action {
             Action::None => None,
-            
+
             Action::CheckpointFull => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::CheckpointFull,
@@ -216,7 +219,7 @@ impl SystemState {
                 )),
                 _ => None,
             },
-            
+
             Action::CheckpointIndex => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::CheckpointIndex,
@@ -235,7 +238,7 @@ impl SystemState {
                 )),
                 _ => None,
             },
-            
+
             Action::CheckpointHybridLog => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::CheckpointHybridLog,
@@ -269,7 +272,7 @@ impl SystemState {
                 )),
                 _ => None,
             },
-            
+
             Action::GC => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::GC,
@@ -281,14 +284,12 @@ impl SystemState {
                     Phase::GcInProgress,
                     self.version,
                 )),
-                Phase::GcInProgress => Some(SystemState::new(
-                    Action::GC,
-                    Phase::Rest,
-                    self.version,
-                )),
+                Phase::GcInProgress => {
+                    Some(SystemState::new(Action::GC, Phase::Rest, self.version))
+                }
                 _ => None,
             },
-            
+
             Action::GrowIndex => match self.phase {
                 Phase::Rest => Some(SystemState::new(
                     Action::GrowIndex,
@@ -307,12 +308,58 @@ impl SystemState {
                 )),
                 _ => None,
             },
-            
+
             Action::Recover => {
                 // Recovery doesn't have standard state transitions
                 // It's handled separately by the recovery module
                 None
             }
+
+            // 增量检查点也需要持久化索引文件（index.meta/index.dat），否则校验/恢复会失败。
+            // 因此这里复用完整检查点的阶段流转（包含索引阶段），仅在具体执行 IN_PROGRESS 时写 delta。
+            Action::CheckpointIncremental => match self.phase {
+                Phase::Rest => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::PrepIndexChkpt,
+                    self.version,
+                )),
+                Phase::PrepIndexChkpt => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::IndexChkpt,
+                    self.version,
+                )),
+                Phase::IndexChkpt => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::Prepare,
+                    self.version,
+                )),
+                Phase::Prepare => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::InProgress,
+                    self.version + 1,
+                )),
+                Phase::InProgress => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::WaitPending,
+                    self.version,
+                )),
+                Phase::WaitPending => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::WaitFlush,
+                    self.version,
+                )),
+                Phase::WaitFlush => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::PersistenceCallback,
+                    self.version,
+                )),
+                Phase::PersistenceCallback => Some(SystemState::new(
+                    Action::CheckpointIncremental,
+                    Phase::Rest,
+                    self.version,
+                )),
+                _ => None,
+            },
         }
     }
 
@@ -330,8 +377,16 @@ impl SystemState {
     pub fn is_checkpoint(&self) -> bool {
         matches!(
             self.action,
-            Action::CheckpointFull | Action::CheckpointIndex | Action::CheckpointHybridLog
+            Action::CheckpointFull
+                | Action::CheckpointIndex
+                | Action::CheckpointHybridLog
+                | Action::CheckpointIncremental
         )
+    }
+
+    /// Check if this is an incremental checkpoint action
+    pub fn is_incremental_checkpoint(&self) -> bool {
+        self.action == Action::CheckpointIncremental
     }
 }
 
@@ -377,7 +432,12 @@ impl AtomicSystemState {
         failure: Ordering,
     ) -> Result<SystemState, SystemState> {
         self.control
-            .compare_exchange(expected.to_control(), desired.to_control(), success, failure)
+            .compare_exchange(
+                expected.to_control(),
+                desired.to_control(),
+                success,
+                failure,
+            )
             .map(SystemState::from_control)
             .map_err(SystemState::from_control)
     }
@@ -392,7 +452,12 @@ impl AtomicSystemState {
         failure: Ordering,
     ) -> Result<SystemState, SystemState> {
         self.control
-            .compare_exchange_weak(expected.to_control(), desired.to_control(), success, failure)
+            .compare_exchange_weak(
+                expected.to_control(),
+                desired.to_control(),
+                success,
+                failure,
+            )
             .map(SystemState::from_control)
             .map_err(SystemState::from_control)
     }
@@ -417,18 +482,15 @@ impl AtomicSystemState {
 
     /// Try to start a new action from the rest state
     /// Returns Ok(previous_state) on success, Err(current_state) on failure
-    pub fn try_start_action(
-        &self,
-        action: Action,
-    ) -> Result<SystemState, SystemState> {
+    pub fn try_start_action(&self, action: Action) -> Result<SystemState, SystemState> {
         let current = self.load(Ordering::Acquire);
-        
+
         if !current.is_rest() {
             return Err(current);
         }
 
         let new_state = SystemState::new(action, Phase::Rest, current.version);
-        
+
         // Get the first state in the action's sequence
         let next_state = match new_state.get_next_state() {
             Some(s) => s,
@@ -442,7 +504,7 @@ impl AtomicSystemState {
     pub fn try_advance(&self) -> Result<SystemState, SystemState> {
         loop {
             let current = self.load(Ordering::Acquire);
-            
+
             let next = match current.get_next_state() {
                 Some(s) => s,
                 None => return Err(current),
@@ -483,7 +545,7 @@ mod tests {
         let state = SystemState::new(Action::CheckpointFull, Phase::InProgress, 42);
         let control = state.to_control();
         let unpacked = SystemState::from_control(control);
-        
+
         assert_eq!(state, unpacked);
         assert_eq!(unpacked.action, Action::CheckpointFull);
         assert_eq!(unpacked.phase, Phase::InProgress);
@@ -492,11 +554,9 @@ mod tests {
 
     #[test]
     fn test_checkpoint_full_state_machine() {
-        let mut state = SystemState::rest(0);
-        
         // Start checkpoint
-        state = SystemState::new(Action::CheckpointFull, Phase::Rest, 0);
-        
+        let mut state = SystemState::new(Action::CheckpointFull, Phase::Rest, 0);
+
         // Follow the state machine
         let phases = vec![
             Phase::PrepIndexChkpt,
@@ -508,29 +568,52 @@ mod tests {
             Phase::PersistenceCallback,
             Phase::Rest,
         ];
-        
+
         for expected_phase in phases {
             state = state.get_next_state().unwrap();
             assert_eq!(state.phase, expected_phase);
         }
-        
+
         // Verify version incremented after PREPARE phase
+        assert_eq!(state.version, 1);
+    }
+
+    #[test]
+    fn test_checkpoint_incremental_state_machine_includes_index_phases() {
+        let mut state = SystemState::new(Action::CheckpointIncremental, Phase::Rest, 0);
+
+        let phases = vec![
+            Phase::PrepIndexChkpt,
+            Phase::IndexChkpt,
+            Phase::Prepare,
+            Phase::InProgress,
+            Phase::WaitPending,
+            Phase::WaitFlush,
+            Phase::PersistenceCallback,
+            Phase::Rest,
+        ];
+
+        for expected_phase in phases {
+            state = state.get_next_state().unwrap();
+            assert_eq!(state.phase, expected_phase);
+        }
+
         assert_eq!(state.version, 1);
     }
 
     #[test]
     fn test_checkpoint_index_state_machine() {
         let mut state = SystemState::new(Action::CheckpointIndex, Phase::Rest, 5);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::PrepIndexChkpt);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::IndexChkpt);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::Rest);
-        
+
         // Version should not change for index-only checkpoint
         assert_eq!(state.version, 5);
     }
@@ -538,13 +621,13 @@ mod tests {
     #[test]
     fn test_gc_state_machine() {
         let mut state = SystemState::new(Action::GC, Phase::Rest, 0);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::GcIoPending);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::GcInProgress);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::Rest);
     }
@@ -552,13 +635,13 @@ mod tests {
     #[test]
     fn test_grow_index_state_machine() {
         let mut state = SystemState::new(Action::GrowIndex, Phase::Rest, 0);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::GrowPrepare);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::GrowInProgress);
-        
+
         state = state.get_next_state().unwrap();
         assert_eq!(state.phase, Phase::Rest);
     }
@@ -566,7 +649,7 @@ mod tests {
     #[test]
     fn test_atomic_system_state() {
         let atomic = AtomicSystemState::new(SystemState::rest(10));
-        
+
         assert_eq!(atomic.phase(), Phase::Rest);
         assert_eq!(atomic.version(), 10);
         assert_eq!(atomic.action(), Action::None);
@@ -575,11 +658,11 @@ mod tests {
     #[test]
     fn test_try_start_action() {
         let atomic = AtomicSystemState::new(SystemState::rest(0));
-        
+
         // Should succeed starting from rest
         let result = atomic.try_start_action(Action::CheckpointFull);
         assert!(result.is_ok());
-        
+
         // Should fail - action already in progress
         let result = atomic.try_start_action(Action::GC);
         assert!(result.is_err());
@@ -589,7 +672,7 @@ mod tests {
     fn test_is_rest() {
         let rest = SystemState::rest(0);
         assert!(rest.is_rest());
-        
+
         let in_progress = SystemState::new(Action::CheckpointFull, Phase::InProgress, 0);
         assert!(!in_progress.is_rest());
     }

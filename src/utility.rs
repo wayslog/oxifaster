@@ -147,7 +147,10 @@ unsafe impl Sync for AlignedBuffer {}
 /// Hash combine function (similar to boost::hash_combine)
 #[inline]
 pub const fn hash_combine(seed: u64, value: u64) -> u64 {
-    seed ^ (value.wrapping_add(0x9e3779b9).wrapping_add(seed << 6).wrapping_add(seed >> 2))
+    seed ^ (value
+        .wrapping_add(0x9e3779b9)
+        .wrapping_add(seed << 6)
+        .wrapping_add(seed >> 2))
 }
 
 /// MurmurHash3 finalizer (64-bit)
@@ -205,4 +208,3 @@ mod tests {
         assert_eq!(buf.as_slice()[0], 42);
     }
 }
-

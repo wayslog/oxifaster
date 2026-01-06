@@ -221,7 +221,7 @@ mod tests {
         let mut ctx = SimpleReadContext::<u64, u64>::new(42);
         assert_eq!(*ctx.key(), 42);
         assert!(ctx.value.is_none());
-        
+
         ctx.get(&100);
         assert_eq!(ctx.value, Some(100));
     }
@@ -237,7 +237,7 @@ mod tests {
     fn test_increment_context() {
         let mut ctx = IncrementContext::new(42u64, 10);
         assert_eq!(ctx.initial_value(), 10);
-        
+
         let mut value = 5i64;
         ctx.in_place_update(&mut value);
         assert_eq!(value, 15);
@@ -250,4 +250,3 @@ mod tests {
         assert!(ctx.address.is_invalid());
     }
 }
-

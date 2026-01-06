@@ -92,7 +92,7 @@ impl ColdIndexConfig {
 impl Default for ColdIndexConfig {
     fn default() -> Self {
         Self {
-            table_size: 1 << 16, // 64K chunks
+            table_size: 1 << 16,           // 64K chunks
             in_mem_size: 64 * 1024 * 1024, // 64 MB
             mutable_fraction: 0.5,
             root_path: PathBuf::from("cold-index"),
@@ -207,8 +207,12 @@ impl<const NB: usize> HashIndexChunk<NB> {
         new: HashBucketEntry,
     ) -> Result<HashBucketEntry, HashBucketEntry> {
         let bucket = &self.buckets[pos.bucket_index as usize];
-        bucket.entries[pos.entry_tag as usize]
-            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
+        bucket.entries[pos.entry_tag as usize].compare_exchange(
+            expected,
+            new,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
     }
 }
 
@@ -260,7 +264,11 @@ pub struct ColdIndexFindResult {
 
 impl ColdIndexFindResult {
     /// Create a successful result
-    pub fn found(entry: HashBucketEntry, pos: HashIndexChunkPos, chunk_key: HashIndexChunkKey) -> Self {
+    pub fn found(
+        entry: HashBucketEntry,
+        pos: HashIndexChunkPos,
+        chunk_key: HashIndexChunkKey,
+    ) -> Self {
         Self {
             entry,
             status: Status::Ok,
@@ -498,7 +506,7 @@ impl ColdIndex {
         self.config.validate()?;
 
         self.table_size = self.config.table_size;
-        
+
         // Initialize chunk storage (lazy allocation)
         self.chunks = (0..self.table_size).map(|_| None).collect();
         self.initialized = true;
@@ -559,7 +567,9 @@ impl ColdIndex {
     /// Get a chunk (if exists)
     fn get_chunk(&self, chunk_id: u64) -> Option<&DefaultHashIndexChunk> {
         let idx = chunk_id as usize;
-        self.chunks.get(idx).and_then(|c| c.as_ref().map(|b| b.as_ref()))
+        self.chunks
+            .get(idx)
+            .and_then(|c| c.as_ref().map(|b| b.as_ref()))
     }
 
     /// Find entry for the given hash
@@ -791,7 +801,7 @@ mod tests {
     fn test_cold_index_basic() {
         let config = ColdIndexConfig::new(1 << 10, 1024 * 1024, 0.5);
         let mut index = ColdIndex::new(config);
-        
+
         assert!(index.initialize().is_ok());
         assert!(index.is_initialized());
         assert_eq!(index.size(), 1024);
@@ -881,7 +891,11 @@ mod tests {
             }
         }
         // Should find most entries (some may collide in this simplified implementation)
-        assert!(found_count >= 5, "Expected at least 5 entries, found {}", found_count);
+        assert!(
+            found_count >= 5,
+            "Expected at least 5 entries, found {}",
+            found_count
+        );
     }
 
     #[test]
@@ -938,7 +952,7 @@ mod tests {
             root_path: std::path::PathBuf::from("test"),
         };
         let index = ColdIndex::new(config);
-        
+
         // This should panic because table_size is 0
         let hash = KeyHash::new(0x123456789ABCDEF0);
         index.find_entry(hash);

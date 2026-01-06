@@ -13,9 +13,9 @@ fn main() {
     // 1. 创建配置
     let config = FasterLogConfig {
         page_size: 1 << 16,    // 64 KB 页面
-        memory_pages: 16,       // 16 个页面 = 1 MB 内存
-        segment_size: 1 << 20,  // 1 MB 段
-        auto_commit_ms: 0,      // 禁用自动提交
+        memory_pages: 16,      // 16 个页面 = 1 MB 内存
+        segment_size: 1 << 20, // 1 MB 段
+        auto_commit_ms: 0,     // 禁用自动提交
     };
 
     // 2. 创建日志
@@ -82,11 +82,7 @@ fn main() {
 
     // 7. 追加更多条目
     println!("\n--- 追加更多条目 ---");
-    let more_entries = [
-        "新增日志 A",
-        "新增日志 B",
-        "新增日志 C",
-    ];
+    let more_entries = ["新增日志 A", "新增日志 B", "新增日志 C"];
 
     for entry in &more_entries {
         if let Ok(addr) = log.append(entry.as_bytes()) {
@@ -124,4 +120,3 @@ fn main() {
 
     println!("\n=== 示例完成 ===");
 }
-

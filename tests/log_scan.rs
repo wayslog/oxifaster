@@ -103,7 +103,10 @@ fn test_log_page_status_equality() {
 
 #[test]
 fn test_log_page_status_debug() {
-    assert_eq!(format!("{:?}", LogPageStatus::Uninitialized), "Uninitialized");
+    assert_eq!(
+        format!("{:?}", LogPageStatus::Uninitialized),
+        "Uninitialized"
+    );
     assert_eq!(format!("{:?}", LogPageStatus::Ready), "Ready");
     assert_eq!(format!("{:?}", LogPageStatus::Pending), "Pending");
     assert_eq!(format!("{:?}", LogPageStatus::Unavailable), "Unavailable");

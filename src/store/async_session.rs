@@ -412,7 +412,6 @@ where
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,9 +440,7 @@ mod tests {
     #[test]
     fn test_async_session_builder() {
         let store = create_test_store();
-        let session = AsyncSessionBuilder::new(store)
-            .thread_id(5)
-            .build();
+        let session = AsyncSessionBuilder::new(store).thread_id(5).build();
 
         assert_eq!(session.thread_id(), 5);
     }

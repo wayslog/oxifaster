@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use oxifaster::device::NullDisk;
 use oxifaster::status::Status;
-use oxifaster::store::{AsyncSession, AsyncSessionBuilder, FasterKv, FasterKvConfig};
+use oxifaster::store::{AsyncSessionBuilder, FasterKv, FasterKvConfig};
 
 fn main() {
     println!("=== oxifaster Async Operations 示例 ===\n");

@@ -15,9 +15,9 @@ fn main() {
 
     // 1. 创建配置
     let config = FasterKvConfig {
-        table_size: 1 << 16,       // 64K 哈希桶
-        log_memory_size: 1 << 24,  // 16 MB 日志内存
-        page_size_bits: 20,        // 1 MB 页面
+        table_size: 1 << 16,      // 64K 哈希桶
+        log_memory_size: 1 << 24, // 16 MB 日志内存
+        page_size_bits: 20,       // 1 MB 页面
         mutable_fraction: 0.9,
     };
 
@@ -67,7 +67,10 @@ fn main() {
         if let Ok(Some(value)) = session.read(&i) {
             let expected = if i <= 5 { i * 1000 } else { i * 100 };
             let status = if value == expected { "✓" } else { "✗" };
-            println!("  {} key={}, value={} (期望: {})", status, i, value, expected);
+            println!(
+                "  {} key={}, value={} (期望: {})",
+                status, i, value, expected
+            );
         }
     }
 
@@ -103,4 +106,3 @@ fn main() {
 
     println!("\n=== 示例完成 ===");
 }
-

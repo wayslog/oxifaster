@@ -80,7 +80,8 @@ impl ReadCacheStats {
     /// Record evicted records
     pub fn record_eviction(&self, count: u64, invalid_count: u64) {
         self.evicted_records.fetch_add(count, Ordering::Relaxed);
-        self.evicted_invalid.fetch_add(invalid_count, Ordering::Relaxed);
+        self.evicted_invalid
+            .fetch_add(invalid_count, Ordering::Relaxed);
     }
 
     /// Get the number of read calls
@@ -225,12 +226,12 @@ mod tests {
     #[test]
     fn test_record_operations() {
         let stats = ReadCacheStats::new();
-        
+
         stats.record_read();
         stats.record_read();
         stats.record_hit();
         stats.record_miss();
-        
+
         assert_eq!(stats.read_calls(), 2);
         assert_eq!(stats.read_hits(), 1);
         assert_eq!(stats.read_misses(), 1);
@@ -240,11 +241,11 @@ mod tests {
     #[test]
     fn test_insert_stats() {
         let stats = ReadCacheStats::new();
-        
+
         stats.record_insert();
         stats.record_insert();
         stats.record_insert_success();
-        
+
         assert_eq!(stats.insert_calls(), 2);
         assert_eq!(stats.insert_rate(), 0.5);
     }
@@ -252,12 +253,12 @@ mod tests {
     #[test]
     fn test_reset() {
         let stats = ReadCacheStats::new();
-        
+
         stats.record_read();
         stats.record_hit();
-        
+
         stats.reset();
-        
+
         assert_eq!(stats.read_calls(), 0);
         assert_eq!(stats.read_hits(), 0);
     }

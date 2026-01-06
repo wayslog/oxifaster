@@ -29,8 +29,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             target_utilization: 0.5,
-            min_compact_bytes: 1 << 20,  // 1 MB
-            max_compact_bytes: 1 << 30,  // 1 GB
+            min_compact_bytes: 1 << 20, // 1 MB
+            max_compact_bytes: 1 << 30, // 1 GB
             num_threads: 1,
             compact_tombstones: true,
         }
@@ -173,7 +173,10 @@ impl Compactor {
     /// Try to start a compaction operation
     /// Returns Ok(()) if compaction can start, Err if already in progress
     pub fn try_start(&self) -> Result<(), Status> {
-        match self.in_progress.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
+        match self
+            .in_progress
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(()),
             Err(_) => Err(Status::Aborted),
         }
@@ -313,14 +316,14 @@ mod tests {
     #[test]
     fn test_compactor_try_start() {
         let compactor = Compactor::new();
-        
+
         // First start should succeed
         assert!(compactor.try_start().is_ok());
         assert!(compactor.is_in_progress());
-        
+
         // Second start should fail
         assert!(compactor.try_start().is_err());
-        
+
         // After complete, should be able to start again
         compactor.complete();
         assert!(!compactor.is_in_progress());
@@ -329,16 +332,14 @@ mod tests {
 
     #[test]
     fn test_calculate_scan_range() {
-        let compactor = Compactor::with_config(
-            CompactionConfig::new().with_min_compact_bytes(0)
-        );
+        let compactor = Compactor::with_config(CompactionConfig::new().with_min_compact_bytes(0));
 
         let begin = Address::new(0, 0);
         let head = Address::new(10, 0);
 
         let range = compactor.calculate_scan_range(begin, head, None);
         assert!(range.is_some());
-        
+
         let range = range.unwrap();
         assert_eq!(range.begin, begin);
         assert_eq!(range.end, head);
@@ -346,9 +347,7 @@ mod tests {
 
     #[test]
     fn test_calculate_scan_range_with_target() {
-        let compactor = Compactor::with_config(
-            CompactionConfig::new().with_min_compact_bytes(0)
-        );
+        let compactor = Compactor::with_config(CompactionConfig::new().with_min_compact_bytes(0));
 
         let begin = Address::new(0, 0);
         let head = Address::new(10, 0);
@@ -356,7 +355,7 @@ mod tests {
 
         let range = compactor.calculate_scan_range(begin, head, Some(target));
         assert!(range.is_some());
-        
+
         let range = range.unwrap();
         assert_eq!(range.begin, begin);
         assert_eq!(range.end, target);
@@ -380,20 +379,16 @@ mod tests {
 
     #[test]
     fn test_should_compact_skip_tombstones() {
-        let compactor = Compactor::with_config(
-            CompactionConfig::new().with_target_utilization(0.5)
-        );
-        
         // Modify config to not compact tombstones
         let mut config = CompactionConfig::default();
         config.compact_tombstones = false;
         let compactor = Compactor::with_config(config);
-        
+
         let addr = Address::new(1, 100);
 
         // Tombstone should be skipped
         assert!(!compactor.should_compact_record(addr, addr, true));
-        
+
         // Non-tombstone should still be compacted
         assert!(compactor.should_compact_record(addr, addr, false));
     }

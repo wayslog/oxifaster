@@ -43,9 +43,7 @@ fn test_async_session_guid_unique() {
 #[test]
 fn test_async_session_builder() {
     let store = create_test_store();
-    let session = AsyncSessionBuilder::new(store)
-        .thread_id(42)
-        .build();
+    let session = AsyncSessionBuilder::new(store).thread_id(42).build();
 
     assert_eq!(session.thread_id(), 42);
 }
@@ -56,9 +54,7 @@ fn test_async_session_builder_from_state() {
     let guid = Uuid::new_v4();
     let state = SessionState::new(guid, 100);
 
-    let session = AsyncSessionBuilder::new(store)
-        .from_state(state)
-        .build();
+    let session = AsyncSessionBuilder::new(store).from_state(state).build();
 
     assert_eq!(session.guid(), guid);
     assert_eq!(session.serial_num(), 100);

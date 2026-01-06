@@ -6,4 +6,3 @@
 pub mod faster_log;
 
 pub use faster_log::{FasterLog, FasterLogConfig, LogStats};
-

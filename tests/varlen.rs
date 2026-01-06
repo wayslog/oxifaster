@@ -168,9 +168,7 @@ fn test_span_byte_equality() {
 
 #[test]
 fn test_builder_basic() {
-    let span = SpanByteBuilder::new()
-        .append(b"hello")
-        .build();
+    let span = SpanByteBuilder::new().append(b"hello").build();
 
     assert_eq!(span.as_slice(), b"hello");
 }
@@ -188,19 +186,14 @@ fn test_builder_push() {
 
 #[test]
 fn test_builder_with_metadata() {
-    let span = SpanByteBuilder::new()
-        .append(b"data")
-        .metadata(42)
-        .build();
+    let span = SpanByteBuilder::new().append(b"data").metadata(42).build();
 
     assert_eq!(span.metadata(), Some(42));
 }
 
 #[test]
 fn test_builder_with_capacity() {
-    let span = SpanByteBuilder::with_capacity(100)
-        .append(b"test")
-        .build();
+    let span = SpanByteBuilder::with_capacity(100).append(b"test").build();
 
     assert_eq!(span.len(), 4);
 }

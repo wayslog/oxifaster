@@ -39,12 +39,20 @@ pub trait StorageDevice: Send + Sync + 'static {
     /// Read data from the device
     ///
     /// Reads `buf.len()` bytes from `offset` into `buf`.
-    fn read(&self, offset: u64, buf: &mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>>;
+    fn read(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>>;
 
     /// Write data to the device
     ///
     /// Writes `buf` to `offset`.
-    fn write(&self, offset: u64, buf: &[u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>>;
+    fn write(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>>;
 
     /// Flush any buffered writes to stable storage
     fn flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
@@ -101,12 +109,20 @@ pub trait SyncStorageDevice: Send + Sync + 'static {
 
 /// Implement async trait for sync devices
 impl<T: SyncStorageDevice> StorageDevice for T {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>> {
+    fn read(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>> {
         let result = self.read_sync(offset, buf);
         Box::pin(async move { result })
     }
 
-    fn write(&self, offset: u64, buf: &[u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>> {
+    fn write(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + '_>> {
         let result = self.write_sync(offset, buf);
         Box::pin(async move { result })
     }
@@ -146,4 +162,3 @@ mod tests {
         assert_eq!(ctx.offset, 0);
     }
 }
-

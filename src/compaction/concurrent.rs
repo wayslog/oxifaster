@@ -399,12 +399,10 @@ impl ConcurrentCompactor {
 
     /// Try to start a compaction
     pub fn try_start(&self) -> Result<(), Status> {
-        match self.in_progress.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(()),
             Err(_) => Err(Status::Aborted),
         }
@@ -420,11 +418,7 @@ impl ConcurrentCompactor {
     /// This is a simplified implementation that demonstrates the concurrent
     /// compaction architecture. A full implementation would integrate with
     /// the actual log storage and hash index.
-    pub fn compact_range<F>(
-        &self,
-        range: ScanRange,
-        process_chunk: F,
-    ) -> ConcurrentCompactionResult
+    pub fn compact_range<F>(&self, range: ScanRange, process_chunk: F) -> ConcurrentCompactionResult
     where
         F: Fn(PageChunk) -> CompactionStats + Send + Sync + Clone + 'static,
     {
@@ -512,12 +506,9 @@ impl ConcurrentCompactor {
     }
 
     /// Compact using a simple callback (for integration with existing code)
-    pub fn compact_simple(
-        &self,
-        range: ScanRange,
-    ) -> ConcurrentCompactionResult {
+    pub fn compact_simple(&self, range: ScanRange) -> ConcurrentCompactionResult {
         // Simple processor that just counts bytes
-        let page_size = self.config.page_size;
+        let _page_size = self.config.page_size;
         self.compact_range(range, move |chunk| {
             let size = chunk.size();
             CompactionStats {
@@ -651,9 +642,9 @@ mod tests {
 
         let context = ConcurrentCompactionContext::new(
             range,
-            4,      // 4 threads
+            4,       // 4 threads
             1 << 22, // 4 MB page size
-            1,      // 1 page per chunk
+            1,       // 1 page per chunk
             false,
         );
 
@@ -744,10 +735,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_iterator() {
-        let range = ScanRange::new(
-            Address::from_control(0),
-            Address::from_control(1 << 24),
-        );
+        let range = ScanRange::new(Address::from_control(0), Address::from_control(1 << 24));
 
         let context = Arc::new(ConcurrentCompactionContext::new(
             range,

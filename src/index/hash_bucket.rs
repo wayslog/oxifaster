@@ -24,7 +24,7 @@ impl HashBucketEntry {
 
     /// Address mask (48 bits)
     const ADDRESS_MASK: u64 = (1 << 48) - 1;
-    
+
     /// Read cache bit position (bit 47)
     const READ_CACHE_BIT: u64 = 1 << 47;
 
@@ -100,19 +100,19 @@ impl IndexHashBucketEntry {
 
     /// Number of bits for the tag
     pub const TAG_BITS: u32 = 14;
-    
+
     /// Address mask (48 bits)
     const ADDRESS_MASK: u64 = (1 << 48) - 1;
-    
+
     /// Read cache bit (bit 47 in address portion)
     const READ_CACHE_BIT: u64 = 1 << 47;
-    
+
     /// Tag shift position
     const TAG_SHIFT: u32 = 48;
-    
+
     /// Tag mask
     const TAG_MASK: u64 = (1 << Self::TAG_BITS) - 1;
-    
+
     /// Tentative bit position
     const TENTATIVE_BIT: u64 = 1 << 63;
 
@@ -609,7 +609,7 @@ mod tests {
     fn test_hash_bucket_entry() {
         let addr = Address::new(10, 1000);
         let entry = HashBucketEntry::new(addr);
-        
+
         assert_eq!(entry.address(), addr);
         assert!(!entry.is_unused());
         assert!(!entry.in_read_cache());
@@ -619,7 +619,7 @@ mod tests {
     fn test_index_hash_bucket_entry() {
         let addr = Address::new(5, 500);
         let entry = IndexHashBucketEntry::new(addr, 0x1234, false);
-        
+
         assert_eq!(entry.address(), addr);
         assert_eq!(entry.tag(), 0x1234);
         assert!(!entry.is_tentative());
@@ -630,7 +630,7 @@ mod tests {
     fn test_index_entry_tentative() {
         let addr = Address::new(1, 100);
         let entry = IndexHashBucketEntry::new(addr, 0x5678, true);
-        
+
         assert!(entry.is_tentative());
     }
 
@@ -639,10 +639,10 @@ mod tests {
         let atomic = AtomicHashBucketEntry::invalid();
         let old = HashBucketEntry::INVALID;
         let new = HashBucketEntry::new(Address::new(1, 1));
-        
+
         let result = atomic.compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire);
         assert!(result.is_ok());
-        
+
         let loaded = atomic.load(Ordering::Acquire);
         assert_eq!(loaded, new);
     }
@@ -657,9 +657,8 @@ mod tests {
     fn test_overflow_entry() {
         let addr = FixedPageAddress::new(12345);
         let entry = HashBucketOverflowEntry::new(addr);
-        
+
         assert_eq!(entry.address().control(), 12345);
         assert!(!entry.is_unused());
     }
 }
-

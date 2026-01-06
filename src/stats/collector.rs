@@ -137,7 +137,11 @@ impl StatsCollector {
             elapsed: self.elapsed(),
             total_operations: self.store_stats.operations.total_operations(),
             reads: self.store_stats.operations.reads.load(Ordering::Relaxed),
-            read_hits: self.store_stats.operations.read_hits.load(Ordering::Relaxed),
+            read_hits: self
+                .store_stats
+                .operations
+                .read_hits
+                .load(Ordering::Relaxed),
             upserts: self.store_stats.operations.upserts.load(Ordering::Relaxed),
             rmws: self.store_stats.operations.rmws.load(Ordering::Relaxed),
             deletes: self.store_stats.operations.deletes.load(Ordering::Relaxed),
@@ -145,12 +149,32 @@ impl StatsCollector {
             hit_rate: self.store_stats.operations.hit_rate(),
             throughput: self.throughput(),
             avg_latency: self.store_stats.operations.average_latency(),
-            index_entries: self.store_stats.hash_index.num_entries.load(Ordering::Relaxed),
+            index_entries: self
+                .store_stats
+                .hash_index
+                .num_entries
+                .load(Ordering::Relaxed),
             index_load_factor: self.store_stats.hash_index.load_factor(),
-            bytes_allocated: self.store_stats.hybrid_log.bytes_allocated.load(Ordering::Relaxed),
-            pages_flushed: self.store_stats.hybrid_log.pages_flushed.load(Ordering::Relaxed),
-            memory_in_use: self.store_stats.allocator.current_in_use.load(Ordering::Relaxed),
-            peak_memory: self.store_stats.allocator.peak_usage.load(Ordering::Relaxed),
+            bytes_allocated: self
+                .store_stats
+                .hybrid_log
+                .bytes_allocated
+                .load(Ordering::Relaxed),
+            pages_flushed: self
+                .store_stats
+                .hybrid_log
+                .pages_flushed
+                .load(Ordering::Relaxed),
+            memory_in_use: self
+                .store_stats
+                .allocator
+                .current_in_use
+                .load(Ordering::Relaxed),
+            peak_memory: self
+                .store_stats
+                .allocator
+                .peak_usage
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -245,10 +269,10 @@ mod tests {
     #[test]
     fn test_collector_enable_disable() {
         let collector = StatsCollector::with_defaults();
-        
+
         collector.disable();
         assert!(!collector.is_enabled());
-        
+
         collector.enable();
         assert!(collector.is_enabled());
     }
@@ -256,12 +280,12 @@ mod tests {
     #[test]
     fn test_collector_snapshot() {
         let collector = StatsCollector::with_defaults();
-        
+
         collector.store_stats.operations.record_read(true);
         collector.store_stats.operations.record_upsert();
-        
+
         let snapshot = collector.snapshot();
-        
+
         assert_eq!(snapshot.reads, 1);
         assert_eq!(snapshot.upserts, 1);
         assert_eq!(snapshot.total_operations, 2);
@@ -270,14 +294,14 @@ mod tests {
     #[test]
     fn test_collector_reset() {
         let mut collector = StatsCollector::with_defaults();
-        
+
         collector.store_stats.operations.record_read(true);
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.reads, 1);
-        
+
         collector.reset();
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.reads, 0);
     }

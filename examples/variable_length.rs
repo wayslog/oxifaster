@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use oxifaster::device::NullDisk;
-use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use oxifaster::varlen::{SpanByte, SpanByteBuilder};
 
@@ -55,7 +54,10 @@ fn main() {
     println!("  has_metadata = {}", span_with_meta.has_metadata());
 
     span_with_meta.clear_metadata();
-    println!("  清除后: has_metadata = {}\n", span_with_meta.has_metadata());
+    println!(
+        "  清除后: has_metadata = {}\n",
+        span_with_meta.has_metadata()
+    );
 
     // 5. 序列化和反序列化
     println!("--- 5. 序列化和反序列化 ---");
