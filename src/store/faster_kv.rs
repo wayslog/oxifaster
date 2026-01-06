@@ -591,7 +591,7 @@ where
     }
 
     /// Internal upsert implementation without statistics recording.
-    ///
+    /// 
     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
     /// operation statistics when RMW creates a new record via upsert.
     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
@@ -675,7 +675,7 @@ where
     /// Inserts or updates a key-value pair.
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
         let start = Instant::now();
-
+        
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
         // Record upsert statistics
@@ -1491,11 +1491,11 @@ where
                             current_state.version,
                         )?);
                     } else {
-                        log_metadata = Some(self.handle_in_progress_checkpoint(
-                            cp_dir,
-                            token,
-                            current_state.version,
-                        )?);
+                    log_metadata = Some(self.handle_in_progress_checkpoint(
+                        cp_dir,
+                        token,
+                        current_state.version,
+                    )?);
                     }
                 }
 
@@ -1509,7 +1509,7 @@ where
                     if is_incremental {
                         self.handle_incremental_wait_flush(cp_dir, token, current_state.version)?;
                     } else {
-                        self.handle_wait_flush()?;
+                    self.handle_wait_flush()?;
                     }
                 }
 

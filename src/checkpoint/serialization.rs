@@ -61,7 +61,7 @@ impl SerializableIndexMetadata {
         let token = self.token.parse().map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
         })?;
-
+        
         Ok(super::IndexMetadata {
             token,
             version: self.version,
@@ -194,7 +194,7 @@ impl SerializableLogMetadata {
         let token = self.token.parse().map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {}", e))
         })?;
-
+        
         let session_states: Result<Vec<_>, _> =
             self.session_states.iter().map(|s| s.to_state()).collect();
 
@@ -208,7 +208,7 @@ impl SerializableLogMetadata {
         } else {
             None
         };
-
+        
         Ok(super::LogMetadata {
             token,
             use_snapshot_file: self.use_snapshot_file,
