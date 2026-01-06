@@ -427,6 +427,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
