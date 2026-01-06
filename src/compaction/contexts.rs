@@ -164,4 +164,58 @@ mod tests {
         let ctx = CompactionContext::new(Address::new(10, 0), Address::new(5, 0));
         assert!(!ctx.is_valid());
     }
+
+    #[test]
+    fn test_compaction_context_debug() {
+        let ctx = CompactionContext::new(Address::new(0, 0), Address::new(10, 0));
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("CompactionContext"));
+        assert!(debug_str.contains("scan_begin"));
+        assert!(debug_str.contains("scan_end"));
+    }
+
+    #[test]
+    fn test_compaction_context_new_begin_address() {
+        let ctx = CompactionContext::new(Address::new(0, 0), Address::new(10, 0));
+        // new_begin_address should default to scan_end
+        assert_eq!(ctx.new_begin_address, ctx.scan_end);
+    }
+
+    #[test]
+    fn test_compaction_context_equal_range() {
+        // Equal begin and end is considered invalid
+        let ctx = CompactionContext::new(Address::new(5, 0), Address::new(5, 0));
+        assert!(!ctx.is_valid());
+    }
+
+    #[test]
+    fn test_compaction_insert_context_basic() {
+        // Create a simple test record to work with
+        // We'll use Record<u64, u64> as a simple case
+
+        #[derive(Clone, Default, Debug, PartialEq, Eq)]
+        struct SimpleKey(u64);
+
+        impl Key for SimpleKey {
+            fn size(&self) -> u32 {
+                8
+            }
+            fn get_hash(&self) -> u64 {
+                self.0
+            }
+        }
+
+        #[derive(Clone, Default, Debug)]
+        struct SimpleValue(u64);
+
+        impl Value for SimpleValue {
+            fn size(&self) -> u32 {
+                8
+            }
+        }
+
+        // Test the record size method
+        let record_size = Record::<SimpleKey, SimpleValue>::size();
+        assert!(record_size > 0);
+    }
 }

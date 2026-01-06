@@ -847,4 +847,211 @@ mod tests {
         assert_ne!(IoOperation::Read, IoOperation::Write);
         assert_ne!(IoOperation::Fsync, IoOperation::Fallocate);
     }
+
+    #[test]
+    fn test_io_uring_error_display() {
+        let err = IoUringError::NotAvailable;
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("not available"));
+
+        let err = IoUringError::NotInitialized;
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("not initialized"));
+
+        let err = IoUringError::SubmissionQueueFull;
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("submission queue")); // "submission queue is full"
+
+        let err = IoUringError::InvalidArgument;
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("invalid")); // "invalid argument"
+
+        let err = IoUringError::IoError("test error".to_string());
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("test error"));
+
+        let err = IoUringError::NotImplemented;
+        let display_str = format!("{}", err);
+        assert!(display_str.contains("not implemented"));
+    }
+
+    #[test]
+    fn test_io_uring_error_debug() {
+        let err = IoUringError::NotAvailable;
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("NotAvailable"));
+    }
+
+    #[test]
+    fn test_io_uring_error_clone() {
+        let err = IoUringError::NotAvailable;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn test_io_uring_error_std_error() {
+        let err = IoUringError::NotAvailable;
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = IoUringConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.sq_entries, cloned.sq_entries);
+        assert_eq!(config.cq_entries, cloned.cq_entries);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = IoUringConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("sq_entries"));
+        assert!(debug_str.contains("cq_entries"));
+    }
+
+    #[test]
+    fn test_config_with_cq_entries() {
+        let config = IoUringConfig::new().with_cq_entries(1024);
+        assert_eq!(config.cq_entries, 1024);
+    }
+
+    #[test]
+    fn test_config_sqpoll_idle_field() {
+        let config = IoUringConfig {
+            sqpoll_idle_ms: 2000,
+            ..Default::default()
+        };
+        assert_eq!(config.sqpoll_idle_ms, 2000);
+    }
+
+    #[test]
+    fn test_config_register_files_field() {
+        let config = IoUringConfig {
+            register_files: true,
+            max_registered_files: 100,
+            ..Default::default()
+        };
+        assert!(config.register_files);
+        assert_eq!(config.max_registered_files, 100);
+    }
+
+    #[test]
+    fn test_config_num_fixed_buffers_field() {
+        let config = IoUringConfig {
+            num_fixed_buffers: 64,
+            ..Default::default()
+        };
+        assert_eq!(config.num_fixed_buffers, 64);
+    }
+
+    #[test]
+    fn test_config_with_fixed_buffer_size() {
+        let config = IoUringConfig::new().with_fixed_buffer_size(8192);
+        assert_eq!(config.fixed_buffer_size, 8192);
+    }
+
+    #[test]
+    fn test_io_operation_debug() {
+        let op = IoOperation::Read;
+        let debug_str = format!("{:?}", op);
+        assert!(debug_str.contains("Read"));
+    }
+
+    #[test]
+    fn test_io_operation_clone_copy() {
+        let op = IoOperation::Write;
+        let cloned = op.clone();
+        let copied = op;
+        assert_eq!(op, cloned);
+        assert_eq!(op, copied);
+    }
+
+    #[test]
+    fn test_io_operation_all_values() {
+        let _read = IoOperation::Read;
+        let _write = IoOperation::Write;
+        let _fsync = IoOperation::Fsync;
+        let _fallocate = IoOperation::Fallocate;
+    }
+
+    #[test]
+    fn test_io_uring_features_default() {
+        let features = IoUringFeatures::default();
+        assert!(!features.sqpoll);
+        assert!(!features.fixed_buffers);
+        assert!(!features.registered_files);
+        assert!(!features.io_drain);
+    }
+
+    #[test]
+    fn test_io_uring_features_debug() {
+        let features = IoUringFeatures::default();
+        let debug_str = format!("{:?}", features);
+        assert!(debug_str.contains("sqpoll"));
+    }
+
+    #[test]
+    fn test_io_uring_stats_clone() {
+        let stats = IoUringStats {
+            reads_submitted: 10,
+            ..Default::default()
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.reads_submitted, cloned.reads_submitted);
+    }
+
+    #[test]
+    fn test_io_uring_stats_debug() {
+        let stats = IoUringStats::default();
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("reads_submitted"));
+    }
+
+    #[test]
+    fn test_io_uring_stats_pending_writes() {
+        let stats = IoUringStats {
+            writes_submitted: 20,
+            writes_completed: 15,
+            write_errors: 2,
+            ..Default::default()
+        };
+        assert_eq!(stats.pending_writes(), 3);
+    }
+
+    #[test]
+    fn test_io_uring_stats_combined_pending() {
+        let stats = IoUringStats {
+            reads_submitted: 10,
+            reads_completed: 5,
+            read_errors: 1,
+            writes_submitted: 20,
+            writes_completed: 15,
+            write_errors: 2,
+            ..Default::default()
+        };
+        // Total pending = pending_reads + pending_writes
+        assert_eq!(stats.pending_reads() + stats.pending_writes(), 7); // 4 reads + 3 writes
+    }
+
+    #[test]
+    fn test_device_path() {
+        let config = IoUringConfig::default();
+        let device = IoUringDevice::new("/tmp/test", config);
+        assert_eq!(device.path, std::path::PathBuf::from("/tmp/test"));
+    }
+
+    #[test]
+    fn test_file_path() {
+        let file = IoUringFile::new("/tmp/test.dat");
+        assert_eq!(file.path, std::path::PathBuf::from("/tmp/test.dat"));
+    }
+
+    #[test]
+    fn test_file_size_field() {
+        let file = IoUringFile::new("/tmp/test.dat");
+        assert_eq!(file.size, 0);
+    }
 }

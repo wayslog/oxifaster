@@ -1433,4 +1433,241 @@ mod tests {
         assert!(f2.should_compact_hot_log().is_none());
         assert!(f2.should_compact_cold_log().is_none());
     }
+
+    #[test]
+    fn test_store_type_debug() {
+        let debug_str = format!("{:?}", StoreType::Hot);
+        assert!(debug_str.contains("Hot"));
+
+        let debug_str = format!("{:?}", StoreType::Cold);
+        assert!(debug_str.contains("Cold"));
+    }
+
+    #[test]
+    fn test_store_type_clone_copy() {
+        let store_type = StoreType::Hot;
+        let cloned = store_type.clone();
+        let copied = store_type;
+        assert_eq!(store_type, cloned);
+        assert_eq!(store_type, copied);
+    }
+
+    #[test]
+    fn test_read_operation_stage_debug() {
+        let debug_str = format!("{:?}", ReadOperationStage::HotLogRead);
+        assert!(debug_str.contains("HotLogRead"));
+
+        let debug_str = format!("{:?}", ReadOperationStage::ColdLogRead);
+        assert!(debug_str.contains("ColdLogRead"));
+    }
+
+    #[test]
+    fn test_read_operation_stage_clone_copy() {
+        let stage = ReadOperationStage::HotLogRead;
+        let cloned = stage.clone();
+        let copied = stage;
+        assert_eq!(stage, cloned);
+        assert_eq!(stage, copied);
+    }
+
+    #[test]
+    fn test_rmw_operation_stage_debug() {
+        let debug_str = format!("{:?}", RmwOperationStage::HotLogRmw);
+        assert!(debug_str.contains("HotLogRmw"));
+
+        let debug_str = format!("{:?}", RmwOperationStage::ColdLogRead);
+        assert!(debug_str.contains("ColdLogRead"));
+
+        let debug_str = format!("{:?}", RmwOperationStage::HotLogConditionalInsert);
+        assert!(debug_str.contains("HotLogConditionalInsert"));
+    }
+
+    #[test]
+    fn test_rmw_operation_stage_clone_copy() {
+        let stage = RmwOperationStage::HotLogRmw;
+        let cloned = stage.clone();
+        let copied = stage;
+        assert_eq!(stage, cloned);
+        assert_eq!(stage, copied);
+    }
+
+    #[test]
+    fn test_rmw_operation_stage_all_values() {
+        assert_ne!(RmwOperationStage::HotLogRmw, RmwOperationStage::ColdLogRead);
+        assert_ne!(
+            RmwOperationStage::ColdLogRead,
+            RmwOperationStage::HotLogConditionalInsert
+        );
+        assert_ne!(
+            RmwOperationStage::HotLogRmw,
+            RmwOperationStage::HotLogConditionalInsert
+        );
+    }
+
+    #[test]
+    fn test_index_type_debug() {
+        let debug_str = format!("{:?}", IndexType::MemoryIndex);
+        assert!(debug_str.contains("MemoryIndex"));
+
+        let debug_str = format!("{:?}", IndexType::ColdIndex);
+        assert!(debug_str.contains("ColdIndex"));
+    }
+
+    #[test]
+    fn test_index_type_default() {
+        assert_eq!(IndexType::default(), IndexType::MemoryIndex);
+    }
+
+    #[test]
+    fn test_index_type_clone_copy() {
+        let idx_type = IndexType::ColdIndex;
+        let cloned = idx_type.clone();
+        let copied = idx_type;
+        assert_eq!(idx_type, cloned);
+        assert_eq!(idx_type, copied);
+    }
+
+    #[test]
+    fn test_store_index_new_memory() {
+        let index = StoreIndex::new_memory(1024);
+        assert!(index.is_memory());
+        assert!(!index.is_cold());
+    }
+
+    #[test]
+    fn test_store_index_as_memory() {
+        let index = StoreIndex::new_memory(1024);
+        let mem_idx = index.as_memory();
+        assert!(mem_idx.is_some());
+    }
+
+    #[test]
+    fn test_store_index_memory_as_cold_returns_none() {
+        let index = StoreIndex::new_memory(1024);
+        let cold_idx = index.as_cold();
+        assert!(cold_idx.is_none());
+    }
+
+    #[test]
+    fn test_store_index_find_entry() {
+        let index = StoreIndex::new_memory(1024);
+        let hash = KeyHash::new(12345);
+        let result = index.find_entry(hash);
+        // Should not find anything in empty index
+        assert!(result.entry.is_unused());
+    }
+
+    #[test]
+    fn test_store_index_find_or_create_entry() {
+        let mut index = StoreIndex::new_memory(1024);
+        let hash = KeyHash::new(12345);
+        let _result = index.find_or_create_entry(hash);
+        // Entry should be created
+    }
+
+    #[test]
+    fn test_store_index_garbage_collect() {
+        let mut index = StoreIndex::new_memory(1024);
+        // Should not panic on empty index
+        index.garbage_collect(Address::INVALID);
+    }
+
+    #[test]
+    fn test_f2_checkpoint_state() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Checkpoint phase should be Rest initially
+        assert_eq!(
+            f2.checkpoint.phase.load(Ordering::Relaxed),
+            F2CheckpointPhase::Rest
+        );
+    }
+
+    #[test]
+    fn test_f2_checkpoint_version() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Version should start at 0
+        assert_eq!(f2.checkpoint.version(), 0);
+    }
+
+    #[test]
+    fn test_f2_refresh() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Start session
+        let _session = f2.start_session().unwrap();
+
+        // Refresh should not panic
+        f2.refresh();
+
+        // Stop session
+        f2.stop_session();
+    }
+
+    #[test]
+    fn test_f2_complete_pending() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        // Start session
+        let _session = f2.start_session().unwrap();
+
+        // Complete pending should not panic
+        f2.complete_pending(true);
+
+        // Stop session
+        f2.stop_session();
+    }
+
+    #[test]
+    fn test_f2_multiple_upserts() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let _session = f2.start_session().unwrap();
+
+        // Upsert multiple keys
+        for i in 0..10 {
+            let result = f2.upsert(TestKey(i), TestValue(i * 100));
+            assert!(result.is_ok());
+        }
+
+        f2.stop_session();
+    }
+
+    #[test]
+    fn test_f2_delete_nonexistent() {
+        let config = F2Config::default();
+        let hot_device = NullDisk::new();
+        let cold_device = NullDisk::new();
+        let f2 =
+            F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+        let _session = f2.start_session().unwrap();
+
+        // Delete non-existent key should still succeed
+        let result = f2.delete(&TestKey(999));
+        assert!(result.is_ok());
+
+        f2.stop_session();
+    }
 }

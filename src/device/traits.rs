@@ -161,4 +161,31 @@ mod tests {
         assert_eq!(ctx.size, 1024);
         assert_eq!(ctx.offset, 0);
     }
+
+    #[test]
+    fn test_io_context_debug() {
+        let ctx = IoContext::new(100, 512, 4096);
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("callback_data"));
+        assert!(debug_str.contains("100"));
+        assert!(debug_str.contains("size"));
+        assert!(debug_str.contains("512"));
+        assert!(debug_str.contains("offset"));
+        assert!(debug_str.contains("4096"));
+    }
+
+    #[test]
+    fn test_io_context_various_values() {
+        // Test with zero values
+        let ctx = IoContext::new(0, 0, 0);
+        assert_eq!(ctx.callback_data, 0);
+        assert_eq!(ctx.size, 0);
+        assert_eq!(ctx.offset, 0);
+
+        // Test with max values
+        let ctx = IoContext::new(u64::MAX, u64::MAX, u64::MAX);
+        assert_eq!(ctx.callback_data, u64::MAX);
+        assert_eq!(ctx.size, u64::MAX);
+        assert_eq!(ctx.offset, u64::MAX);
+    }
 }

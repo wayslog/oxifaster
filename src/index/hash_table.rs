@@ -344,4 +344,274 @@ mod tests {
         let mut table = InternalHashTable::new();
         table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
     }
+
+    #[test]
+    fn test_hash_table_default() {
+        let table = InternalHashTable::default();
+        assert!(!table.is_initialized());
+        assert_eq!(table.size(), 0);
+    }
+
+    #[test]
+    fn test_hash_table_bucket_at() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        let _bucket = table.bucket_at(0);
+        let _bucket = table.bucket_at(100);
+        let _bucket = table.bucket_at(1023);
+    }
+
+    #[test]
+    fn test_hash_table_bucket_at_mut() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        let _bucket = table.bucket_at_mut(0);
+        let _bucket = table.bucket_at_mut(100);
+        let _bucket = table.bucket_at_mut(1023);
+    }
+
+    #[test]
+    fn test_hash_table_as_ptr() {
+        let mut table = InternalHashTable::new();
+
+        // Before init, should be null
+        assert!(table.as_ptr().is_null());
+
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // After init, should not be null
+        assert!(!table.as_ptr().is_null());
+    }
+
+    #[test]
+    fn test_hash_table_as_mut_ptr() {
+        let mut table = InternalHashTable::new();
+
+        // Before init, should be null
+        assert!(table.as_mut_ptr().is_null());
+
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // After init, should not be null
+        assert!(!table.as_mut_ptr().is_null());
+    }
+
+    #[test]
+    fn test_hash_table_reinitialize_same_size() {
+        let mut table = InternalHashTable::new();
+
+        table.initialize(1024, CACHE_LINE_BYTES);
+        let ptr1 = table.as_ptr();
+
+        // Re-initialize with same size should clear existing
+        table.initialize(1024, CACHE_LINE_BYTES);
+        let ptr2 = table.as_ptr();
+
+        // Should use the same allocation (cleared)
+        assert_eq!(ptr1, ptr2);
+    }
+
+    #[test]
+    fn test_hash_table_reinitialize_different_size() {
+        let mut table = InternalHashTable::new();
+
+        table.initialize(1024, CACHE_LINE_BYTES);
+        let ptr1 = table.as_ptr();
+
+        // Re-initialize with different size
+        table.initialize(2048, CACHE_LINE_BYTES);
+        let ptr2 = table.as_ptr();
+
+        // Should be a different allocation
+        assert_ne!(ptr1, ptr2);
+        assert_eq!(table.size(), 2048);
+    }
+
+    #[test]
+    fn test_hash_table_checkpoint_operations() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // Start checkpoint
+        let result = table.start_checkpoint();
+        assert!(result.is_ok());
+
+        // Check status is pending
+        let status = table.checkpoint_complete(false);
+        assert_eq!(status, Status::Pending);
+
+        // Complete checkpoint writes
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_checkpoint_write(true);
+        }
+
+        // Now should be complete
+        let status = table.checkpoint_complete(false);
+        assert_eq!(status, Status::Ok);
+    }
+
+    #[test]
+    fn test_hash_table_checkpoint_failure() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        table.start_checkpoint().unwrap();
+
+        // Complete with failures
+        for i in 0..NUM_MERGE_CHUNKS {
+            table.complete_checkpoint_write(i != 0); // First one fails
+        }
+
+        let status = table.checkpoint_complete(false);
+        assert_eq!(status, Status::IoError);
+    }
+
+    #[test]
+    fn test_hash_table_checkpoint_already_in_progress() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // Start first checkpoint
+        let result = table.start_checkpoint();
+        assert!(result.is_ok());
+
+        // Try to start another - should fail
+        let result = table.start_checkpoint();
+        assert!(result.is_err());
+
+        // Complete the first
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_checkpoint_write(true);
+        }
+    }
+
+    #[test]
+    fn test_hash_table_recovery_operations() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // Start recovery
+        let result = table.start_recovery();
+        assert!(result.is_ok());
+
+        // Check status is pending
+        let status = table.recovery_complete(false);
+        assert_eq!(status, Status::Pending);
+
+        // Complete recovery reads
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_recovery_read(true);
+        }
+
+        // Now should be complete
+        let status = table.recovery_complete(false);
+        assert_eq!(status, Status::Ok);
+    }
+
+    #[test]
+    fn test_hash_table_recovery_failure() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        table.start_recovery().unwrap();
+
+        // Complete with failures
+        for i in 0..NUM_MERGE_CHUNKS {
+            table.complete_recovery_read(i != 0); // First one fails
+        }
+
+        let status = table.recovery_complete(false);
+        assert_eq!(status, Status::IoError);
+    }
+
+    #[test]
+    fn test_hash_table_recovery_already_in_progress() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        // Start first recovery
+        let result = table.start_recovery();
+        assert!(result.is_ok());
+
+        // Try to start another - should fail
+        let result = table.start_recovery();
+        assert!(result.is_err());
+
+        // Complete the first
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_recovery_read(true);
+        }
+    }
+
+    #[test]
+    fn test_hash_table_checkpoint_chunk_calculations() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        let chunk_size = table.checkpoint_chunk_size();
+        assert_eq!(chunk_size, 1024 / NUM_MERGE_CHUNKS as u64);
+
+        let offset_0 = table.checkpoint_chunk_offset(0);
+        assert_eq!(offset_0, 0);
+
+        let offset_1 = table.checkpoint_chunk_offset(1);
+        assert_eq!(offset_1, chunk_size * std::mem::size_of::<HashBucket>() as u64);
+
+        let chunk_bytes = table.checkpoint_chunk_bytes();
+        assert_eq!(
+            chunk_bytes,
+            chunk_size * std::mem::size_of::<HashBucket>() as u64
+        );
+    }
+
+    #[test]
+    fn test_hash_table_checkpoint_complete_with_wait() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        table.start_checkpoint().unwrap();
+
+        // Complete all writes first
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_checkpoint_write(true);
+        }
+
+        // Wait should return immediately since already complete
+        let status = table.checkpoint_complete(true);
+        assert_eq!(status, Status::Ok);
+    }
+
+    #[test]
+    fn test_hash_table_recovery_complete_with_wait() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+
+        table.start_recovery().unwrap();
+
+        // Complete all reads first
+        for _ in 0..NUM_MERGE_CHUNKS {
+            table.complete_recovery_read(true);
+        }
+
+        // Wait should return immediately since already complete
+        let status = table.recovery_complete(true);
+        assert_eq!(status, Status::Ok);
+    }
+
+    #[test]
+    fn test_hash_table_drop() {
+        let mut table = InternalHashTable::new();
+        table.initialize(1024, CACHE_LINE_BYTES);
+        // Drop should clean up properly - no crash
+    }
+
+    #[test]
+    fn test_hash_table_uninitialize_when_empty() {
+        let mut table = InternalHashTable::new();
+        // Should not crash
+        table.uninitialize();
+        assert!(!table.is_initialized());
+    }
 }

@@ -470,4 +470,123 @@ mod tests {
         let entries: Vec<_> = iter.collect();
         assert!(entries.is_empty());
     }
+
+    #[test]
+    fn test_iterator_state_values() {
+        assert_eq!(IteratorState::NotStarted, IteratorState::NotStarted);
+        assert_eq!(IteratorState::Active, IteratorState::Active);
+        assert_eq!(IteratorState::Done, IteratorState::Done);
+        assert_eq!(IteratorState::Error, IteratorState::Error);
+        assert_ne!(IteratorState::NotStarted, IteratorState::Done);
+    }
+
+    #[test]
+    fn test_iterator_state_clone_copy() {
+        let state = IteratorState::Active;
+        let cloned = state.clone();
+        let copied = state;
+        assert_eq!(state, cloned);
+        assert_eq!(state, copied);
+    }
+
+    #[test]
+    fn test_iterator_state_debug() {
+        let debug_str = format!("{:?}", IteratorState::NotStarted);
+        assert!(debug_str.contains("NotStarted"));
+    }
+
+    #[test]
+    fn test_iterator_next_address() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIterator::all(delta_log);
+        assert_eq!(iter.next_address(), 0);
+    }
+
+    #[test]
+    fn test_iterator_is_done_states() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+
+        // Initially not done
+        assert!(!iter.is_done());
+
+        // After getting None, should be done
+        let _ = iter.get_next();
+        assert!(iter.is_done());
+    }
+
+    #[test]
+    fn test_iterator_with_custom_range() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let iter = DeltaLogIterator::new(delta_log, 100, 200);
+        assert_eq!(iter.current_address(), 100);
+        assert_eq!(iter.next_address(), 100);
+    }
+
+    #[test]
+    fn test_collect_all_empty() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+        let entries = iter.collect_all().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_collect_by_type_empty() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+        let entries = iter
+            .collect_by_type(DeltaLogEntryType::CheckpointMetadata)
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_find_last_checkpoint_metadata_empty() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+        let result = iter.find_last_checkpoint_metadata().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_iterator_get_next_async_empty() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        let mut iter = DeltaLogIterator::all(delta_log);
+        let result = iter.get_next_async().await.unwrap();
+        assert!(result.is_none());
+        assert!(iter.is_done());
+    }
+
+    #[test]
+    fn test_iterator_with_past_end_address() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        let delta_log = Arc::new(DeltaLog::new(device, config, 0));
+
+        // Create iterator where start >= end
+        let iter = DeltaLogIterator::new(delta_log, 100, 50);
+        assert!(!iter.is_done()); // Initially not done since state is NotStarted
+    }
 }

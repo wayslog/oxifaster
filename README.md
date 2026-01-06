@@ -3,33 +3,35 @@
 [![CI](https://github.com/wayslog/oxifaster/actions/workflows/ci.yml/badge.svg)](https://github.com/wayslog/oxifaster/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/wayslog/oxifaster/graph/badge.svg?token=WUMZDF60BQ)](https://codecov.io/gh/wayslog/oxifaster)
 
-oxifaster 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust 移植版本，提供高性能并发键值存储和日志引擎。
+[中文](README.cn.md) | English
 
-## 特性
+oxifaster is a Rust port of Microsoft's [FASTER](https://github.com/microsoft/FASTER) project, providing a high-performance concurrent key-value store and log engine.
 
-- **高性能**: 支持超过内存容量的大规模数据高效读写
-- **并发安全**: 基于 Epoch 保护机制的无锁并发控制
-- **持久化**: 完整的检查点 (Checkpoint) 和恢复 (Recovery) 支持，含 CPR 协议
-- **混合日志**: HybridLog 架构，热数据内存 + 冷数据磁盘
-- **异步 I/O**: 基于 Tokio 运行时的异步操作支持
-- **Read Cache**: 热点数据内存缓存加速读取，透明集成到读取路径
-- **Log Compaction**: 日志压缩与空间回收，支持自动后台压缩
-- **Index Growth**: 动态哈希表扩容，支持 rehash 回调确保正确性
-- **F2 架构**: 热冷数据分离的两级存储，含完整 Checkpoint/Recovery
-- **Statistics**: 完整的统计收集，集成到所有 CRUD 操作
+## Features
 
-## 快速开始
+- **High Performance**: Efficient read/write operations for large-scale data exceeding memory capacity
+- **Concurrency Safe**: Lock-free concurrent control based on Epoch protection mechanism
+- **Persistence**: Complete Checkpoint and Recovery support with CPR protocol
+- **Hybrid Log**: HybridLog architecture with hot data in memory + cold data on disk
+- **Async I/O**: Async operation support based on Tokio runtime
+- **Read Cache**: Hot data memory cache for accelerated reads, transparently integrated into the read path
+- **Log Compaction**: Log compaction and space reclamation with automatic background compaction support
+- **Index Growth**: Dynamic hash table expansion with rehash callback for correctness
+- **F2 Architecture**: Two-tier storage with hot-cold data separation, including complete Checkpoint/Recovery
+- **Statistics**: Comprehensive statistics collection integrated into all CRUD operations
 
-### 安装
+## Quick Start
 
-在 `Cargo.toml` 中添加依赖:
+### Installation
+
+Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 oxifaster = { path = "oxifaster" }
 ```
 
-### 基本使用
+### Basic Usage
 
 ```rust
 use std::sync::Arc;
@@ -37,38 +39,38 @@ use oxifaster::device::NullDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
 fn main() {
-    // 创建配置
+    // Create configuration
     let config = FasterKvConfig::default();
     
-    // 创建存储设备 (使用 NullDisk 进行内存测试)
+    // Create storage device (using NullDisk for in-memory testing)
     let device = NullDisk::new();
     
-    // 创建存储
+    // Create store
     let store = Arc::new(FasterKv::new(config, device));
     
-    // 启动会话
+    // Start session
     let mut session = store.start_session();
     
-    // 插入数据
+    // Insert data
     session.upsert(42u64, 100u64);
     
-    // 读取数据
+    // Read data
     if let Ok(Some(value)) = session.read(&42u64) {
         println!("Value: {}", value);
     }
     
-    // 删除数据
+    // Delete data
     session.delete(&42u64);
 }
 ```
 
 ---
 
-## 实现状态与开发路线图
+## Implementation Status and Roadmap
 
-本节详细说明 oxifaster 与原始 C++/C# FASTER 项目的功能对比，以及后续开发计划。
+This section details the feature comparison between oxifaster and the original C++/C# FASTER project, as well as future development plans.
 
-### 架构概览
+### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -95,209 +97,181 @@ fn main() {
 
 ---
 
-## 功能对比表 (Rust vs C++ vs C#)
+## Feature Comparison Table (Rust vs C++ vs C#)
 
-### 核心功能
+### Core Features
 
-| 功能模块 | C++ | C# | Rust | 状态 |
-|---------|:---:|:---:|:----:|------|
-| **Address System** | Y | Y | Y | 完成 |
-| **Epoch Protection** | Y | Y | Y | 完成 |
-| **Hash Index** | Y | Y | Y | 完成 |
-| **Hash Bucket** | Y | Y | Y | 完成 |
-| **Overflow Buckets** | Y | Y | Y | 完成 |
-| **Hybrid Log** | Y | Y | Y | 完成 |
-| **Page Allocator** | Y | Y | Y | 完成 |
-| **Record/RecordInfo** | Y | Y | Y | 完成 |
-| **Key/Value Traits** | Y | Y | Y | 完成 |
-| **FasterKV (CRUD)** | Y | Y | Y | 完成 |
-| **Session** | Y | Y | Y | 完成 |
-| **Thread Context** | Y | Y | Y | 完成 |
-| **FasterLog** | Y | Y | Y | 完成 |
+| Module | C++ | C# | Rust | Status |
+|--------|:---:|:---:|:----:|--------|
+| **Address System** | Y | Y | Y | Complete |
+| **Epoch Protection** | Y | Y | Y | Complete |
+| **Hash Index** | Y | Y | Y | Complete |
+| **Hash Bucket** | Y | Y | Y | Complete |
+| **Overflow Buckets** | Y | Y | Y | Complete |
+| **Hybrid Log** | Y | Y | Y | Complete |
+| **Page Allocator** | Y | Y | Y | Complete |
+| **Record/RecordInfo** | Y | Y | Y | Complete |
+| **Key/Value Traits** | Y | Y | Y | Complete |
+| **FasterKV (CRUD)** | Y | Y | Y | Complete |
+| **Session** | Y | Y | Y | Complete |
+| **Thread Context** | Y | Y | Y | Complete |
+| **FasterLog** | Y | Y | Y | Complete |
 
-### 设备层
+### Device Layer
 
-| 功能 | C++ | C# | Rust | 状态 |
-|-----|:---:|:---:|:----:|------|
-| **NullDisk** | Y | Y | Y | 完成 |
-| **FileSystemDisk** | Y | Y | Y | 完成 |
-| **io_uring (Linux)** | Y | - | P | Mock 实现 (API 规范化完成) |
-| **IOCP (Windows)** | Y | Y | N | 未实现 |
-| **Azure Blob Storage** | Y | Y | N | 未实现 |
-| **Tiered Storage** | - | Y | N | 未实现 |
-| **Sharded Storage** | - | Y | N | 未实现 |
+| Feature | C++ | C# | Rust | Status |
+|---------|:---:|:---:|:----:|--------|
+| **NullDisk** | Y | Y | Y | Complete |
+| **FileSystemDisk** | Y | Y | Y | Complete |
+| **io_uring (Linux)** | Y | - | P | Mock implementation (API standardized) |
+| **IOCP (Windows)** | Y | Y | N | Not implemented |
+| **Azure Blob Storage** | Y | Y | N | Not implemented |
+| **Tiered Storage** | - | Y | N | Not implemented |
+| **Sharded Storage** | - | Y | N | Not implemented |
 
-### 持久化与恢复
+### Persistence and Recovery
 
-| 功能 | C++ | C# | Rust | 状态 |
-|-----|:---:|:---:|:----:|------|
-| **Index Checkpoint** | Y | Y | Y | 完成 |
-| **HybridLog Checkpoint** | Y | Y | Y | 完成 |
-| **Full Checkpoint** | Y | Y | Y | 完成 (含 CPR 状态机) |
-| **CPR Protocol** | Y | Y | Y | 完成 (完整状态机集成) |
-| **Snapshot Files** | Y | Y | Y | 完成 (JSON + bincode) |
-| **Session Persistence** | Y | Y | Y | 完成 (GUID + serial_num) |
-| **Incremental Checkpoint** | - | Y | N | 未实现 |
-| **Delta Log** | - | Y | N | 未实现 |
+| Feature | C++ | C# | Rust | Status |
+|---------|:---:|:---:|:----:|--------|
+| **Index Checkpoint** | Y | Y | Y | Complete |
+| **HybridLog Checkpoint** | Y | Y | Y | Complete |
+| **Full Checkpoint** | Y | Y | Y | Complete (with CPR state machine) |
+| **CPR Protocol** | Y | Y | Y | Complete (full state machine integration) |
+| **Snapshot Files** | Y | Y | Y | Complete (JSON + bincode) |
+| **Session Persistence** | Y | Y | Y | Complete (GUID + serial_num) |
+| **Incremental Checkpoint** | - | Y | N | Not implemented |
+| **Delta Log** | - | Y | N | Not implemented |
 
-### 性能优化
+### Performance Optimization
 
-| 功能 | C++ | C# | Rust | 状态 |
-|-----|:---:|:---:|:----:|------|
-| **Read Cache** | Y | - | Y | 完成 (集成到读取路径) |
-| **Cache Eviction** | Y | - | Y | 完成 (LRU 淘汰策略) |
-| **Log Compaction** | Y | Y | Y | 完成 |
-| **Auto Compaction** | Y | Y | Y | 完成 (后台线程) |
-| **Concurrent Compaction** | Y | Y | Y | 完成 (多线程页面分发) |
-| **Index Growth** | Y | Y | Y | 完成 (含 rehash 回调) |
-| **Log Scan Iterator** | Y | Y | Y | 完成 (支持 StorageDevice) |
+| Feature | C++ | C# | Rust | Status |
+|---------|:---:|:---:|:----:|--------|
+| **Read Cache** | Y | - | Y | Complete (integrated into read path) |
+| **Cache Eviction** | Y | - | Y | Complete (LRU eviction policy) |
+| **Log Compaction** | Y | Y | Y | Complete |
+| **Auto Compaction** | Y | Y | Y | Complete (background thread) |
+| **Concurrent Compaction** | Y | Y | Y | Complete (multi-threaded page distribution) |
+| **Index Growth** | Y | Y | Y | Complete (with rehash callback) |
+| **Log Scan Iterator** | Y | Y | Y | Complete (supports StorageDevice) |
 
-### 高级功能
+### Advanced Features
 
-| 功能 | C++ | C# | Rust | 状态 |
-|-----|:---:|:---:|:----:|------|
-| **F2 Architecture** | Y | - | Y | 完成 (含 Checkpoint/Recovery) |
-| **Cold Index** | Y | - | Y | 完成 (磁盘二级索引) |
-| **Checkpoint Locks** | Y | Y | Y | 完成 (CPR 协议锁保护) |
-| **Statistics** | Y | Y | Y | 完成 (集成到所有操作) |
-| **Variable Length Records** | - | Y | N | 未实现 |
-| **Async API** | Y | Y | P | 部分支持 |
+| Feature | C++ | C# | Rust | Status |
+|---------|:---:|:---:|:----:|--------|
+| **F2 Architecture** | Y | - | Y | Complete (with Checkpoint/Recovery) |
+| **Cold Index** | Y | - | Y | Complete (disk-based secondary index) |
+| **Checkpoint Locks** | Y | Y | Y | Complete (CPR protocol lock protection) |
+| **Statistics** | Y | Y | Y | Complete (integrated into all operations) |
+| **Variable Length Records** | - | Y | N | Not implemented |
+| **Async API** | Y | Y | P | Partial support |
 
-### C# 独有功能
+### C# Exclusive Features
 
-| 功能 | Rust 计划 |
-|-----|---------|
-| **Remote Client/Server** | P3 - 可选 |
+| Feature | Rust Plan |
+|---------|-----------|
+| **Remote Client/Server** | P3 - Optional |
 | **Locking Context** | P2 |
-| **Generic Allocator** | P3 - 可选 |
-| **Blittable/VarLen 分配器** | P2 |
+| **Generic Allocator** | P3 - Optional |
+| **Blittable/VarLen Allocator** | P2 |
 
-**图例**: Y=完成 | P=部分实现 | N=未实现
+**Legend**: Y=Complete | P=Partial | N=Not implemented
 
 ---
 
-### 已完成功能 (Phase 1 - Core)
+### Completed Features (Phase 1 - Core)
 
-| 模块 | 功能 | 文件 | 状态 |
-|------|------|------|:----:|
-| **address** | 48位逻辑地址系统 | `src/address.rs` | :white_check_mark: |
-| **epoch** | LightEpoch 并发保护框架 | `src/epoch/light_epoch.rs` | :white_check_mark: |
-| **index** | MemHashIndex 内存哈希索引 | `src/index/mem_index.rs` | :white_check_mark: |
-| **index** | HashBucket 哈希桶 | `src/index/hash_bucket.rs` | :white_check_mark: |
-| **index** | HashTable 哈希表 | `src/index/hash_table.rs` | :white_check_mark: |
-| **index** | GrowState 索引扩展状态 | `src/index/grow.rs` | :white_check_mark: |
-| **allocator** | PersistentMemoryMalloc 混合日志 | `src/allocator/hybrid_log.rs` | :white_check_mark: |
-| **allocator** | PageAllocator 页面分配器 | `src/allocator/page_allocator.rs` | :white_check_mark: |
+| Module | Feature | File | Status |
+|--------|---------|------|:------:|
+| **address** | 48-bit logical address system | `src/address.rs` | :white_check_mark: |
+| **epoch** | LightEpoch concurrent protection framework | `src/epoch/light_epoch.rs` | :white_check_mark: |
+| **index** | MemHashIndex in-memory hash index | `src/index/mem_index.rs` | :white_check_mark: |
+| **index** | HashBucket hash bucket | `src/index/hash_bucket.rs` | :white_check_mark: |
+| **index** | HashTable hash table | `src/index/hash_table.rs` | :white_check_mark: |
+| **index** | GrowState index extension state | `src/index/grow.rs` | :white_check_mark: |
+| **allocator** | PersistentMemoryMalloc hybrid log | `src/allocator/hybrid_log.rs` | :white_check_mark: |
+| **allocator** | PageAllocator page allocator | `src/allocator/page_allocator.rs` | :white_check_mark: |
 | **device** | StorageDevice trait | `src/device/traits.rs` | :white_check_mark: |
-| **device** | NullDisk 内存设备 | `src/device/null_device.rs` | :white_check_mark: |
-| **device** | FileSystemDisk 文件设备 | `src/device/file_device.rs` | :white_check_mark: |
-| **device** | IoUringDevice Mock 实现 | `src/device/io_uring.rs` | :construction: |
-| **store** | FasterKV 核心 (Read/Upsert/RMW/Delete) | `src/store/faster_kv.rs` | :white_check_mark: |
-| **store** | Session 会话管理 (含 GUID + serial_num) | `src/store/session.rs` | :white_check_mark: |
-| **store** | ThreadContext 线程上下文 | `src/store/contexts.rs` | :white_check_mark: |
-| **store** | StateTransitions CPR 状态机 | `src/store/state_transitions.rs` | :white_check_mark: |
-| **record** | Record/RecordInfo 记录结构 | `src/record.rs` | :white_check_mark: |
-| **record** | Key/Value trait 泛型支持 | `src/record.rs` | :white_check_mark: |
-| **log** | FasterLog 基础日志 | `src/log/faster_log.rs` | :white_check_mark: |
-| **cache** | ReadCache 读缓存 | `src/cache/read_cache.rs` | :white_check_mark: |
-| **cache** | ReadCacheConfig 配置 | `src/cache/config.rs` | :white_check_mark: |
-| **compaction** | Compactor 压缩器 | `src/compaction/compact.rs` | :white_check_mark: |
+| **device** | NullDisk memory device | `src/device/null_device.rs` | :white_check_mark: |
+| **device** | FileSystemDisk file device | `src/device/file_device.rs` | :white_check_mark: |
+| **device** | IoUringDevice Mock implementation | `src/device/io_uring.rs` | :construction: |
+| **store** | FasterKV core (Read/Upsert/RMW/Delete) | `src/store/faster_kv.rs` | :white_check_mark: |
+| **store** | Session management (with GUID + serial_num) | `src/store/session.rs` | :white_check_mark: |
+| **store** | ThreadContext thread context | `src/store/contexts.rs` | :white_check_mark: |
+| **store** | StateTransitions CPR state machine | `src/store/state_transitions.rs` | :white_check_mark: |
+| **record** | Record/RecordInfo record structure | `src/record.rs` | :white_check_mark: |
+| **record** | Key/Value trait generic support | `src/record.rs` | :white_check_mark: |
+| **log** | FasterLog basic log | `src/log/faster_log.rs` | :white_check_mark: |
+| **cache** | ReadCache read cache | `src/cache/read_cache.rs` | :white_check_mark: |
+| **cache** | ReadCacheConfig configuration | `src/cache/config.rs` | :white_check_mark: |
+| **compaction** | Compactor compaction engine | `src/compaction/compact.rs` | :white_check_mark: |
 | **compaction** | AutoCompactionWorker | `src/compaction/auto_compact.rs` | :white_check_mark: |
-| **compaction** | CompactionConfig 配置 | `src/compaction/compact.rs` | :white_check_mark: |
-| **f2** | F2Kv 热冷存储 | `src/f2/store.rs` | :white_check_mark: |
-| **f2** | F2Config 配置 | `src/f2/config.rs` | :white_check_mark: |
+| **compaction** | CompactionConfig configuration | `src/compaction/compact.rs` | :white_check_mark: |
+| **f2** | F2Kv hot-cold storage | `src/f2/store.rs` | :white_check_mark: |
+| **f2** | F2Config configuration | `src/f2/config.rs` | :white_check_mark: |
 | **f2** | F2 Checkpoint/Recovery | `src/f2/store.rs` | :white_check_mark: |
-| **scan** | LogScanIterator 日志扫描 | `src/scan/log_iterator.rs` | :white_check_mark: |
+| **scan** | LogScanIterator log scan | `src/scan/log_iterator.rs` | :white_check_mark: |
 | **scan** | DoubleBufferedLogIterator | `src/scan/log_iterator.rs` | :white_check_mark: |
-| **stats** | StatsCollector 统计收集 | `src/stats/collector.rs` | :white_check_mark: |
-| **checkpoint** | Checkpoint 状态结构 | `src/checkpoint/state.rs` | :white_check_mark: |
-| **checkpoint** | Recovery 恢复结构 | `src/checkpoint/recovery.rs` | :white_check_mark: |
-| **checkpoint** | Serialization 序列化 | `src/checkpoint/serialization.rs` | :white_check_mark: |
-| **checkpoint** | Checkpoint Locks CPR 锁 | `src/checkpoint/locks.rs` | :white_check_mark: |
-| **index** | Cold Index 磁盘冷索引 | `src/index/cold_index.rs` | :white_check_mark: |
+| **stats** | StatsCollector statistics collector | `src/stats/collector.rs` | :white_check_mark: |
+| **checkpoint** | Checkpoint state structure | `src/checkpoint/state.rs` | :white_check_mark: |
+| **checkpoint** | Recovery structure | `src/checkpoint/recovery.rs` | :white_check_mark: |
+| **checkpoint** | Serialization | `src/checkpoint/serialization.rs` | :white_check_mark: |
+| **checkpoint** | Checkpoint Locks CPR locks | `src/checkpoint/locks.rs` | :white_check_mark: |
+| **index** | Cold Index disk cold index | `src/index/cold_index.rs` | :white_check_mark: |
 | **compaction** | Concurrent Compaction | `src/compaction/concurrent.rs` | :white_check_mark: |
 
-**图例**: :white_check_mark: 完成 | :construction: 部分完成 | :x: 未实现
+**Legend**: :white_check_mark: Complete | :construction: Partial | :x: Not implemented
 
 ---
 
-### 开发路线图 (2026)
+### Phase 2: Persistence and Recovery (Durability) - P0 :white_check_mark: Complete
 
-```mermaid
-gantt
-    title oxifaster 开发路线图
-    dateFormat YYYY-MM-DD
-    section Phase2_Durability_DONE
-        Checkpoint_Complete    :done, p2a, 2026-01-04, 1d
-        Recovery_Complete      :done, p2b, 2026-01-04, 1d
-        CPR_Protocol           :done, p2c, 2026-01-04, 1d
-        Session_Persistence    :done, p2d, 2026-01-04, 1d
-    section Phase3_Performance_DONE
-        Read_Cache_Complete    :done, p3a, 2026-01-05, 1d
-        Auto_Compaction        :done, p3b, 2026-01-05, 1d
-        Concurrent_Compaction  :done, p3b2, 2026-01-05, 1d
-        Index_Growth_Impl      :done, p3c, 2026-01-05, 1d
-        Log_Scan_Complete      :done, p3d, 2026-01-05, 1d
-        Statistics_Integration :done, p3e, 2026-01-05, 1d
-    section Phase4_Advanced_DONE
-        F2_Complete            :done, p4a, 2026-01-05, 1d
-        F2_Checkpoint_Recovery :done, p4a2, 2026-01-05, 1d
-        Cold_Index             :done, p4b, 2026-01-05, 1d
-        Checkpoint_Locks       :done, p4c, 2026-01-05, 1d
-    section Phase5_Platform
-        io_uring_impl          :p5a, 2026-01-10, 10d
-        Azure_Storage          :p5b, after p5a, 14d
-```
-
-### Phase 2: 持久化与恢复 (Durability) - P0 :white_check_mark: 已完成
-
-| 功能 | 描述 | 文件 | 状态 |
-|------|------|------|:----:|
-| **Checkpoint 元数据序列化** | Index + HybridLog 元数据持久化 | `checkpoint/serialization.rs` | :white_check_mark: |
-| **Index Checkpoint** | 哈希索引检查点写入 | `checkpoint/state.rs` | :white_check_mark: |
-| **HybridLog Checkpoint** | 混合日志检查点写入 | `checkpoint/state.rs` | :white_check_mark: |
-| **Recovery 完整实现** | 从检查点恢复完整状态 (含 RecoveryState) | `checkpoint/recovery.rs` | :white_check_mark: |
-| **CPR 协议** | Concurrent Prefix Recovery 完整状态机 | `store/state_transitions.rs` | :white_check_mark: |
-| **Session 持久化** | GUID + serial_num 保存与恢复 | `store/session.rs` | :white_check_mark: |
-| **Snapshot 文件格式** | 快照文件读写 (JSON + bincode) | `checkpoint/serialization.rs` | :white_check_mark: |
+| Feature | Description | File | Status |
+|---------|-------------|------|:------:|
+| **Checkpoint Metadata Serialization** | Index + HybridLog metadata persistence | `checkpoint/serialization.rs` | :white_check_mark: |
+| **Index Checkpoint** | Hash index checkpoint write | `checkpoint/state.rs` | :white_check_mark: |
+| **HybridLog Checkpoint** | Hybrid log checkpoint write | `checkpoint/state.rs` | :white_check_mark: |
+| **Recovery Full Implementation** | Restore complete state from checkpoint (with RecoveryState) | `checkpoint/recovery.rs` | :white_check_mark: |
+| **CPR Protocol** | Concurrent Prefix Recovery full state machine | `store/state_transitions.rs` | :white_check_mark: |
+| **Session Persistence** | GUID + serial_num save and restore | `store/session.rs` | :white_check_mark: |
+| **Snapshot File Format** | Snapshot file read/write (JSON + bincode) | `checkpoint/serialization.rs` | :white_check_mark: |
 
 ```rust
-// 已实现 API
-let token = store.checkpoint(checkpoint_dir)?;      // 完整 checkpoint (含 CPR 状态机)
-let store = FasterKv::recover(dir, token, config, device)?;  // 恢复 (含 session 状态)
+// Implemented API
+let token = store.checkpoint(checkpoint_dir)?;      // Full checkpoint (with CPR state machine)
+let store = FasterKv::recover(dir, token, config, device)?;  // Recovery (with session state)
 
-// Session 持久化
-let states = store.get_recovered_sessions();        // 获取恢复的 session 状态
-let session = store.continue_session(state);        // 从状态恢复 session
+// Session persistence
+let states = store.get_recovered_sessions();        // Get recovered session states
+let session = store.continue_session(state);        // Restore session from state
 ```
 
-### Phase 3: 性能优化 (Performance) - P1 :white_check_mark: 已完成
+### Phase 3: Performance Optimization - P1 :white_check_mark: Complete
 
-| 功能 | 描述 | 文件 | 状态 |
-|------|------|------|:----:|
-| **Read Cache 完整集成** | 热点数据内存缓存，集成到读取路径 | `cache/read_cache.rs` | :white_check_mark: |
-| **Cache Eviction** | LRU-like 缓存淘汰策略 | `cache/read_cache.rs` | :white_check_mark: |
-| **Auto Compaction** | 自动后台压缩线程 | `compaction/auto_compact.rs` | :white_check_mark: |
-| **Concurrent Compaction** | 多线程并发压缩 | `compaction/concurrent.rs` | :white_check_mark: |
-| **Index Growth** | 动态哈希表扩容 (含 rehash 回调) | `index/grow.rs`, `index/mem_index.rs` | :white_check_mark: |
-| **Log Scan Iterator** | 日志扫描迭代器 (支持 StorageDevice) | `scan/log_iterator.rs` | :white_check_mark: |
-| **Statistics 集成** | 统计收集器集成到所有操作 | `stats/collector.rs` | :white_check_mark: |
+| Feature | Description | File | Status |
+|---------|-------------|------|:------:|
+| **Read Cache Full Integration** | Hot data memory cache integrated into read path | `cache/read_cache.rs` | :white_check_mark: |
+| **Cache Eviction** | LRU-like cache eviction policy | `cache/read_cache.rs` | :white_check_mark: |
+| **Auto Compaction** | Automatic background compaction thread | `compaction/auto_compact.rs` | :white_check_mark: |
+| **Concurrent Compaction** | Multi-threaded concurrent compaction | `compaction/concurrent.rs` | :white_check_mark: |
+| **Index Growth** | Dynamic hash table expansion (with rehash callback) | `index/grow.rs`, `index/mem_index.rs` | :white_check_mark: |
+| **Log Scan Iterator** | Log scan iterator (supports StorageDevice) | `scan/log_iterator.rs` | :white_check_mark: |
+| **Statistics Integration** | Statistics collector integrated into all operations | `stats/collector.rs` | :white_check_mark: |
 
 ```rust
-// 已实现 API
-// Read Cache 自动集成到读取路径
-let value = session.read(&key)?;  // 自动检查缓存
+// Implemented API
+// Read Cache automatically integrated into read path
+let value = session.read(&key)?;  // Automatically checks cache
 
 // Compaction
 store.log_compact_until(until_address)?;
 
-// Auto Compaction (后台线程)
+// Auto Compaction (background thread)
 let worker = AutoCompactionWorker::new(config);
 worker.start(Arc::downgrade(&store));
 
-// Index Growth (含 rehash 回调)
+// Index Growth (with rehash callback)
 index.grow_with_rehash(|addr| {
-    // 读取 key 并计算 hash
+    // Read key and compute hash
     Some(compute_hash(read_key(addr)))
 })?;
 
@@ -306,18 +280,18 @@ let stats = store.stats();
 println!("Read ops: {}", stats.operations.reads);
 ```
 
-### Phase 4: 高级功能 (Advanced) - P2 :white_check_mark: 已完成
+### Phase 4: Advanced Features - P2 :white_check_mark: Complete
 
-| 功能 | 描述 | 文件 | 状态 |
-|------|------|------|:----:|
-| **F2 Hot-Cold 完整实现** | 热冷数据分离 | `f2/store.rs` | :white_check_mark: |
-| **F2 Checkpoint/Recovery** | 热冷存储检查点与恢复 | `f2/store.rs`, `f2/state.rs` | :white_check_mark: |
-| **F2 后台迁移** | 自动数据迁移线程 | `f2/store.rs` | :white_check_mark: |
-| **Cold Index** | 磁盘上的二级哈希索引 | `index/cold_index.rs` | :white_check_mark: |
-| **Checkpoint Locks** | CPR 协议期间的锁保护 | `checkpoint/locks.rs` | :white_check_mark: |
+| Feature | Description | File | Status |
+|---------|-------------|------|:------:|
+| **F2 Hot-Cold Full Implementation** | Hot-cold data separation | `f2/store.rs` | :white_check_mark: |
+| **F2 Checkpoint/Recovery** | Hot-cold storage checkpoint and recovery | `f2/store.rs`, `f2/state.rs` | :white_check_mark: |
+| **F2 Background Migration** | Automatic data migration thread | `f2/store.rs` | :white_check_mark: |
+| **Cold Index** | Disk-based secondary hash index | `index/cold_index.rs` | :white_check_mark: |
+| **Checkpoint Locks** | Lock protection during CPR protocol | `checkpoint/locks.rs` | :white_check_mark: |
 
 ```rust
-// 已实现 API: F2 热冷架构
+// Implemented API: F2 Hot-Cold Architecture
 let f2_store = F2Kv::new(config, hot_device, cold_device);
 
 // F2 Checkpoint
@@ -326,7 +300,7 @@ let token = f2_store.checkpoint(checkpoint_dir)?;
 // F2 Recovery
 let version = f2_store.recover(checkpoint_dir, token)?;
 
-// Cold Index (磁盘二级索引)
+// Cold Index (disk secondary index)
 use oxifaster::index::{ColdIndex, ColdIndexConfig};
 let cold_config = ColdIndexConfig::new(table_size, in_mem_size, mutable_fraction);
 let mut cold_index = ColdIndex::new(cold_config);
@@ -334,115 +308,115 @@ cold_index.initialize()?;
 cold_index.find_entry(hash);
 cold_index.update_entry(hash, new_address);
 
-// Checkpoint Locks (CPR 协议保护)
+// Checkpoint Locks (CPR protocol protection)
 use oxifaster::checkpoint::{CheckpointLocks, CheckpointLockGuard};
 let locks = CheckpointLocks::with_size(1024);
 let mut guard = CheckpointLockGuard::new(&locks, key_hash);
-guard.try_lock_old();  // 锁定旧版本记录
-// ... 执行操作 ...
-// guard 自动释放锁
+guard.try_lock_old();  // Lock old version record
+// ... perform operations ...
+// guard automatically releases lock
 
-// Concurrent Compaction (多线程压缩)
+// Concurrent Compaction (multi-threaded compaction)
 use oxifaster::compaction::{ConcurrentCompactor, ConcurrentCompactionConfig};
-let compactor = ConcurrentCompactor::new(ConcurrentCompactionConfig::new(4)); // 4 线程
+let compactor = ConcurrentCompactor::new(ConcurrentCompactionConfig::new(4)); // 4 threads
 let result = compactor.compact_range(scan_range, |chunk| {
-    // 处理每个页面块
+    // Process each page chunk
     process_chunk(chunk)
 });
 ```
 
-### Phase 5: 平台与生态 (Platform) - P3
+### Phase 5: Platform and Ecosystem - P3
 
-| 功能 | 描述 | 文件 | 参考 |
-|------|------|------|------|
-| **io_uring 完整实现** | Linux 高性能异步 I/O | `device/io_uring.rs` | `file_linux.h` |
-| **Azure Blob Storage** | Azure 存储后端 | `device/azure.rs` | C# `Devices.cs` |
-| **Statistics 完善** | 性能指标收集与报告 | `stats/collector.rs` | `faster.h` |
-| **TOML 配置** | 配置文件支持 | `config.rs` | - |
+| Feature | Description | File | Reference |
+|---------|-------------|------|-----------|
+| **io_uring Full Implementation** | Linux high-performance async I/O | `device/io_uring.rs` | `file_linux.h` |
+| **Azure Blob Storage** | Azure storage backend | `device/azure.rs` | C# `Devices.cs` |
+| **Statistics Enhancement** | Performance metrics collection and reporting | `stats/collector.rs` | `faster.h` |
+| **TOML Configuration** | Configuration file support | `config.rs` | - |
 
 ```rust
-// 目标 API: io_uring
+// Target API: io_uring
 let device = IoUringDevice::new(path)?;
 
-// 目标 API: Azure
+// Target API: Azure
 let device = AzureBlobDevice::new(connection_string, container)?;
 ```
 
 ---
 
-### 预估工期
+### Estimated Timeline
 
-| Phase | 描述 | 工作量 | 累计 | 状态 |
-|-------|------|:-----:|:----:|:----:|
-| Phase 2 | 持久化与恢复 | 45天 | 45天 | :white_check_mark: 完成 |
-| Phase 3 | 性能优化 | 32天 | 77天 | :white_check_mark: 完成 |
-| Phase 4 | 高级功能 | 29天 | 106天 | :white_check_mark: 完成 |
-| Phase 5 | 平台与生态 | 31天 | 137天 | 待开始 |
+| Phase | Description | Effort | Cumulative | Status |
+|-------|-------------|:------:|:----------:|:------:|
+| Phase 2 | Persistence and Recovery | 45 days | 45 days | :white_check_mark: Complete |
+| Phase 3 | Performance Optimization | 32 days | 77 days | :white_check_mark: Complete |
+| Phase 4 | Advanced Features | 29 days | 106 days | :white_check_mark: Complete |
+| Phase 5 | Platform and Ecosystem | 31 days | 137 days | Pending |
 
-**剩余约 31 工作日 (约 1.5 个月)**
-
----
-
-### 与 C++/C# FASTER 的主要差异
-
-| 方面 | C++ FASTER | C# FASTER | oxifaster |
-|------|-----------|-----------|-----------|
-| **内存管理** | 手动管理 + RAII | GC 托管 | Rust 所有权系统 |
-| **并发模型** | std::atomic | Interlocked | std::sync::atomic |
-| **异步运行时** | 回调函数 | async/await | Tokio async/await |
-| **泛型系统** | C++ 模板 | .NET 泛型 | Rust 泛型 + Trait |
-| **错误处理** | 返回码/异常 | Exception | Result<T, E> |
-| **缓存对齐** | 编译器宏 | StructLayout | `#[repr(align(64))]` |
-| **跨平台** | 条件编译 | .NET Runtime | cfg 属性 |
+**Remaining: ~31 working days (~1.5 months)**
 
 ---
 
-## 模块结构
+### Key Differences from C++/C# FASTER
+
+| Aspect | C++ FASTER | C# FASTER | oxifaster |
+|--------|-----------|-----------|-----------|
+| **Memory Management** | Manual + RAII | GC Managed | Rust ownership system |
+| **Concurrency Model** | std::atomic | Interlocked | std::sync::atomic |
+| **Async Runtime** | Callbacks | async/await | Tokio async/await |
+| **Generic System** | C++ templates | .NET generics | Rust generics + Traits |
+| **Error Handling** | Return codes/Exceptions | Exception | Result<T, E> |
+| **Cache Alignment** | Compiler macros | StructLayout | `#[repr(align(64))]` |
+| **Cross-platform** | Conditional compilation | .NET Runtime | cfg attributes |
+
+---
+
+## Module Structure
 
 ```
 oxifaster/
 ├── src/
-│   ├── lib.rs              # 库入口
-│   ├── address.rs          # 地址系统 (Address, AtomicAddress)
-│   ├── record.rs           # 记录结构 (RecordInfo, Record, Key, Value)
-│   ├── status.rs           # 状态码 (Status, OperationStatus)
-│   ├── utility.rs          # 工具函数
+│   ├── lib.rs              # Library entry
+│   ├── address.rs          # Address system (Address, AtomicAddress)
+│   ├── record.rs           # Record structure (RecordInfo, Record, Key, Value)
+│   ├── status.rs           # Status codes (Status, OperationStatus)
+│   ├── utility.rs          # Utility functions
 │   │
-│   ├── epoch/              # Epoch 保护机制
+│   ├── epoch/              # Epoch protection mechanism
 │   │   ├── mod.rs
 │   │   └── light_epoch.rs
 │   │
-│   ├── index/              # 哈希索引
+│   ├── index/              # Hash index
 │   │   ├── mod.rs
 │   │   ├── hash_bucket.rs
 │   │   ├── hash_table.rs
 │   │   ├── mem_index.rs
-│   │   ├── grow.rs         # 索引扩展
-│   │   └── cold_index.rs   # 磁盘冷索引
+│   │   ├── grow.rs         # Index growth
+│   │   └── cold_index.rs   # Disk cold index
 │   │
-│   ├── allocator/          # 内存分配器
+│   ├── allocator/          # Memory allocator
 │   │   ├── mod.rs
 │   │   ├── page_allocator.rs
 │   │   └── hybrid_log.rs
 │   │
-│   ├── device/             # 存储设备
+│   ├── device/             # Storage devices
 │   │   ├── mod.rs
 │   │   ├── traits.rs
 │   │   ├── file_device.rs
 │   │   ├── null_device.rs
 │   │   └── io_uring.rs     # Linux io_uring
 │   │
-│   ├── store/              # FasterKV 存储
+│   ├── store/              # FasterKV store
 │   │   ├── mod.rs
 │   │   ├── faster_kv.rs
 │   │   ├── session.rs
 │   │   ├── contexts.rs
 │   │   └── state_transitions.rs
 │   │
-│   ├── checkpoint/         # 检查点和恢复
+│   ├── checkpoint/         # Checkpoint and recovery
 │   │   ├── mod.rs
 │   │   ├── state.rs
-│   │   ├── locks.rs        # CPR 检查点锁
+│   │   ├── locks.rs        # CPR checkpoint locks
 │   │   ├── recovery.rs
 │   │   └── serialization.rs
 │   │
@@ -457,132 +431,152 @@ oxifaster/
 │   │   ├── record_info.rs
 │   │   └── stats.rs
 │   │
-│   ├── compaction/         # 日志压缩
+│   ├── compaction/         # Log compaction
 │   │   ├── mod.rs
 │   │   ├── compact.rs
-│   │   ├── concurrent.rs    # 并发压缩
-│   │   ├── auto_compact.rs  # 自动压缩后台线程
+│   │   ├── concurrent.rs    # Concurrent compaction
+│   │   ├── auto_compact.rs  # Auto compaction background thread
 │   │   └── contexts.rs
 │   │
-│   ├── f2/                 # F2 热冷架构
+│   ├── f2/                 # F2 hot-cold architecture
 │   │   ├── mod.rs
 │   │   ├── config.rs
 │   │   ├── store.rs
 │   │   └── state.rs
 │   │
-│   ├── scan/               # 日志扫描
+│   ├── scan/               # Log scanning
 │   │   ├── mod.rs
 │   │   └── log_iterator.rs
 │   │
-│   └── stats/              # 统计收集
+│   └── stats/              # Statistics collection
 │       ├── mod.rs
 │       ├── collector.rs
 │       ├── metrics.rs
 │       └── reporter.rs
 │
-├── examples/               # 示例代码
+├── examples/               # Example code
+│   ├── async_operations.rs
 │   ├── basic_kv.rs
+│   ├── cold_index.rs
+│   ├── compaction.rs
 │   ├── concurrent_access.rs
 │   ├── custom_types.rs
 │   ├── epoch_protection.rs
-│   └── faster_log.rs
+│   ├── f2_hot_cold.rs
+│   ├── faster_log.rs
+│   ├── index_growth.rs
+│   ├── log_scan.rs
+│   ├── read_cache.rs
+│   ├── statistics.rs
+│   └── variable_length.rs
 │
 ├── benches/
-│   └── ycsb.rs             # YCSB 基准测试
+│   └── ycsb.rs             # YCSB benchmark
 │
 └── tests/
-    ├── basic_ops.rs        # 基本操作测试
-    ├── concurrent.rs       # 并发测试
-    └── recovery.rs         # 恢复测试
+    ├── async_session.rs    # Async session tests
+    ├── basic_ops.rs        # Basic operations tests
+    ├── checkpoint_locks.rs # Checkpoint locks tests
+    ├── checkpoint.rs       # Checkpoint tests
+    ├── cold_index.rs       # Cold index tests
+    ├── compaction.rs       # Compaction tests
+    ├── f2.rs               # F2 tests
+    ├── incremental_checkpoint.rs # Incremental checkpoint tests
+    ├── index_growth.rs     # Index growth tests
+    ├── log_scan.rs         # Log scan tests
+    ├── read_cache.rs       # Read cache tests
+    ├── recovery.rs         # Recovery tests
+    ├── statistics.rs       # Statistics tests
+    └── varlen.rs           # Variable length tests
 ```
 
 ---
 
-## 核心概念
+## Core Concepts
 
-### Address (地址)
+### Address
 
-48 位逻辑地址，用于标识混合日志中的记录位置:
-- 25 位页内偏移 (32 MB 每页)
-- 23 位页号 (~800 万页)
+48-bit logical address used to identify record positions in the hybrid log:
+- 25-bit page offset (32 MB per page)
+- 23-bit page number (~8 million pages)
 
 ### Epoch Protection
 
-轻量级的 Epoch 保护机制，用于:
-- 安全的内存回收
-- 无锁并发控制
-- 延迟操作执行
+Lightweight epoch protection mechanism for:
+- Safe memory reclamation
+- Lock-free concurrent control
+- Delayed operation execution
 
 ### Hybrid Log
 
-混合日志分配器，管理内存和磁盘存储:
-- **可变区域**: 最新的页面，支持就地更新
-- **只读区域**: 内存中的旧页面
-- **磁盘区域**: 冷数据
+Hybrid log allocator managing memory and disk storage:
+- **Mutable Region**: Latest pages supporting in-place updates
+- **Read-Only Region**: Older pages in memory
+- **Disk Region**: Cold data
 
 ### Hash Index
 
-高性能内存哈希索引:
-- 缓存行对齐的哈希桶 (64 字节)
-- 14 位标签用于快速比较
-- 支持溢出桶
-- 动态扩容支持
+High-performance in-memory hash index:
+- Cache-line aligned hash buckets (64 bytes)
+- 14-bit tags for fast comparison
+- Overflow bucket support
+- Dynamic expansion support
 
 ### Read Cache
 
-热点数据缓存:
-- 内存中存储频繁读取的记录
-- LRU-like 淘汰策略
-- 透明集成到读取路径
+Hot data cache:
+- In-memory storage for frequently read records
+- LRU-like eviction policy
+- Transparently integrated into read path
 
 ### Log Compaction
 
-空间回收机制:
-- 扫描旧记录区域
-- 保留最新版本记录
-- 释放已过期空间
+Space reclamation mechanism:
+- Scan old record regions
+- Retain latest version records
+- Release expired space
 
 ---
 
-## API 参考
+## API Reference
 
 ### FasterKv
 
-主要的 KV 存储类:
+Main KV store class:
 
 ```rust
 use std::sync::Arc;
 use oxifaster::device::NullDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
-// 创建存储
+// Create store
 let config = FasterKvConfig::default();
 let device = NullDisk::new();
 let store = Arc::new(FasterKv::new(config, device));
 
-// 启动会话
+// Start session
 let mut session = store.start_session();
 
-// 基本操作
-session.upsert(key, value);                    // 插入/更新
-let value = session.read(&key)?;               // 读取
-session.delete(&key);                          // 删除
-session.rmw(key, |v| { *v += 1; true });       // 读-改-写
+// Basic operations
+session.upsert(key, value);                    // Insert/Update
+let value = session.read(&key)?;               // Read
+session.delete(&key);                          // Delete
+session.rmw(key, |v| { *v += 1; true });       // Read-Modify-Write
 
-// Checkpoint 和 Recovery (Phase 2 已完成)
-let token = store.checkpoint(checkpoint_dir)?; // 创建检查点
-let recovered = FasterKv::recover(            // 从检查点恢复
+// Checkpoint and Recovery (Phase 2 complete)
+let token = store.checkpoint(checkpoint_dir)?; // Create checkpoint
+let recovered = FasterKv::recover(            // Recover from checkpoint
     checkpoint_dir, token, config, device
 )?;
 
-// Session 持久化
-let states = store.get_recovered_sessions();   // 获取恢复的 session 状态
-let session = store.continue_session(state);   // 从保存的状态恢复 session
+// Session persistence
+let states = store.get_recovered_sessions();   // Get recovered session states
+let session = store.continue_session(state);   // Restore session from saved state
 ```
 
 ### FasterKv with Read Cache
 
-启用读缓存:
+Enable read cache:
 
 ```rust
 use oxifaster::cache::ReadCacheConfig;
@@ -596,7 +590,7 @@ let store = FasterKv::with_read_cache(config, device, cache_config);
 
 ### FasterKv with Compaction
 
-启用压缩:
+Enable compaction:
 
 ```rust
 use oxifaster::compaction::CompactionConfig;
@@ -610,7 +604,7 @@ let store = FasterKv::with_compaction_config(config, device, compaction_config);
 
 ### FasterLog
 
-独立的高性能日志:
+Standalone high-performance log:
 
 ```rust
 use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
@@ -620,16 +614,16 @@ let config = FasterLogConfig::default();
 let device = NullDisk::new();
 let log = FasterLog::new(config, device);
 
-// 追加数据
+// Append data
 let addr = log.append(b"data")?;
 
-// 提交
+// Commit
 log.commit()?;
 
-// 读取
+// Read
 let data = log.read_entry(addr);
 
-// 扫描所有条目
+// Scan all entries
 for (addr, data) in log.scan_all() {
     println!("{}: {:?}", addr, data);
 }
@@ -637,7 +631,7 @@ for (addr, data) in log.scan_all() {
 
 ### F2Kv (Hot-Cold Architecture)
 
-两级存储架构:
+Two-tier storage architecture:
 
 ```rust
 use oxifaster::f2::{F2Kv, F2Config, HotStoreConfig, ColdStoreConfig};
@@ -653,7 +647,7 @@ let f2_store = F2Kv::new(config, hot_device, cold_device);
 
 ### Statistics
 
-收集性能统计:
+Collect performance statistics:
 
 ```rust
 use oxifaster::stats::{StatsCollector, StatsConfig};
@@ -666,33 +660,59 @@ println!("Cache hit rate: {:.2}%", stats.cache_hit_rate() * 100.0);
 
 ---
 
-## 运行示例
+## Running Examples
 
 ```bash
+# Async operations
+cargo run --example async_operations
 
-# 基本 KV 操作
+# Basic KV operations
 cargo run --example basic_kv
 
-# 并发访问
+# Cold index
+cargo run --example cold_index
+
+# Compaction
+cargo run --example compaction
+
+# Concurrent access
 cargo run --example concurrent_access
 
-# 自定义类型
+# Custom types
 cargo run --example custom_types
 
-# Epoch 保护
+# Epoch protection
 cargo run --example epoch_protection
+
+# F2 hot-cold architecture
+cargo run --example f2_hot_cold
 
 # FasterLog
 cargo run --example faster_log
+
+# Index growth
+cargo run --example index_growth
+
+# Log scan
+cargo run --example log_scan
+
+# Read cache
+cargo run --example read_cache
+
+# Statistics
+cargo run --example statistics
+
+# Variable length
+cargo run --example variable_length
 ```
 
-## 运行测试
+## Running Tests
 
 ```bash
 cargo test
 ```
 
-## 运行基准测试
+## Running Benchmarks
 
 ```bash
 cargo bench
@@ -700,45 +720,45 @@ cargo bench
 
 ---
 
-## 贡献指南
+## Contributing
 
-欢迎贡献代码! 请查看上方的 **功能对比表** 和 **开发路线图**，选择感兴趣的功能进行开发。
+Contributions are welcome! Please check the **Feature Comparison Table** and **Development Roadmap** above to select features you're interested in developing.
 
-### 优先级
+### Priorities
 
-- **P0**: ~~Checkpoint/Recovery - 生产环境必需~~ :white_check_mark: 已完成
-- **P1**: ~~Read Cache, Compaction, Index Growth - 性能关键~~ :white_check_mark: 已完成
-- **P2**: ~~F2 Checkpoint/Recovery, Statistics 集成, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: 已完成
-- **P3**: io_uring 完整实现, Azure Storage, 配置文件 - 生态扩展
+- **P0**: ~~Checkpoint/Recovery - Production essential~~ :white_check_mark: Complete
+- **P1**: ~~Read Cache, Compaction, Index Growth - Performance critical~~ :white_check_mark: Complete
+- **P2**: ~~F2 Checkpoint/Recovery, Statistics integration, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: Complete
+- **P3**: io_uring full implementation, Azure Storage, Configuration file - Ecosystem expansion
 
-### 开发流程
+### Development Workflow
 
-1. Fork 本仓库
-2. 创建功能分支: `git checkout -b feature/your-feature`
-3. 提交更改: `git commit -am 'Add new feature'`
-4. 推送分支: `git push origin feature/your-feature`
-5. 创建 Pull Request
+1. Fork this repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit changes: `git commit -am 'Add new feature'`
+4. Push branch: `git push origin feature/your-feature`
+5. Create Pull Request
 
-### 代码规范
+### Code Standards
 
-- 使用 `cargo fmt` 格式化代码
-- 使用 `cargo clippy` 检查代码质量
-- 为新功能添加单元测试
-- 更新相关文档
+- Use `cargo fmt` to format code
+- Use `cargo clippy` for code quality checks
+- Add unit tests for new features
+- Update relevant documentation
 
 ---
 
-## 参考资料
+## References
 
-- [FASTER 官方文档](https://microsoft.github.io/FASTER/)
-- [FASTER C++ 源码](https://github.com/microsoft/FASTER/tree/main/cc)
-- [FASTER C# 源码](https://github.com/microsoft/FASTER/tree/main/cs)
-- [FASTER 论文](https://www.microsoft.com/en-us/research/publication/faster-a-concurrent-key-value-store-with-in-place-updates/)
+- [FASTER Official Documentation](https://microsoft.github.io/FASTER/)
+- [FASTER C++ Source](https://github.com/microsoft/FASTER/tree/main/cc)
+- [FASTER C# Source](https://github.com/microsoft/FASTER/tree/main/cs)
+- [FASTER Paper](https://www.microsoft.com/en-us/research/publication/faster-a-concurrent-key-value-store-with-in-place-updates/)
 
-## 许可证
+## License
 
 MIT License
 
-## 致谢
+## Acknowledgments
 
-感谢微软 FASTER 团队的开源贡献。
+Thanks to the Microsoft FASTER team for their open-source contributions.

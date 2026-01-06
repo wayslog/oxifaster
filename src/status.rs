@@ -280,4 +280,249 @@ mod tests {
         assert_eq!(OperationStatus::RetryNow.to_status(), Status::Pending);
         assert_eq!(OperationStatus::Aborted.to_status(), Status::Aborted);
     }
+
+    #[test]
+    fn test_status_as_str() {
+        assert_eq!(Status::Ok.as_str(), "Ok");
+        assert_eq!(Status::Pending.as_str(), "Pending");
+        assert_eq!(Status::NotFound.as_str(), "NotFound");
+        assert_eq!(Status::OutOfMemory.as_str(), "OutOfMemory");
+        assert_eq!(Status::IoError.as_str(), "IoError");
+        assert_eq!(Status::Corruption.as_str(), "Corruption");
+        assert_eq!(Status::Aborted.as_str(), "Aborted");
+        assert_eq!(Status::InvalidArgument.as_str(), "InvalidArgument");
+        assert_eq!(Status::InvalidOperation.as_str(), "InvalidOperation");
+        assert_eq!(Status::NotSupported.as_str(), "NotSupported");
+        assert_eq!(
+            Status::OverflowBucketsSkipped.as_str(),
+            "OverflowBucketsSkipped"
+        );
+    }
+
+    #[test]
+    fn test_status_display() {
+        assert_eq!(format!("{}", Status::Ok), "Ok");
+        assert_eq!(format!("{}", Status::Pending), "Pending");
+        assert_eq!(format!("{}", Status::NotFound), "NotFound");
+        assert_eq!(format!("{}", Status::OutOfMemory), "OutOfMemory");
+        assert_eq!(format!("{}", Status::IoError), "IoError");
+        assert_eq!(format!("{}", Status::Corruption), "Corruption");
+        assert_eq!(format!("{}", Status::Aborted), "Aborted");
+        assert_eq!(format!("{}", Status::InvalidArgument), "InvalidArgument");
+        assert_eq!(format!("{}", Status::InvalidOperation), "InvalidOperation");
+        assert_eq!(format!("{}", Status::NotSupported), "NotSupported");
+        assert_eq!(
+            format!("{}", Status::OverflowBucketsSkipped),
+            "OverflowBucketsSkipped"
+        );
+    }
+
+    #[test]
+    fn test_status_default() {
+        assert_eq!(Status::default(), Status::Ok);
+    }
+
+    #[test]
+    fn test_status_all_error_types() {
+        // All error types should return true for is_error()
+        assert!(Status::OutOfMemory.is_error());
+        assert!(Status::IoError.is_error());
+        assert!(Status::Corruption.is_error());
+        assert!(Status::Aborted.is_error());
+        assert!(Status::InvalidArgument.is_error());
+        assert!(Status::InvalidOperation.is_error());
+        assert!(Status::NotSupported.is_error());
+        assert!(Status::OverflowBucketsSkipped.is_error());
+
+        // Non-error types
+        assert!(!Status::Ok.is_error());
+        assert!(!Status::Pending.is_error());
+        assert!(!Status::NotFound.is_error());
+    }
+
+    #[test]
+    fn test_operation_status_is_success() {
+        assert!(OperationStatus::Success.is_success());
+        assert!(OperationStatus::SuccessUnmark.is_success());
+        assert!(!OperationStatus::NotFound.is_success());
+        assert!(!OperationStatus::RetryNow.is_success());
+        assert!(!OperationStatus::Aborted.is_success());
+    }
+
+    #[test]
+    fn test_operation_status_is_not_found() {
+        assert!(OperationStatus::NotFound.is_not_found());
+        assert!(OperationStatus::NotFoundUnmark.is_not_found());
+        assert!(!OperationStatus::Success.is_not_found());
+        assert!(!OperationStatus::RetryNow.is_not_found());
+    }
+
+    #[test]
+    fn test_operation_status_needs_retry() {
+        assert!(OperationStatus::RetryNow.needs_retry());
+        assert!(OperationStatus::RetryLater.needs_retry());
+        assert!(!OperationStatus::Success.needs_retry());
+        assert!(!OperationStatus::NotFound.needs_retry());
+        assert!(!OperationStatus::RecordOnDisk.needs_retry());
+    }
+
+    #[test]
+    fn test_operation_status_is_on_disk() {
+        assert!(OperationStatus::RecordOnDisk.is_on_disk());
+        assert!(OperationStatus::IndexEntryOnDisk.is_on_disk());
+        assert!(!OperationStatus::Success.is_on_disk());
+        assert!(!OperationStatus::NotFound.is_on_disk());
+    }
+
+    #[test]
+    fn test_operation_status_default() {
+        assert_eq!(OperationStatus::default(), OperationStatus::Success);
+    }
+
+    #[test]
+    fn test_operation_status_all_conversions() {
+        assert_eq!(OperationStatus::Success.to_status(), Status::Ok);
+        assert_eq!(OperationStatus::SuccessUnmark.to_status(), Status::Ok);
+        assert_eq!(OperationStatus::NotFound.to_status(), Status::NotFound);
+        assert_eq!(OperationStatus::NotFoundUnmark.to_status(), Status::NotFound);
+        assert_eq!(OperationStatus::RetryNow.to_status(), Status::Pending);
+        assert_eq!(OperationStatus::RetryLater.to_status(), Status::Pending);
+        assert_eq!(OperationStatus::RecordOnDisk.to_status(), Status::Pending);
+        assert_eq!(
+            OperationStatus::IndexEntryOnDisk.to_status(),
+            Status::Pending
+        );
+        assert_eq!(
+            OperationStatus::AsyncToColdStore.to_status(),
+            Status::Pending
+        );
+        assert_eq!(
+            OperationStatus::CprShiftDetected.to_status(),
+            Status::Pending
+        );
+        assert_eq!(OperationStatus::Aborted.to_status(), Status::Aborted);
+        assert_eq!(OperationStatus::AbortedUnmark.to_status(), Status::Aborted);
+    }
+
+    #[test]
+    fn test_internal_status_to_operation_status() {
+        assert_eq!(
+            InternalStatus::Ok.to_operation_status(),
+            OperationStatus::Success
+        );
+        assert_eq!(
+            InternalStatus::RetryNow.to_operation_status(),
+            OperationStatus::RetryNow
+        );
+        assert_eq!(
+            InternalStatus::RetryLater.to_operation_status(),
+            OperationStatus::RetryLater
+        );
+        assert_eq!(
+            InternalStatus::RecordOnDisk.to_operation_status(),
+            OperationStatus::RecordOnDisk
+        );
+        assert_eq!(
+            InternalStatus::SuccessUnmark.to_operation_status(),
+            OperationStatus::SuccessUnmark
+        );
+        assert_eq!(
+            InternalStatus::CprShiftDetected.to_operation_status(),
+            OperationStatus::CprShiftDetected
+        );
+    }
+
+    #[test]
+    fn test_operation_type_display() {
+        assert_eq!(format!("{}", OperationType::Read), "Read");
+        assert_eq!(format!("{}", OperationType::Rmw), "RMW");
+        assert_eq!(format!("{}", OperationType::Upsert), "Upsert");
+        assert_eq!(format!("{}", OperationType::Insert), "Insert");
+        assert_eq!(format!("{}", OperationType::Delete), "Delete");
+        assert_eq!(
+            format!("{}", OperationType::ConditionalInsert),
+            "ConditionalInsert"
+        );
+        assert_eq!(format!("{}", OperationType::Recovery), "Recovery");
+    }
+
+    #[test]
+    fn test_index_operation_type_default() {
+        assert_eq!(IndexOperationType::default(), IndexOperationType::None);
+    }
+
+    #[test]
+    fn test_status_clone_copy() {
+        let status = Status::IoError;
+        let cloned = status.clone();
+        let copied = status;
+        assert_eq!(status, cloned);
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn test_operation_status_clone_copy() {
+        let status = OperationStatus::RetryNow;
+        let cloned = status.clone();
+        let copied = status;
+        assert_eq!(status, cloned);
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn test_internal_status_clone_copy() {
+        let status = InternalStatus::RecordOnDisk;
+        let cloned = status.clone();
+        let copied = status;
+        assert_eq!(status, cloned);
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn test_operation_type_clone_copy() {
+        let op_type = OperationType::Rmw;
+        let cloned = op_type.clone();
+        let copied = op_type;
+        assert_eq!(op_type, cloned);
+        assert_eq!(op_type, copied);
+    }
+
+    #[test]
+    fn test_index_operation_type_clone_copy() {
+        let op_type = IndexOperationType::Update;
+        let cloned = op_type.clone();
+        let copied = op_type;
+        assert_eq!(op_type, cloned);
+        assert_eq!(op_type, copied);
+    }
+
+    #[test]
+    fn test_status_debug() {
+        let debug_str = format!("{:?}", Status::InvalidArgument);
+        assert!(debug_str.contains("InvalidArgument"));
+    }
+
+    #[test]
+    fn test_operation_status_debug() {
+        let debug_str = format!("{:?}", OperationStatus::AsyncToColdStore);
+        assert!(debug_str.contains("AsyncToColdStore"));
+    }
+
+    #[test]
+    fn test_internal_status_debug() {
+        let debug_str = format!("{:?}", InternalStatus::CprShiftDetected);
+        assert!(debug_str.contains("CprShiftDetected"));
+    }
+
+    #[test]
+    fn test_operation_type_debug() {
+        let debug_str = format!("{:?}", OperationType::ConditionalInsert);
+        assert!(debug_str.contains("ConditionalInsert"));
+    }
+
+    #[test]
+    fn test_index_operation_type_debug() {
+        let debug_str = format!("{:?}", IndexOperationType::Retrieve);
+        assert!(debug_str.contains("Retrieve"));
+    }
 }

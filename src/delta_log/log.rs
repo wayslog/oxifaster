@@ -608,4 +608,249 @@ mod tests {
         let aligned = config.align(1000);
         assert_eq!(aligned % config.sector_size as i64, 0);
     }
+
+    #[test]
+    fn test_config_default() {
+        let config = DeltaLogConfig::default();
+        assert_eq!(config.page_size_bits, 22);
+        assert_eq!(config.sector_size, 512);
+        assert_eq!(config.page_size(), 1 << 22); // 4MB
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = DeltaLogConfig::new(16);
+        let cloned = config.clone();
+        assert_eq!(config.page_size_bits, cloned.page_size_bits);
+        assert_eq!(config.sector_size, cloned.sector_size);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = DeltaLogConfig::new(16);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("page_size_bits"));
+        assert!(debug_str.contains("sector_size"));
+    }
+
+    #[test]
+    fn test_config_align_various_values() {
+        let config = DeltaLogConfig::default();
+
+        // Already aligned
+        assert_eq!(config.align(512), 512);
+        assert_eq!(config.align(1024), 1024);
+
+        // Need alignment
+        assert_eq!(config.align(1), 512);
+        assert_eq!(config.align(513), 1024);
+        assert_eq!(config.align(1000), 1024);
+    }
+
+    #[test]
+    fn test_delta_log_with_defaults() {
+        let device = Arc::new(NullDisk::new());
+        let log = DeltaLog::with_defaults(device, 0);
+        assert_eq!(log.config().page_size_bits, 22);
+    }
+
+    #[test]
+    fn test_delta_log_next_address() {
+        let log = create_test_delta_log();
+        assert_eq!(log.next_address(), log.tail_address());
+    }
+
+    #[test]
+    fn test_delta_log_end_address() {
+        let log = create_test_delta_log();
+        assert_eq!(log.end_address(), 0);
+    }
+
+    #[test]
+    fn test_delta_log_flushed_until_address() {
+        let log = create_test_delta_log();
+        assert_eq!(log.flushed_until_address(), 0);
+    }
+
+    #[test]
+    fn test_delta_log_init_for_reads() {
+        let log = create_test_delta_log();
+        assert!(!log.is_initialized_for_reads());
+
+        log.init_for_reads();
+        assert!(log.is_initialized_for_reads());
+    }
+
+    #[test]
+    fn test_delta_log_double_init_writes() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+        assert!(log.is_initialized_for_writes());
+
+        // Second init should be no-op
+        log.init_for_writes();
+        assert!(log.is_initialized_for_writes());
+    }
+
+    #[test]
+    fn test_delta_log_allocate_without_init() {
+        let log = create_test_delta_log();
+
+        // Should fail without init
+        let result = log.allocate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delta_log_allocate_after_init() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let result = log.allocate();
+        assert!(result.is_ok());
+
+        let (max_len, ptr) = result.unwrap();
+        assert!(max_len > 0);
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_delta_log_flush_empty() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        // Should not fail on empty buffer
+        let result = log.flush();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_delta_log_flush_after_write() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let entry = DeltaLogEntry::delta(b"test data".to_vec());
+        log.write_entry(&entry).unwrap();
+
+        let result = log.flush();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_delta_log_dispose() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let entry = DeltaLogEntry::delta(b"test data".to_vec());
+        log.write_entry(&entry).unwrap();
+
+        // Dispose should not panic
+        log.dispose();
+
+        // Double dispose should be no-op
+        log.dispose();
+    }
+
+    #[test]
+    fn test_delta_log_read_entry_negative_address() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        // Should return None for negative address
+        let result = log.read_entry(-1).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_delta_log_read_entry_past_tail() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        // Should return None for address >= tail
+        let result = log.read_entry(100).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_delta_log_write_checkpoint_metadata() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let entry = DeltaLogEntry::checkpoint_metadata(b"metadata".to_vec());
+        let addr = log.write_entry(&entry).unwrap();
+        assert_eq!(addr, 0);
+    }
+
+    #[test]
+    fn test_delta_log_get_config() {
+        let log = create_test_delta_log();
+        let config = log.config();
+        assert_eq!(config.page_size_bits, 12);
+    }
+
+    #[tokio::test]
+    async fn test_delta_log_flush_async_empty() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        // Should not fail on empty buffer
+        let result = log.flush_async().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delta_log_flush_async_with_data() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let entry = DeltaLogEntry::delta(b"test data".to_vec());
+        log.write_entry(&entry).unwrap();
+
+        let result = log.flush_async().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delta_log_read_entry_async_negative() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let result = log.read_entry_async(-1).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delta_log_read_entry_async_past_tail() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        let result = log.read_entry_async(100).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_delta_log_with_negative_tail_address() {
+        let device = Arc::new(NullDisk::new());
+        let config = DeltaLogConfig::new(12);
+        // -1 should use file size (which is 0 for NullDisk)
+        let log = DeltaLog::new(device, config, -1);
+        assert_eq!(log.tail_address(), 0);
+    }
+
+    #[test]
+    fn test_delta_log_seal_zero_length() {
+        let log = create_test_delta_log();
+        log.init_for_writes();
+
+        // Allocate first
+        let _ = log.allocate().unwrap();
+
+        // Seal with zero length should skip to next page
+        let result = log.seal(0, DeltaLogEntryType::Delta);
+        assert!(result.is_ok());
+
+        // Tail should have moved to next page boundary
+        let page_size = log.config().page_size() as i64;
+        assert!(log.tail_address() >= page_size);
+    }
 }
