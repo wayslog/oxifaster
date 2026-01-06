@@ -666,7 +666,6 @@ println!("Cache hit rate: {:.2}%", stats.cache_hit_rate() * 100.0);
 ## 运行示例
 
 ```bash
-cd oxifaster
 
 # 基本 KV 操作
 cargo run --example basic_kv
@@ -687,14 +686,12 @@ cargo run --example faster_log
 ## 运行测试
 
 ```bash
-cd oxifaster
 cargo test
 ```
 
 ## 运行基准测试
 
 ```bash
-cd oxifaster
 cargo bench
 ```
 
