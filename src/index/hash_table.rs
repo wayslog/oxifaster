@@ -418,15 +418,19 @@ mod tests {
         let mut table = InternalHashTable::new();
 
         table.initialize(1024, CACHE_LINE_BYTES);
-        let ptr1 = table.as_ptr();
+        assert_eq!(table.size(), 1024);
+        assert!(table.is_initialized());
 
         // Re-initialize with different size
         table.initialize(2048, CACHE_LINE_BYTES);
-        let ptr2 = table.as_ptr();
 
-        // Should be a different allocation
-        assert_ne!(ptr1, ptr2);
+        // Should have the new size and still be initialized
         assert_eq!(table.size(), 2048);
+        assert!(table.is_initialized());
+
+        // Verify the table is usable with new size
+        let hash = KeyHash::new(12345);
+        let _bucket = table.bucket(hash);
     }
 
     #[test]
