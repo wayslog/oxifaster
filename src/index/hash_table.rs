@@ -557,7 +557,10 @@ mod tests {
         assert_eq!(offset_0, 0);
 
         let offset_1 = table.checkpoint_chunk_offset(1);
-        assert_eq!(offset_1, chunk_size * std::mem::size_of::<HashBucket>() as u64);
+        assert_eq!(
+            offset_1,
+            chunk_size * std::mem::size_of::<HashBucket>() as u64
+        );
 
         let chunk_bytes = table.checkpoint_chunk_bytes();
         assert_eq!(

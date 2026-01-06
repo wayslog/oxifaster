@@ -1446,7 +1446,7 @@ mod tests {
     #[test]
     fn test_store_type_clone_copy() {
         let store_type = StoreType::Hot;
-        let cloned = store_type.clone();
+        let cloned = store_type;
         let copied = store_type;
         assert_eq!(store_type, cloned);
         assert_eq!(store_type, copied);
@@ -1464,7 +1464,7 @@ mod tests {
     #[test]
     fn test_read_operation_stage_clone_copy() {
         let stage = ReadOperationStage::HotLogRead;
-        let cloned = stage.clone();
+        let cloned = stage;
         let copied = stage;
         assert_eq!(stage, cloned);
         assert_eq!(stage, copied);
@@ -1485,7 +1485,7 @@ mod tests {
     #[test]
     fn test_rmw_operation_stage_clone_copy() {
         let stage = RmwOperationStage::HotLogRmw;
-        let cloned = stage.clone();
+        let cloned = stage;
         let copied = stage;
         assert_eq!(stage, cloned);
         assert_eq!(stage, copied);
@@ -1521,7 +1521,7 @@ mod tests {
     #[test]
     fn test_index_type_clone_copy() {
         let idx_type = IndexType::ColdIndex;
-        let cloned = idx_type.clone();
+        let cloned = idx_type;
         let copied = idx_type;
         assert_eq!(idx_type, cloned);
         assert_eq!(idx_type, copied);
@@ -1700,7 +1700,11 @@ mod tests {
 
         // Verify it's set
         assert!(f2.checkpoint_dir().is_some());
-        assert!(f2.checkpoint_dir().unwrap().to_string_lossy().contains("test_checkpoint"));
+        assert!(f2
+            .checkpoint_dir()
+            .unwrap()
+            .to_string_lossy()
+            .contains("test_checkpoint"));
     }
 
     #[test]
@@ -1797,7 +1801,7 @@ mod tests {
     #[test]
     fn test_store_index_cold_creation() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path());
         let result = StoreIndex::new_cold(config);
         assert!(result.is_ok());
 
@@ -1809,7 +1813,7 @@ mod tests {
     #[test]
     fn test_store_index_as_cold_mut() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path());
         let mut index = StoreIndex::new_cold(config).unwrap();
 
         let cold_idx = index.as_cold_mut();
@@ -1825,7 +1829,7 @@ mod tests {
             safe_read_only_address: Address::new(50, 0),
         };
 
-        let debug_str = format!("{:?}", stats);
+        let debug_str = format!("{stats:?}");
         assert!(debug_str.contains("StoreStats"));
         assert!(debug_str.contains("size"));
         assert!(debug_str.contains("1000"));
@@ -1938,7 +1942,7 @@ mod tests {
     #[test]
     fn test_store_index_find_entry_cold() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path());
         let index = StoreIndex::new_cold(config).unwrap();
 
         let hash = KeyHash::new(12345);
@@ -1950,7 +1954,7 @@ mod tests {
     #[test]
     fn test_store_index_find_or_create_entry_cold() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path());
         let mut index = StoreIndex::new_cold(config).unwrap();
 
         let hash = KeyHash::new(12345);
@@ -1961,7 +1965,7 @@ mod tests {
     #[test]
     fn test_store_index_garbage_collect_cold() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path().to_path_buf());
+        let config = ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path());
         let mut index = StoreIndex::new_cold(config).unwrap();
 
         // Should not panic on cold index

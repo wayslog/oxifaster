@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn test_compaction_context_debug() {
         let ctx = CompactionContext::new(Address::new(0, 0), Address::new(10, 0));
-        let debug_str = format!("{:?}", ctx);
+        let debug_str = format!("{ctx:?}");
         assert!(debug_str.contains("CompactionContext"));
         assert!(debug_str.contains("scan_begin"));
         assert!(debug_str.contains("scan_end"));

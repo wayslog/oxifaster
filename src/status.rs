@@ -384,7 +384,10 @@ mod tests {
         assert_eq!(OperationStatus::Success.to_status(), Status::Ok);
         assert_eq!(OperationStatus::SuccessUnmark.to_status(), Status::Ok);
         assert_eq!(OperationStatus::NotFound.to_status(), Status::NotFound);
-        assert_eq!(OperationStatus::NotFoundUnmark.to_status(), Status::NotFound);
+        assert_eq!(
+            OperationStatus::NotFoundUnmark.to_status(),
+            Status::NotFound
+        );
         assert_eq!(OperationStatus::RetryNow.to_status(), Status::Pending);
         assert_eq!(OperationStatus::RetryLater.to_status(), Status::Pending);
         assert_eq!(OperationStatus::RecordOnDisk.to_status(), Status::Pending);
@@ -454,7 +457,7 @@ mod tests {
     #[test]
     fn test_status_clone_copy() {
         let status = Status::IoError;
-        let cloned = status.clone();
+        let cloned = status;
         let copied = status;
         assert_eq!(status, cloned);
         assert_eq!(status, copied);
@@ -463,7 +466,7 @@ mod tests {
     #[test]
     fn test_operation_status_clone_copy() {
         let status = OperationStatus::RetryNow;
-        let cloned = status.clone();
+        let cloned = status;
         let copied = status;
         assert_eq!(status, cloned);
         assert_eq!(status, copied);
@@ -472,7 +475,7 @@ mod tests {
     #[test]
     fn test_internal_status_clone_copy() {
         let status = InternalStatus::RecordOnDisk;
-        let cloned = status.clone();
+        let cloned = status;
         let copied = status;
         assert_eq!(status, cloned);
         assert_eq!(status, copied);
@@ -481,7 +484,7 @@ mod tests {
     #[test]
     fn test_operation_type_clone_copy() {
         let op_type = OperationType::Rmw;
-        let cloned = op_type.clone();
+        let cloned = op_type;
         let copied = op_type;
         assert_eq!(op_type, cloned);
         assert_eq!(op_type, copied);
@@ -490,7 +493,7 @@ mod tests {
     #[test]
     fn test_index_operation_type_clone_copy() {
         let op_type = IndexOperationType::Update;
-        let cloned = op_type.clone();
+        let cloned = op_type;
         let copied = op_type;
         assert_eq!(op_type, cloned);
         assert_eq!(op_type, copied);

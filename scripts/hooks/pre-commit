@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -e
+
+# 切换到项目根目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR/../.."
+cd "$PROJECT_ROOT"
+
+echo "========================================"
+echo "      Running Pre-commit Checks         "
+echo "========================================"
+
+# 运行格式检查
+if ! ./scripts/check-fmt.sh; then
+    echo ""
+    echo "==> Format check failed!"
+    echo "==> Run 'cargo fmt --all' to fix formatting issues."
+    exit 1
+fi
+
+# 运行 clippy
+if ! ./scripts/check-clippy.sh; then
+    echo ""
+    echo "==> Clippy check failed!"
+    echo "==> Fix the above warnings/errors before committing."
+    exit 1
+fi
+
+echo "========================================"
+echo "     Pre-commit Checks Passed!          "
+echo "========================================"

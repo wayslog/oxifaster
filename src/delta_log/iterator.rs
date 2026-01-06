@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_iterator_state_clone_copy() {
         let state = IteratorState::Active;
-        let cloned = state.clone();
+        let cloned = state;
         let copied = state;
         assert_eq!(state, cloned);
         assert_eq!(state, copied);
@@ -621,7 +621,7 @@ mod tests {
 
         let mut iter = DeltaLogIterator::new(delta_log, 50, 60);
         assert_eq!(iter.current_address(), 50);
-        
+
         // After get_next, current_address should update
         let _ = iter.get_next();
         // Current address will have been updated during get_next
@@ -634,7 +634,7 @@ mod tests {
         let delta_log = Arc::new(DeltaLog::new(device, config, 0));
 
         let iter = DeltaLogIntoIterator::new(delta_log);
-        
+
         // Collect all items - should be empty for null device
         let items: Vec<_> = iter.collect();
         assert!(items.is_empty());
@@ -701,7 +701,7 @@ mod tests {
 
         // Create iterator with custom range
         let mut iter = DeltaLogIterator::new(delta_log, 0, 4096);
-        
+
         // Should return None on empty log
         let result = iter.get_next_async().await.unwrap();
         assert!(result.is_none());

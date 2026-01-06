@@ -680,7 +680,7 @@ mod tests {
     fn test_hash_bucket_entry_debug() {
         let addr = Address::new(10, 1000);
         let entry = HashBucketEntry::new(addr);
-        let debug_str = format!("{:?}", entry);
+        let debug_str = format!("{entry:?}");
         assert!(debug_str.contains("HashBucketEntry"));
         assert!(debug_str.contains("address"));
     }
@@ -703,7 +703,7 @@ mod tests {
     fn test_hash_bucket_entry_clone_copy() {
         let addr = Address::new(10, 1000);
         let entry = HashBucketEntry::new(addr);
-        let cloned = entry.clone();
+        let cloned = entry;
         let copied = entry;
         assert_eq!(entry, cloned);
         assert_eq!(entry, copied);
@@ -727,7 +727,7 @@ mod tests {
     fn test_index_hash_bucket_entry_debug() {
         let addr = Address::new(5, 500);
         let entry = IndexHashBucketEntry::new(addr, 0x1234, true);
-        let debug_str = format!("{:?}", entry);
+        let debug_str = format!("{entry:?}");
         assert!(debug_str.contains("IndexHashBucketEntry"));
         assert!(debug_str.contains("address"));
         assert!(debug_str.contains("tag"));
@@ -752,7 +752,7 @@ mod tests {
     fn test_index_hash_bucket_entry_clone_copy() {
         let addr = Address::new(5, 500);
         let entry = IndexHashBucketEntry::new(addr, 0x1234, false);
-        let cloned = entry.clone();
+        let cloned = entry;
         let copied = entry;
         assert_eq!(entry, cloned);
         assert_eq!(entry, copied);
@@ -764,8 +764,7 @@ mod tests {
         let entry = IndexHashBucketEntry::new_with_read_cache(addr, 0x1234, false, true);
         assert!(entry.in_read_cache());
 
-        let entry_no_cache =
-            IndexHashBucketEntry::new_with_read_cache(addr, 0x1234, false, false);
+        let entry_no_cache = IndexHashBucketEntry::new_with_read_cache(addr, 0x1234, false, false);
         assert!(!entry_no_cache.in_read_cache());
     }
 
@@ -856,13 +855,16 @@ mod tests {
         let entry = HashBucketEntry::new(addr);
         let atomic = AtomicHashBucketEntry::new(entry);
         let cloned = atomic.clone();
-        assert_eq!(atomic.load(Ordering::Relaxed), cloned.load(Ordering::Relaxed));
+        assert_eq!(
+            atomic.load(Ordering::Relaxed),
+            cloned.load(Ordering::Relaxed)
+        );
     }
 
     #[test]
     fn test_atomic_hash_bucket_entry_debug() {
         let atomic = AtomicHashBucketEntry::invalid();
-        let debug_str = format!("{:?}", atomic);
+        let debug_str = format!("{atomic:?}");
         assert!(debug_str.contains("AtomicHashBucketEntry"));
     }
 
@@ -883,11 +885,11 @@ mod tests {
     #[test]
     fn test_fixed_page_address_debug() {
         let addr = FixedPageAddress::new(12345);
-        let debug_str = format!("{:?}", addr);
+        let debug_str = format!("{addr:?}");
         assert!(debug_str.contains("12345"));
 
         let invalid = FixedPageAddress::INVALID;
-        let debug_str = format!("{:?}", invalid);
+        let debug_str = format!("{invalid:?}");
         assert!(debug_str.contains("INVALID"));
     }
 
@@ -910,7 +912,7 @@ mod tests {
     #[test]
     fn test_fixed_page_address_clone_copy() {
         let addr = FixedPageAddress::new(12345);
-        let cloned = addr.clone();
+        let cloned = addr;
         let copied = addr;
         assert_eq!(addr, cloned);
         assert_eq!(addr, copied);
@@ -934,7 +936,7 @@ mod tests {
     fn test_hash_bucket_overflow_entry_debug() {
         let addr = FixedPageAddress::new(12345);
         let entry = HashBucketOverflowEntry::new(addr);
-        let debug_str = format!("{:?}", entry);
+        let debug_str = format!("{entry:?}");
         assert!(debug_str.contains("HashBucketOverflowEntry"));
     }
 
@@ -956,7 +958,7 @@ mod tests {
     fn test_hash_bucket_overflow_entry_clone_copy() {
         let addr = FixedPageAddress::new(12345);
         let entry = HashBucketOverflowEntry::new(addr);
-        let cloned = entry.clone();
+        let cloned = entry;
         let copied = entry;
         assert_eq!(entry, cloned);
         assert_eq!(entry, copied);
@@ -1050,7 +1052,7 @@ mod tests {
     #[test]
     fn test_hash_bucket_debug() {
         let bucket = HashBucket::new();
-        let debug_str = format!("{:?}", bucket);
+        let debug_str = format!("{bucket:?}");
         assert!(debug_str.contains("HashBucket"));
         assert!(debug_str.contains("entries"));
         assert!(debug_str.contains("overflow"));

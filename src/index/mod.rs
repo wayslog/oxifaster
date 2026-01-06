@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn test_key_hash_clone_copy() {
         let hash = KeyHash::new(42);
-        let cloned = hash.clone();
+        let cloned = hash;
         let copied = hash;
         assert_eq!(hash, cloned);
         assert_eq!(hash, copied);
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn test_key_hash_debug() {
         let hash = KeyHash::new(123);
-        let debug_str = format!("{:?}", hash);
+        let debug_str = format!("{hash:?}");
         assert!(debug_str.contains("KeyHash"));
         assert!(debug_str.contains("123"));
     }
@@ -203,7 +203,7 @@ mod tests {
         let hash = KeyHash::new(0xFFFF_0000_0000_0000);
         let tag = hash.tag();
         // Tag should be 14 bits from bits 48-61
-        assert!(tag <= (1 << KeyHash::TAG_BITS) - 1);
+        assert!(tag < (1 << KeyHash::TAG_BITS));
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn test_index_config_debug() {
         let config = IndexConfig::new(2048);
-        let debug_str = format!("{:?}", config);
+        let debug_str = format!("{config:?}");
         assert!(debug_str.contains("IndexConfig"));
         assert!(debug_str.contains("table_size"));
         assert!(debug_str.contains("2048"));

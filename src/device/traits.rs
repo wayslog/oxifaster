@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_io_context_debug() {
         let ctx = IoContext::new(100, 512, 4096);
-        let debug_str = format!("{:?}", ctx);
+        let debug_str = format!("{ctx:?}");
         assert!(debug_str.contains("callback_data"));
         assert!(debug_str.contains("100"));
         assert!(debug_str.contains("size"));

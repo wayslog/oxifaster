@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn test_config_debug() {
         let config = DeltaLogConfig::new(16);
-        let debug_str = format!("{:?}", config);
+        let debug_str = format!("{config:?}");
         assert!(debug_str.contains("page_size_bits"));
         assert!(debug_str.contains("sector_size"));
     }

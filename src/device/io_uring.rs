@@ -851,34 +851,34 @@ mod tests {
     #[test]
     fn test_io_uring_error_display() {
         let err = IoUringError::NotAvailable;
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("not available"));
 
         let err = IoUringError::NotInitialized;
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("not initialized"));
 
         let err = IoUringError::SubmissionQueueFull;
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("submission queue")); // "submission queue is full"
 
         let err = IoUringError::InvalidArgument;
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("invalid")); // "invalid argument"
 
         let err = IoUringError::IoError("test error".to_string());
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("test error"));
 
         let err = IoUringError::NotImplemented;
-        let display_str = format!("{}", err);
+        let display_str = format!("{err}");
         assert!(display_str.contains("not implemented"));
     }
 
     #[test]
     fn test_io_uring_error_debug() {
         let err = IoUringError::NotAvailable;
-        let debug_str = format!("{:?}", err);
+        let debug_str = format!("{err:?}");
         assert!(debug_str.contains("NotAvailable"));
     }
 
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn test_config_debug() {
         let config = IoUringConfig::default();
-        let debug_str = format!("{:?}", config);
+        let debug_str = format!("{config:?}");
         assert!(debug_str.contains("sq_entries"));
         assert!(debug_str.contains("cq_entries"));
     }
@@ -956,14 +956,14 @@ mod tests {
     #[test]
     fn test_io_operation_debug() {
         let op = IoOperation::Read;
-        let debug_str = format!("{:?}", op);
+        let debug_str = format!("{op:?}");
         assert!(debug_str.contains("Read"));
     }
 
     #[test]
     fn test_io_operation_clone_copy() {
         let op = IoOperation::Write;
-        let cloned = op.clone();
+        let cloned = op;
         let copied = op;
         assert_eq!(op, cloned);
         assert_eq!(op, copied);
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn test_io_uring_features_debug() {
         let features = IoUringFeatures::default();
-        let debug_str = format!("{:?}", features);
+        let debug_str = format!("{features:?}");
         assert!(debug_str.contains("sqpoll"));
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn test_io_uring_stats_debug() {
         let stats = IoUringStats::default();
-        let debug_str = format!("{:?}", stats);
+        let debug_str = format!("{stats:?}");
         assert!(debug_str.contains("reads_submitted"));
     }
 

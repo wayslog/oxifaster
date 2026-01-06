@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn test_scan_range_debug() {
         let range = ScanRange::new(Address::new(1, 100), Address::new(5, 200));
-        let debug_str = format!("{:?}", range);
+        let debug_str = format!("{range:?}");
         assert!(debug_str.contains("begin"));
         assert!(debug_str.contains("end"));
     }
@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn test_scan_range_clone_copy() {
         let range = ScanRange::new(Address::new(0, 0), Address::new(10, 0));
-        let cloned = range.clone();
+        let cloned = range;
         let copied = range;
 
         assert_eq!(range.begin, cloned.begin);
@@ -1149,7 +1149,10 @@ mod tests {
 
         iter.finish_page();
         // After finishing, page should be reset
-        assert_eq!(iter.current_page_mut().status(), LogPageStatus::Uninitialized);
+        assert_eq!(
+            iter.current_page_mut().status(),
+            LogPageStatus::Uninitialized
+        );
     }
 
     #[test]
@@ -1219,13 +1222,13 @@ mod tests {
     #[test]
     fn test_log_page_status_clone_copy_debug() {
         let status = LogPageStatus::Ready;
-        let cloned = status.clone();
+        let cloned = status;
         let copied = status;
 
         assert_eq!(status, cloned);
         assert_eq!(status, copied);
 
-        let debug_str = format!("{:?}", status);
+        let debug_str = format!("{status:?}");
         assert!(debug_str.contains("Ready"));
     }
 }
