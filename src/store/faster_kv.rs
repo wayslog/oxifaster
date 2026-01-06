@@ -29,7 +29,7 @@ use crate::record::{Key, Record, RecordInfo, Value};
 use crate::stats::StatsCollector;
 use crate::status::Status;
 use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
-use crate::store::{Session, ThreadContext};
+use crate::store::{AsyncSession, Session, ThreadContext};
 
 /// Configuration for FasterKV
 #[derive(Debug, Clone)]
@@ -325,6 +325,29 @@ where
         self.register_session(&session.to_session_state());
 
         session
+    }
+
+    /// Start a new async session for this store
+    ///
+    /// Async sessions provide non-blocking operations using Rust's async/await.
+    /// Each async session gets a unique GUID and is bound to the calling thread
+    /// for epoch protection.
+    ///
+    /// # Note
+    ///
+    /// Async sessions are not thread-safe and should only be used from the thread
+    /// that created them.
+    pub fn start_async_session(self: &Arc<Self>) -> AsyncSession<K, V, D> {
+        let session = self.start_session();
+        AsyncSession::new(session)
+    }
+
+    /// Continue an async session from a saved state (for recovery)
+    ///
+    /// Restores an async session using the GUID and serial number from a previous checkpoint.
+    pub fn continue_async_session(self: &Arc<Self>, state: SessionState) -> AsyncSession<K, V, D> {
+        let session = self.continue_session(state);
+        AsyncSession::new(session)
     }
 
     /// Continue a session from a saved state (for recovery)

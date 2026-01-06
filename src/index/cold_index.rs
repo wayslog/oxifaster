@@ -74,6 +74,11 @@ impl ColdIndexConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), Status> {
+        // table_size must be non-zero and a power of 2
+        // Note: 0.is_power_of_two() returns false, but we check explicitly for clarity
+        if self.table_size == 0 {
+            return Err(Status::InvalidArgument);
+        }
         if !self.table_size.is_power_of_two() {
             return Err(Status::InvalidArgument);
         }
@@ -519,8 +524,15 @@ impl ColdIndex {
     }
 
     /// Compute chunk key from hash
+    ///
+    /// # Panics
+    /// Panics if the index is not initialized (table_size == 0)
     #[inline]
     fn compute_chunk_key(&self, hash: KeyHash) -> HashIndexChunkKey {
+        assert!(
+            self.table_size > 0,
+            "ColdIndex not initialized: table_size is 0. Call initialize() first."
+        );
         let chunk_id = hash.hash() % self.table_size;
         let tag = hash.tag();
         HashIndexChunkKey::new(chunk_id, tag)
@@ -529,6 +541,7 @@ impl ColdIndex {
     /// Compute position within chunk from hash
     #[inline]
     fn compute_chunk_pos(&self, hash: KeyHash) -> HashIndexChunkPos {
+        // DEFAULT_NUM_BUCKETS_PER_CHUNK and ENTRIES_PER_BUCKET are compile-time constants > 0
         let bucket_index = ((hash.hash() >> 16) % DEFAULT_NUM_BUCKETS_PER_CHUNK as u64) as u8;
         let entry_tag = ((hash.hash() >> 24) % ENTRIES_PER_BUCKET as u64) as u8;
         HashIndexChunkPos::new(bucket_index, entry_tag)
@@ -905,5 +918,29 @@ mod tests {
         index.find_entry(hash);
         assert_eq!(index.stats().find_entry_calls.load(Ordering::Relaxed), 2);
         assert_eq!(index.stats().find_entry_success.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_config_validate_zero_table_size() {
+        // table_size = 0 should fail validation
+        let config = ColdIndexConfig::new(0, 1024 * 1024, 0.5);
+        assert_eq!(config.validate(), Err(Status::InvalidArgument));
+    }
+
+    #[test]
+    #[should_panic(expected = "ColdIndex not initialized")]
+    fn test_find_entry_without_initialize_panics() {
+        // Create config with table_size = 0 (bypassing normal construction)
+        let config = ColdIndexConfig {
+            table_size: 0,
+            in_mem_size: 1024 * 1024,
+            mutable_fraction: 0.5,
+            root_path: std::path::PathBuf::from("test"),
+        };
+        let index = ColdIndex::new(config);
+        
+        // This should panic because table_size is 0
+        let hash = KeyHash::new(0x123456789ABCDEF0);
+        index.find_entry(hash);
     }
 }

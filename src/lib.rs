@@ -46,6 +46,7 @@ pub mod stats;
 pub mod status;
 pub mod store;
 mod utility;
+pub mod varlen;
 
 // Re-exports for convenience
 pub use address::{Address, AtomicAddress};
