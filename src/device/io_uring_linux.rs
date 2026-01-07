@@ -14,9 +14,7 @@ use parking_lot::Mutex;
 use crate::device::traits::SyncStorageDevice;
 use crate::status::Status;
 
-use super::io_uring_common::{
-    IoUringConfig, IoUringError, IoUringFeatures, IoUringFile, IoUringStats,
-};
+use super::io_uring_common::{IoUringConfig, IoUringError, IoUringFeatures, IoUringStats};
 
 struct LinuxState {
     ring: IoUring,
@@ -119,7 +117,7 @@ impl IoUringDevice {
             .create(true)
             .open(&self.path)?;
 
-        let entries = self.config.sq_entries.max(2) as usize;
+        let entries = self.config.sq_entries.max(2);
         let ring = IoUring::new(entries).map_err(|e| io::Error::other(e.to_string()))?;
 
         *guard = Some(LinuxState { ring, file });
@@ -146,27 +144,14 @@ impl IoUringDevice {
     }
 }
 
-/// 将 u64 offset 安全转换为 i64，防止溢出
-#[inline]
-fn checked_offset(offset: u64) -> io::Result<i64> {
-    i64::try_from(offset).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("offset {offset} exceeds i64::MAX, not supported by io_uring"),
-        )
-    })
-}
-
 impl SyncStorageDevice for IoUringDevice {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        let offset_i64 = checked_offset(offset)?;
-
         self.with_state(|state| {
             let start = Instant::now();
 
             let fd = types::Fd(state.file.as_raw_fd());
             let entry = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
-                .offset(offset_i64)
+                .offset(offset)
                 .build()
                 .user_data(0);
 
@@ -189,14 +174,12 @@ impl SyncStorageDevice for IoUringDevice {
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        let offset_i64 = checked_offset(offset)?;
-
         self.with_state(|state| {
             let start = Instant::now();
 
             let fd = types::Fd(state.file.as_raw_fd());
             let entry = opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
-                .offset(offset_i64)
+                .offset(offset)
                 .build()
                 .user_data(0);
 
