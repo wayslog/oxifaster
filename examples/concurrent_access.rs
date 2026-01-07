@@ -9,13 +9,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use oxifaster::device::NullDisk;
+use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
+use tempfile::tempdir;
 
-fn main() {
-    println!("=== oxifaster 并发访问示例 ===\n");
-
+fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
+    println!("=== oxifaster 并发访问示例（{device_name}） ===\n");
     // 配置
     let num_threads = 4;
     let ops_per_thread = 10_000;
@@ -28,7 +28,6 @@ fn main() {
         page_size_bits: 20,
         mutable_fraction: 0.9,
     };
-    let device = NullDisk::new();
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
 
     // 预填充数据
@@ -122,4 +121,16 @@ fn main() {
     println!("负载因子: {:.2}%", stats.load_factor * 100.0);
 
     println!("\n=== 示例完成 ===");
+}
+
+fn main() {
+    run_with_device("NullDisk（纯内存）", NullDisk::new());
+
+    let dir = tempdir().expect("创建临时目录失败");
+    let data_path = dir.path().join("oxifaster_concurrent_access.dat");
+    let fs_device = FileSystemDisk::single_file(&data_path).expect("创建数据文件失败");
+    run_with_device(
+        &format!("FileSystemDisk（文件持久化：{}）", data_path.display()),
+        fs_device,
+    );
 }

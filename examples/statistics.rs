@@ -7,13 +7,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oxifaster::device::NullDisk;
+use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::stats::{StatsCollector, StatsConfig};
 use oxifaster::store::{FasterKv, FasterKvConfig};
+use tempfile::tempdir;
 
-fn main() {
-    println!("=== oxifaster Statistics 示例 ===\n");
-
+fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
+    println!("=== oxifaster Statistics 示例（{device_name}） ===\n");
     // 1. StatsConfig 配置
     println!("--- 1. StatsConfig 配置 ---");
     let config = StatsConfig::new()
@@ -48,7 +48,6 @@ fn main() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let device = NullDisk::new();
     let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device));
 
     // 插入数据
@@ -164,4 +163,16 @@ fn main() {
     println!("  重置后运行时间: {:?}", snapshot_after_reset.elapsed);
 
     println!("\n=== 示例完成 ===");
+}
+
+fn main() {
+    run_with_device("NullDisk（纯内存）", NullDisk::new());
+
+    let dir = tempdir().expect("创建临时目录失败");
+    let data_path = dir.path().join("oxifaster_statistics.dat");
+    let fs_device = FileSystemDisk::single_file(&data_path).expect("创建数据文件失败");
+    run_with_device(
+        &format!("FileSystemDisk（文件持久化：{}）", data_path.display()),
+        fs_device,
+    );
 }

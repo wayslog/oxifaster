@@ -4,12 +4,12 @@
 //!
 //! 运行: cargo run --example faster_log
 
-use oxifaster::device::NullDisk;
+use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::log::{FasterLog, FasterLogConfig};
+use tempfile::tempdir;
 
-fn main() {
-    println!("=== FASTER Log 示例 ===\n");
-
+fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
+    println!("=== FASTER Log 示例（{device_name}） ===\n");
     // 1. 创建配置
     let config = FasterLogConfig {
         page_size: 1 << 16,    // 64 KB 页面
@@ -19,7 +19,6 @@ fn main() {
     };
 
     // 2. 创建日志
-    let device = NullDisk::new();
     let log = FasterLog::new(config, device);
     println!("日志创建成功!");
 
@@ -119,4 +118,16 @@ fn main() {
     println!("是否已关闭: {}", log.is_closed());
 
     println!("\n=== 示例完成 ===");
+}
+
+fn main() {
+    run_with_device("NullDisk（纯内存）", NullDisk::new());
+
+    let dir = tempdir().expect("创建临时目录失败");
+    let data_path = dir.path().join("oxifaster_faster_log.dat");
+    let fs_device = FileSystemDisk::single_file(&data_path).expect("创建数据文件失败");
+    run_with_device(
+        &format!("FileSystemDisk（文件持久化：{}）", data_path.display()),
+        fs_device,
+    );
 }

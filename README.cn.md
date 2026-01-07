@@ -31,19 +31,28 @@ oxifaster 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust
 oxifaster = { path = "oxifaster" }
 ```
 
+启用 Linux `io_uring` 后端（feature gate）：
+
+```toml
+[dependencies]
+oxifaster = { path = "oxifaster", features = ["io_uring"] }
+```
+
+说明：真实 `io_uring` 后端仅在 Linux 可用；在非 Linux（或未开启 feature）时，`IoUringDevice` 会回退到 mock 实现以保持 API 兼容与可编译。
+
 ### 基本使用
 
 ```rust
 use std::sync::Arc;
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
-fn main() {
+fn main() -> std::io::Result<()> {
     // 创建配置
     let config = FasterKvConfig::default();
     
-    // 创建存储设备 (使用 NullDisk 进行内存测试)
-    let device = NullDisk::new();
+    // 创建存储设备（FileSystemDisk 是默认的持久化设备）
+    let device = FileSystemDisk::single_file("oxifaster.db")?;
     
     // 创建存储
     let store = Arc::new(FasterKv::new(config, device));
@@ -61,6 +70,8 @@ fn main() {
     
     // 删除数据
     session.delete(&42u64);
+
+    Ok(())
 }
 ```
 
@@ -123,7 +134,7 @@ fn main() {
 |-----|:---:|:---:|:----:|------|
 | **NullDisk** | Y | Y | Y | 完成 |
 | **FileSystemDisk** | Y | Y | Y | 完成 |
-| **io_uring (Linux)** | Y | - | P | Mock 实现 (API 规范化完成) |
+| **io_uring (Linux)** | Y | - | P | Linux 后端已实现（read/write/fsync，feature gate）；其他平台回退 mock |
 | **IOCP (Windows)** | Y | Y | N | 未实现 |
 | **Tiered Storage** | - | Y | N | 未实现 |
 | **Sharded Storage** | - | Y | N | 未实现 |
@@ -192,7 +203,7 @@ fn main() {
 | **device** | StorageDevice trait | `src/device/traits.rs` | :white_check_mark: |
 | **device** | NullDisk 内存设备 | `src/device/null_device.rs` | :white_check_mark: |
 | **device** | FileSystemDisk 文件设备 | `src/device/file_device.rs` | :white_check_mark: |
-| **device** | IoUringDevice Mock 实现 | `src/device/io_uring.rs` | :construction: |
+| **device** | IoUringDevice（Linux 后端 + mock 回退） | `src/device/io_uring.rs` | :construction: |
 | **store** | FasterKV 核心 (Read/Upsert/RMW/Delete) | `src/store/faster_kv.rs` | :white_check_mark: |
 | **store** | Session 会话管理 (含 GUID + serial_num) | `src/store/session.rs` | :white_check_mark: |
 | **store** | ThreadContext 线程上下文 | `src/store/contexts.rs` | :white_check_mark: |
@@ -328,13 +339,14 @@ let result = compactor.compact_range(scan_range, |chunk| {
 
 | 功能 | 描述 | 文件 | 参考 |
 |------|------|------|------|
-| **io_uring 完整实现** | Linux 高性能异步 I/O | `device/io_uring.rs` | `file_linux.h` |
+| **io_uring 后端完善** | 高级特性（SQPOLL/注册文件/固定缓冲区）与性能调优 | `src/device/io_uring_linux.rs` | `file_linux.h` |
 | **Statistics 完善** | 性能指标收集与报告 | `stats/collector.rs` | `faster.h` |
 | **TOML 配置** | 配置文件支持 | `config.rs` | - |
 
 ```rust
-// 目标 API: io_uring
-let device = IoUringDevice::new(path)?;
+// Linux + `features = ["io_uring"]`
+use oxifaster::device::IoUringDevice;
+let device = IoUringDevice::with_defaults(path);
 ```
 
 ---
@@ -399,7 +411,10 @@ oxifaster/
 │   │   ├── traits.rs
 │   │   ├── file_device.rs
 │   │   ├── null_device.rs
-│   │   └── io_uring.rs     # Linux io_uring
+│   │   ├── io_uring.rs        # io_uring 入口（Linux + mock）
+│   │   ├── io_uring_common.rs # 公共类型
+│   │   ├── io_uring_linux.rs  # Linux 后端（feature = "io_uring"）
+│   │   └── io_uring_mock.rs   # 非 Linux / 未开 feature
 │   │
 │   ├── store/              # FasterKV 存储
 │   │   ├── mod.rs
@@ -541,13 +556,13 @@ oxifaster/
 
 ```rust
 use std::sync::Arc;
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
 // 创建存储
 let config = FasterKvConfig::default();
-let device = NullDisk::new();
-let store = Arc::new(FasterKv::new(config, device));
+let store_device = FileSystemDisk::single_file("oxifaster.db")?;
+let store = Arc::new(FasterKv::new(config, store_device));
 
 // 启动会话
 let mut session = store.start_session();
@@ -561,7 +576,10 @@ session.rmw(key, |v| { *v += 1; true });       // 读-改-写
 // Checkpoint 和 Recovery (Phase 2 已完成)
 let token = store.checkpoint(checkpoint_dir)?; // 创建检查点
 let recovered = FasterKv::recover(            // 从检查点恢复
-    checkpoint_dir, token, config, device
+    checkpoint_dir,
+    token,
+    config,
+    FileSystemDisk::single_file("oxifaster.db")?
 )?;
 
 // Session 持久化
@@ -603,10 +621,10 @@ let store = FasterKv::with_compaction_config(config, device, compaction_config);
 
 ```rust
 use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 
 let config = FasterLogConfig::default();
-let device = NullDisk::new();
+let device = FileSystemDisk::single_file("oxifaster.log")?;
 let log = FasterLog::new(config, device);
 
 // 追加数据
@@ -657,12 +675,17 @@ println!("Cache hit rate: {:.2}%", stats.cache_hit_rate() * 100.0);
 
 ## 运行示例
 
+说明：大多数示例会运行两次用于对比设备行为——先使用 `NullDisk`（纯内存），再使用 `FileSystemDisk`（临时文件）。
+
 ```bash
 # 异步操作
 cargo run --example async_operations
 
 # 基本 KV 操作
 cargo run --example basic_kv
+
+# io_uring（Linux 上启用 feature 才会使用真实后端）
+cargo run --example io_uring --features io_uring
 
 # 冷索引
 cargo run --example cold_index
@@ -724,7 +747,7 @@ cargo bench
 - **P0**: ~~Checkpoint/Recovery - 生产环境必需~~ :white_check_mark: 已完成
 - **P1**: ~~Read Cache, Compaction, Index Growth - 性能关键~~ :white_check_mark: 已完成
 - **P2**: ~~F2 Checkpoint/Recovery, Statistics 集成, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: 已完成
-- **P3**: io_uring 完整实现, 配置文件 - 生态扩展
+- **P3**: io_uring 后端完善（高级特性/性能调优）, 配置文件 - 生态扩展
 
 ### 开发流程
 

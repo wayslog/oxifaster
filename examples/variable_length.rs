@@ -6,9 +6,51 @@
 
 use std::sync::Arc;
 
-use oxifaster::device::NullDisk;
+use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use oxifaster::varlen::{SpanByte, SpanByteBuilder};
+use tempfile::tempdir;
+
+fn run_fasterkv_with_spanbyte<D: StorageDevice>(device_name: &str, device: D) {
+    // 8. 使用 SpanByte 作为 Key 和 Value
+    println!("--- 8. 在 FasterKv 中使用 SpanByte（{device_name}） ---");
+    let config = FasterKvConfig {
+        table_size: 1024,
+        log_memory_size: 1 << 20,
+        page_size_bits: 14,
+        mutable_fraction: 0.9,
+    };
+    let store = Arc::new(FasterKv::<SpanByte, SpanByte, _>::new(config, device));
+
+    {
+        let mut session = store.start_session();
+
+        // 插入字符串键值
+        let key = SpanByte::from_string("user:1");
+        let value = SpanByte::from_string("Alice");
+        let status = session.upsert(key.clone(), value);
+        println!("  插入 user:1 -> Alice: {status:?}");
+
+        // 读取
+        match session.read(&key) {
+            Ok(Some(v)) => println!("  读取 user:1: {}", v.to_string_lossy()),
+            Ok(None) => println!("  user:1 未找到"),
+            Err(_) => println!("  读取失败"),
+        }
+
+        // 更新
+        let new_value = SpanByte::from_string("Alice Smith");
+        session.upsert(key.clone(), new_value);
+        if let Ok(Some(v)) = session.read(&key) {
+            println!("  更新后 user:1: {}", v.to_string_lossy());
+        }
+
+        // 删除
+        let delete_status = session.delete(&key);
+        println!("  删除 user:1: {delete_status:?}");
+    }
+    println!();
+}
 
 fn main() {
     println!("=== oxifaster Variable Length Records 示例 ===\n");
@@ -99,45 +141,15 @@ fn main() {
     println!("  key1 == key2: {}", key1.get_hash() == key2.get_hash());
     println!("  key1 == key3: {}\n", key1.get_hash() == key3.get_hash());
 
-    // 8. 使用 SpanByte 作为 Key 和 Value
-    println!("--- 8. 在 FasterKv 中使用 SpanByte ---");
-    let config = FasterKvConfig {
-        table_size: 1024,
-        log_memory_size: 1 << 20,
-        page_size_bits: 14,
-        mutable_fraction: 0.9,
-    };
-    let device = NullDisk::new();
-    let store = Arc::new(FasterKv::<SpanByte, SpanByte, _>::new(config, device));
+    run_fasterkv_with_spanbyte("NullDisk（纯内存）", NullDisk::new());
 
-    {
-        let mut session = store.start_session();
-
-        // 插入字符串键值
-        let key = SpanByte::from_string("user:1");
-        let value = SpanByte::from_string("Alice");
-        let status = session.upsert(key.clone(), value);
-        println!("  插入 user:1 -> Alice: {status:?}");
-
-        // 读取
-        match session.read(&key) {
-            Ok(Some(v)) => println!("  读取 user:1: {}", v.to_string_lossy()),
-            Ok(None) => println!("  user:1 未找到"),
-            Err(_) => println!("  读取失败"),
-        }
-
-        // 更新
-        let new_value = SpanByte::from_string("Alice Smith");
-        session.upsert(key.clone(), new_value);
-        if let Ok(Some(v)) = session.read(&key) {
-            println!("  更新后 user:1: {}", v.to_string_lossy());
-        }
-
-        // 删除
-        let delete_status = session.delete(&key);
-        println!("  删除 user:1: {delete_status:?}");
-    }
-    println!();
+    let dir = tempdir().expect("创建临时目录失败");
+    let data_path = dir.path().join("oxifaster_variable_length.dat");
+    let fs_device = FileSystemDisk::single_file(&data_path).expect("创建数据文件失败");
+    run_fasterkv_with_spanbyte(
+        &format!("FileSystemDisk（文件持久化：{}）", data_path.display()),
+        fs_device,
+    );
 
     // 9. 二进制数据
     println!("--- 9. 二进制数据支持 ---");

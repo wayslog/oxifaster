@@ -31,19 +31,28 @@ Add the dependency to your `Cargo.toml`:
 oxifaster = { path = "oxifaster" }
 ```
 
+Enable the Linux `io_uring` backend (feature-gated):
+
+```toml
+[dependencies]
+oxifaster = { path = "oxifaster", features = ["io_uring"] }
+```
+
+Note: the real `io_uring` backend is only available on Linux. On non-Linux platforms (or when the feature is disabled), `IoUringDevice` falls back to a mock implementation to keep the API compatible.
+
 ### Basic Usage
 
 ```rust
 use std::sync::Arc;
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
-fn main() {
+fn main() -> std::io::Result<()> {
     // Create configuration
     let config = FasterKvConfig::default();
     
-    // Create storage device (using NullDisk for in-memory testing)
-    let device = NullDisk::new();
+    // Create storage device (FileSystemDisk is the default persistent device)
+    let device = FileSystemDisk::single_file("oxifaster.db")?;
     
     // Create store
     let store = Arc::new(FasterKv::new(config, device));
@@ -61,6 +70,8 @@ fn main() {
     
     // Delete data
     session.delete(&42u64);
+
+    Ok(())
 }
 ```
 
@@ -123,7 +134,7 @@ This section details the feature comparison between oxifaster and the original C
 |---------|:---:|:---:|:----:|--------|
 | **NullDisk** | Y | Y | Y | Complete |
 | **FileSystemDisk** | Y | Y | Y | Complete |
-| **io_uring (Linux)** | Y | - | P | Mock implementation (API standardized) |
+| **io_uring (Linux)** | Y | - | P | Linux backend implemented (read/write/fsync, feature-gated); mock fallback elsewhere |
 | **IOCP (Windows)** | Y | Y | N | Not implemented |
 | **Tiered Storage** | - | Y | N | Not implemented |
 | **Sharded Storage** | - | Y | N | Not implemented |
@@ -192,7 +203,7 @@ This section details the feature comparison between oxifaster and the original C
 | **device** | StorageDevice trait | `src/device/traits.rs` | :white_check_mark: |
 | **device** | NullDisk memory device | `src/device/null_device.rs` | :white_check_mark: |
 | **device** | FileSystemDisk file device | `src/device/file_device.rs` | :white_check_mark: |
-| **device** | IoUringDevice Mock implementation | `src/device/io_uring.rs` | :construction: |
+| **device** | IoUringDevice (Linux backend + mock fallback) | `src/device/io_uring.rs` | :construction: |
 | **store** | FasterKV core (Read/Upsert/RMW/Delete) | `src/store/faster_kv.rs` | :white_check_mark: |
 | **store** | Session management (with GUID + serial_num) | `src/store/session.rs` | :white_check_mark: |
 | **store** | ThreadContext thread context | `src/store/contexts.rs` | :white_check_mark: |
@@ -328,13 +339,14 @@ let result = compactor.compact_range(scan_range, |chunk| {
 
 | Feature | Description | File | Reference |
 |---------|-------------|------|-----------|
-| **io_uring Full Implementation** | Linux high-performance async I/O | `device/io_uring.rs` | `file_linux.h` |
+| **io_uring Enhancement** | Advanced features (SQPOLL/registered files/fixed buffers) and performance tuning | `src/device/io_uring_linux.rs` | `file_linux.h` |
 | **Statistics Enhancement** | Performance metrics collection and reporting | `stats/collector.rs` | `faster.h` |
 | **TOML Configuration** | Configuration file support | `config.rs` | - |
 
 ```rust
-// Target API: io_uring
-let device = IoUringDevice::new(path)?;
+// Linux + `features = ["io_uring"]`
+use oxifaster::device::IoUringDevice;
+let device = IoUringDevice::with_defaults(path);
 ```
 
 ---
@@ -399,7 +411,10 @@ oxifaster/
 │   │   ├── traits.rs
 │   │   ├── file_device.rs
 │   │   ├── null_device.rs
-│   │   └── io_uring.rs     # Linux io_uring
+│   │   ├── io_uring.rs        # io_uring entrypoint (Linux + mock)
+│   │   ├── io_uring_common.rs # Shared types
+│   │   ├── io_uring_linux.rs  # Linux backend (feature = "io_uring")
+│   │   └── io_uring_mock.rs   # Non-Linux / feature off
 │   │
 │   ├── store/              # FasterKV store
 │   │   ├── mod.rs
@@ -541,13 +556,13 @@ Main KV store class:
 
 ```rust
 use std::sync::Arc;
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 
 // Create store
 let config = FasterKvConfig::default();
-let device = NullDisk::new();
-let store = Arc::new(FasterKv::new(config, device));
+let store_device = FileSystemDisk::single_file("oxifaster.db")?;
+let store = Arc::new(FasterKv::new(config, store_device));
 
 // Start session
 let mut session = store.start_session();
@@ -561,7 +576,10 @@ session.rmw(key, |v| { *v += 1; true });       // Read-Modify-Write
 // Checkpoint and Recovery (Phase 2 complete)
 let token = store.checkpoint(checkpoint_dir)?; // Create checkpoint
 let recovered = FasterKv::recover(            // Recover from checkpoint
-    checkpoint_dir, token, config, device
+    checkpoint_dir,
+    token,
+    config,
+    FileSystemDisk::single_file("oxifaster.db")?
 )?;
 
 // Session persistence
@@ -603,10 +621,10 @@ Standalone high-performance log:
 
 ```rust
 use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
-use oxifaster::device::NullDisk;
+use oxifaster::device::FileSystemDisk;
 
 let config = FasterLogConfig::default();
-let device = NullDisk::new();
+let device = FileSystemDisk::single_file("oxifaster.log")?;
 let log = FasterLog::new(config, device);
 
 // Append data
@@ -657,12 +675,17 @@ println!("Cache hit rate: {:.2}%", stats.cache_hit_rate() * 100.0);
 
 ## Running Examples
 
+Note: most examples will run twice to compare devices — first with `NullDisk` (in-memory), then with `FileSystemDisk` (temp file).
+
 ```bash
 # Async operations
 cargo run --example async_operations
 
 # Basic KV operations
 cargo run --example basic_kv
+
+# io_uring (Linux, enable feature for real backend)
+cargo run --example io_uring --features io_uring
 
 # Cold index
 cargo run --example cold_index
@@ -724,7 +747,7 @@ Contributions are welcome! Please check the **Feature Comparison Table** and **D
 - **P0**: ~~Checkpoint/Recovery - Production essential~~ :white_check_mark: Complete
 - **P1**: ~~Read Cache, Compaction, Index Growth - Performance critical~~ :white_check_mark: Complete
 - **P2**: ~~F2 Checkpoint/Recovery, Statistics integration, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: Complete
-- **P3**: io_uring full implementation, Configuration file - Ecosystem expansion
+- **P3**: io_uring enhancement (advanced features/performance), Configuration file - Ecosystem expansion
 
 ### Development Workflow
 
