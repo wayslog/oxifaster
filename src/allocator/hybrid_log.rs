@@ -523,14 +523,49 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             return Ok(());
         }
 
+        // flush_until 的语义是“刷新到指定地址之前（不包含 until_address）”。
+        // 为简化实现（并符合后续读回的正确性需求），这里按页写入：
+        // - 如果 until_address 在页内（offset > 0），则该页也需要写入；
+        // - 如果 until_address 恰好是页起点（offset == 0），则不写入该页。
         let begin_page = current_flushed.page();
-        let end_page = until_address.page();
+        let mut last_page = until_address.page();
+        if until_address.offset() == 0 {
+            if last_page == 0 {
+                return Ok(());
+            }
+            last_page -= 1;
+        }
 
-        for page in begin_page..=end_page {
+        // 创建独立的 runtime 用于同步 I/O 操作
+        //
+        // 注意：不能使用 Handle::try_current() + block_on()，因为：
+        // - 如果当前线程已经在运行 tokio runtime，调用 Handle::block_on() 会 panic
+        // - 这在 async 上下文中调用 flush_until/flush_and_shift_head 时会发生
+        //
+        // 因此，我们总是创建一个独立的 runtime 来执行 I/O 操作，确保安全性。
+        // 虽然有一定开销，但这是同步刷盘操作，本身就是低频且阻塞的。
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        for page in begin_page..=last_page {
             if let Some(page_data) = self.pages.get_page(page) {
-                // In a real implementation, this would write to the storage device
-                // For now, we just mark it as flushed
-                let _ = page_data; // Suppress unused warning
+                let page_offset = Address::new(page, 0).control();
+                let expected_len = page_data.len();
+
+                // 在独立 runtime 上执行 async 写入，并验证写入完整性
+                let written =
+                    rt.block_on(async { self.device.write(page_offset, page_data).await })?;
+
+                // 检查是否完整写入：部分写入意味着数据损坏风险
+                if written != expected_len {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        format!(
+                            "partial write to page {page}: expected {expected_len} bytes, wrote {written} bytes"
+                        ),
+                    ));
+                }
             }
         }
 
@@ -543,6 +578,21 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
             if self
                 .flushed_until_address
+                .compare_exchange(current, until_address, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        // 同步更新 safe_read_only_address：表示“已持久化到该地址”
+        loop {
+            let current = self.safe_read_only_address.load(Ordering::Acquire);
+            if until_address <= current {
+                break;
+            }
+            if self
+                .safe_read_only_address
                 .compare_exchange(current, until_address, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {

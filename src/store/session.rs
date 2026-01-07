@@ -11,6 +11,7 @@
 //! - Session state can be saved to and restored from checkpoints
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -287,19 +288,57 @@ where
     }
 
     /// Complete all pending operations
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - If true, blocks until all pending operations complete (with timeout protection)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if all pending operations have completed, `false` otherwise.
+    ///
+    /// # Timeout
+    ///
+    /// When `wait=true`, this method will timeout after 30 seconds to prevent infinite blocking
+    /// in case of I/O worker thread failure. Use `complete_pending_with_timeout` for custom timeout.
     pub fn complete_pending(&mut self, wait: bool) -> bool {
-        if !self.active {
-            return true;
-        }
+        self.complete_pending_with_timeout(wait, Duration::from_secs(30))
+    }
 
-        if self.ctx.pending_count == 0 {
-            return true;
-        }
+    /// Complete all pending operations with custom timeout
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - If true, blocks until all pending operations complete or timeout
+    /// * `timeout` - Maximum duration to wait when `wait=true`
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if all pending operations have completed, `false` if timeout or still pending.
+    pub fn complete_pending_with_timeout(&mut self, wait: bool, timeout: Duration) -> bool {
+        // 即使 session 未 active，也允许驱动全局 I/O 完成事件，避免"只有发起者能推动完成"造成停滞。
+        let start = Instant::now();
 
-        if wait {
-            while self.ctx.pending_count > 0 {
+        loop {
+            let completed = self.store.take_completed_io_for_thread(self.ctx.thread_id);
+            if completed > 0 {
+                self.ctx.pending_count = self.ctx.pending_count.saturating_sub(completed);
+            }
+
+            if !wait || self.ctx.pending_count == 0 {
+                break;
+            }
+
+            // 超时保护：防止 I/O worker 线程崩溃导致无限阻塞
+            if start.elapsed() >= timeout {
+                break;
+            }
+
+            // wait=true：阻塞等待，期间刷新 epoch 并让出时间片
+            if self.active {
                 self.refresh();
             }
+            std::thread::yield_now();
         }
 
         self.ctx.pending_count == 0

@@ -12,6 +12,7 @@ categories = ["database", "data-structures", "concurrency"]
 [features]
 default = []
 statistics = []
+io_uring = ["dep:io-uring"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -27,6 +28,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.6", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

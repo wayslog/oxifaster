@@ -91,7 +91,7 @@ fn main() {
 │                  │  └─────────┴─────────┴─────────────────┘         │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      Storage Device Layer                            │
-│         (NullDisk / FileSystemDisk / io_uring / Azure)              │
+│         (NullDisk / FileSystemDisk / io_uring)                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -125,7 +125,6 @@ fn main() {
 | **FileSystemDisk** | Y | Y | Y | 完成 |
 | **io_uring (Linux)** | Y | - | P | Mock 实现 (API 规范化完成) |
 | **IOCP (Windows)** | Y | Y | N | 未实现 |
-| **Azure Blob Storage** | Y | Y | N | 未实现 |
 | **Tiered Storage** | - | Y | N | 未实现 |
 | **Sharded Storage** | - | Y | N | 未实现 |
 
@@ -330,16 +329,12 @@ let result = compactor.compact_range(scan_range, |chunk| {
 | 功能 | 描述 | 文件 | 参考 |
 |------|------|------|------|
 | **io_uring 完整实现** | Linux 高性能异步 I/O | `device/io_uring.rs` | `file_linux.h` |
-| **Azure Blob Storage** | Azure 存储后端 | `device/azure.rs` | C# `Devices.cs` |
 | **Statistics 完善** | 性能指标收集与报告 | `stats/collector.rs` | `faster.h` |
 | **TOML 配置** | 配置文件支持 | `config.rs` | - |
 
 ```rust
 // 目标 API: io_uring
 let device = IoUringDevice::new(path)?;
-
-// 目标 API: Azure
-let device = AzureBlobDevice::new(connection_string, container)?;
 ```
 
 ---
@@ -729,7 +724,7 @@ cargo bench
 - **P0**: ~~Checkpoint/Recovery - 生产环境必需~~ :white_check_mark: 已完成
 - **P1**: ~~Read Cache, Compaction, Index Growth - 性能关键~~ :white_check_mark: 已完成
 - **P2**: ~~F2 Checkpoint/Recovery, Statistics 集成, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: 已完成
-- **P3**: io_uring 完整实现, Azure Storage, 配置文件 - 生态扩展
+- **P3**: io_uring 完整实现, 配置文件 - 生态扩展
 
 ### 开发流程
 

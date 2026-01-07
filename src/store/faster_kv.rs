@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::address::Address;
@@ -30,6 +31,7 @@ use crate::index::{GrowResult, GrowState, KeyHash, MemHashIndex, MemHashIndexCon
 use crate::record::{Key, Record, RecordInfo, Value};
 use crate::stats::StatsCollector;
 use crate::status::Status;
+use crate::store::pending_io::PendingIoManager;
 use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 use crate::store::{AsyncSession, Session, ThreadContext};
 
@@ -69,6 +71,12 @@ impl Default for FasterKvConfig {
     }
 }
 
+#[derive(Clone)]
+struct DiskReadResult<K, V> {
+    key: K,
+    value: Option<V>,
+}
+
 /// FasterKV - High-performance concurrent key-value store
 ///
 /// This is the main store implementation that coordinates:
@@ -100,6 +108,15 @@ where
     read_cache: Option<ReadCache<K, V>>,
     /// Storage device
     device: Arc<D>,
+    /// Pending I/O 管理器（为 Pending + complete_pending 的读回链路提供后台 I/O）
+    pending_io: PendingIoManager<D>,
+    /// 读盘完成后的结果缓存（按 record address 绑定）
+    ///
+    /// 约定：`read()` 在遇到磁盘地址时返回 Pending；当后台读完成后，
+    /// 结果会被放入该缓存，调用方 `complete_pending()` 后重试 `read()` 即可命中。
+    disk_read_results: Mutex<HashMap<u64, DiskReadResult<K, V>>>,
+    /// 后台 I/O 完成计数（按 thread_id 聚合，供 session 在 complete_pending 中消费）
+    pending_io_completed: Mutex<HashMap<usize, u32>>,
     /// Next session ID
     next_session_id: AtomicU32,
     /// Compactor for log compaction
@@ -197,6 +214,9 @@ where
         // Initialize read cache if configured
         let read_cache = cache_config.map(ReadCache::new);
 
+        // Pending I/O 管理器（独立线程，不依赖外部 tokio runtime）
+        let pending_io = PendingIoManager::new(device.clone());
+
         Self {
             epoch,
             system_state: AtomicSystemState::default(),
@@ -204,6 +224,9 @@ where
             hlog: UnsafeCell::new(hlog),
             read_cache,
             device,
+            pending_io,
+            disk_read_results: Mutex::new(HashMap::new()),
+            pending_io_completed: Mutex::new(HashMap::new()),
             next_session_id: AtomicU32::new(0),
             compactor,
             grow_state: UnsafeCell::new(None),
@@ -211,6 +234,97 @@ where
             session_registry: RwLock::new(HashMap::new()),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
+        }
+    }
+
+    /// 驱动并处理后台 I/O 完成事件（全局）
+    fn process_pending_io_completions(&self) {
+        let completions = self.pending_io.drain_completions();
+        if completions.is_empty() {
+            return;
+        }
+
+        let mut completed = self.pending_io_completed.lock();
+
+        for c in completions {
+            match c {
+                crate::store::pending_io::IoCompletion::ReadBytesDone {
+                    thread_id,
+                    address,
+                    result,
+                } => {
+                    if let Ok(bytes) = result {
+                        if let Some(parsed) = self.parse_disk_record(&bytes) {
+                            self.disk_read_results
+                                .lock()
+                                .insert(address.control(), parsed);
+                        }
+                    }
+
+                    *completed.entry(thread_id).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    /// 消费并返回指定线程已完成的 I/O 数量
+    pub(crate) fn take_completed_io_for_thread(&self, thread_id: usize) -> u32 {
+        self.process_pending_io_completions();
+        self.pending_io_completed
+            .lock()
+            .remove(&thread_id)
+            .unwrap_or(0)
+    }
+
+    /// 从磁盘读回的 record bytes 中解析 key/value（并使用 clone 生成"安全拥有"的结果）
+    ///
+    /// # Safety Note
+    ///
+    /// 此方法仅对 POD（Plain Old Data）类型安全。对于包含指针的类型（如 String, Vec），
+    /// 从磁盘读回的字节会包含无效指针，直接解释会导致未定义行为。
+    ///
+    /// 因此，此方法会在运行时检查 `K` 和 `V` 是否需要 drop：
+    /// - 如果需要 drop（非 POD 类型），返回 `None` 跳过磁盘读取功能
+    /// - 只有 POD 类型（如 u64, i64, [u8; N] 等）才会实际解析
+    fn parse_disk_record(&self, bytes: &[u8]) -> Option<DiskReadResult<K, V>> {
+        // 安全检查：只有 POD 类型才能安全地从原始字节重建
+        // 非 POD 类型（如 String, Vec）包含指针，从磁盘读回会导致无效指针
+        if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
+            // 非 POD 类型不支持磁盘读取，返回 None
+            // 上层会因为无法命中缓存而一直返回 Pending（符合预期：该功能仅支持 POD 类型）
+            return None;
+        }
+
+        let min_len = Record::<K, V>::disk_size() as usize;
+        if bytes.len() < min_len {
+            return None;
+        }
+
+        let header_control = u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?);
+        let header = RecordInfo::from_control(header_control);
+
+        let key_offset = Record::<K, V>::key_offset();
+        let value_offset = Record::<K, V>::value_offset();
+
+        // SAFETY:
+        // 1. 已通过 needs_drop 检查确保 K 和 V 是 POD 类型（无内部指针）
+        // 2. bytes 来源于 Record::<K,V>::disk_size() 的读回，长度已验证
+        // 3. offset 由 Record 布局计算得出，保证正确对齐
+        unsafe {
+            let key_ptr = bytes.as_ptr().add(key_offset) as *const K;
+            let value_ptr = bytes.as_ptr().add(value_offset) as *const V;
+
+            // 对于 POD 类型，直接按位复制即可（等价于 Copy）
+            let key: K = ptr::read_unaligned(key_ptr);
+
+            let value = if header.is_tombstone() {
+                None
+            } else {
+                let value: V = ptr::read_unaligned(value_ptr);
+                Some(value)
+            };
+
+            Some(DiskReadResult { key, value })
         }
     }
 
@@ -437,7 +551,7 @@ where
     }
 
     /// Synchronous read operation
-    pub(crate) fn read_sync(&self, _ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
+    pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
         let start = Instant::now();
         let hash = KeyHash::new(key.get_hash());
 
@@ -504,16 +618,40 @@ where
                 continue;
             }
 
-            // SAFETY: These are read-only accesses to log metadata
+            // SAFETY: 只读访问 hybrid log 元数据
             let head_address = unsafe { self.hlog().get_head_address() };
 
             if address < head_address {
+                // 优先尝试命中“读盘完成结果缓存”，避免重复提交 I/O
+                if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
+                    if result.key == *key {
+                        // 读盘完成后会缓存 tombstone(None) 或 value(Some)
+                        if self.stats_collector.is_enabled() {
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_read(result.value.is_some());
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_latency(start.elapsed());
+                        }
+                        return Ok(result.value);
+                    }
+                }
+
                 // Record pending statistics
                 if self.stats_collector.is_enabled() {
                     self.stats_collector.store_stats.operations.record_pending();
                 }
-                // Record is on disk - need async I/O
-                // TODO: In the future, we could read from disk and insert into cache
+                // Record is on disk - 提交异步读请求并返回 Pending
+                let record_len = Record::<K, V>::disk_size() as usize;
+                if self
+                    .pending_io
+                    .submit_read_bytes(ctx.thread_id, address, record_len)
+                {
+                    ctx.pending_count = ctx.pending_count.saturating_add(1);
+                }
                 return Err(Status::Pending);
             }
 
@@ -866,13 +1004,36 @@ where
 
     /// Simple compaction: shift log begin address and garbage collect index
     pub fn compact(&self, until_address: Address) -> Status {
-        // Update head address
-        // SAFETY: shift_head_address is protected by epoch
-        unsafe { self.hlog_mut().shift_head_address(until_address) };
+        // compact 的语义是“回收”，对应推进 begin_address，而不是 head_address。
+        // head_address 表示“是否在磁盘”，推进 head 会触发 Pending 读回语义（见 flush_and_shift_head）。
+        //
+        // 为保证被回收范围的数据已稳定落盘（例如用于后续诊断/读回），这里先执行一次 flush。
+        if let Err(_e) = unsafe { self.hlog().flush_until(until_address) } {
+            return Status::Corruption;
+        }
+
+        // Update begin address
+        // SAFETY: shift_begin_address is protected by epoch
+        unsafe { self.hlog_mut().shift_begin_address(until_address) };
 
         // Garbage collect hash index
         self.hash_index.garbage_collect(until_address);
 
+        Status::Ok
+    }
+
+    /// 把指定地址之前的数据“落盘并标记为磁盘区”（推进 head_address，不做索引回收）
+    ///
+    /// 这是实现 FASTER 风格 `Pending + complete_pending` 的关键：
+    /// 当 `address < head_address` 时，`read()` 返回 `Status::Pending`，
+    /// 调用方通过 `complete_pending()` 驱动读盘完成后重试即可成功。
+    pub fn flush_and_shift_head(&self, new_head: Address) -> Status {
+        if let Err(_e) = unsafe { self.hlog().flush_until(new_head) } {
+            return Status::Corruption;
+        }
+
+        // SAFETY: shift_head_address is protected by epoch
+        unsafe { self.hlog_mut().shift_head_address(new_head) };
         Status::Ok
     }
 
@@ -1913,6 +2074,7 @@ where
 
         // Initialize read cache if configured
         let read_cache = cache_config.map(ReadCache::new);
+        let pending_io = PendingIoManager::new(device.clone());
 
         // Phase 4: Build session registry from recovered session states
         let mut session_registry = HashMap::new();
@@ -1931,6 +2093,9 @@ where
             hlog: UnsafeCell::new(hlog),
             read_cache,
             device,
+            pending_io,
+            disk_read_results: Mutex::new(HashMap::new()),
+            pending_io_completed: Mutex::new(HashMap::new()),
             next_session_id: AtomicU32::new(next_session_id),
             compactor,
             grow_state: UnsafeCell::new(None),
@@ -2099,6 +2264,7 @@ where
 
         // Initialize compactor
         let compactor = Compactor::with_config(CompactionConfig::default());
+        let pending_io = PendingIoManager::new(device.clone());
 
         Ok(Self {
             epoch,
@@ -2107,6 +2273,9 @@ where
             hlog: UnsafeCell::new(hlog),
             read_cache: None,
             device,
+            pending_io,
+            disk_read_results: Mutex::new(HashMap::new()),
+            pending_io_completed: Mutex::new(HashMap::new()),
             next_session_id: AtomicU32::new(0),
             compactor,
             grow_state: UnsafeCell::new(None),
@@ -2169,6 +2338,7 @@ where
 
         // Initialize compactor
         let compactor = Compactor::with_config(CompactionConfig::default());
+        let pending_io = PendingIoManager::new(device.clone());
 
         // Restore session states
         let mut session_registry = HashMap::new();
@@ -2183,6 +2353,9 @@ where
             hlog: UnsafeCell::new(hlog),
             read_cache: None,
             device,
+            pending_io,
+            disk_read_results: Mutex::new(HashMap::new()),
+            pending_io_completed: Mutex::new(HashMap::new()),
             next_session_id: AtomicU32::new(log_meta.num_threads),
             compactor,
             grow_state: UnsafeCell::new(None),

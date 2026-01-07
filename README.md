@@ -91,7 +91,7 @@ This section details the feature comparison between oxifaster and the original C
 │                  │  └─────────┴─────────┴─────────────────┘         │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      Storage Device Layer                            │
-│         (NullDisk / FileSystemDisk / io_uring / Azure)              │
+│         (NullDisk / FileSystemDisk / io_uring)                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -125,7 +125,6 @@ This section details the feature comparison between oxifaster and the original C
 | **FileSystemDisk** | Y | Y | Y | Complete |
 | **io_uring (Linux)** | Y | - | P | Mock implementation (API standardized) |
 | **IOCP (Windows)** | Y | Y | N | Not implemented |
-| **Azure Blob Storage** | Y | Y | N | Not implemented |
 | **Tiered Storage** | - | Y | N | Not implemented |
 | **Sharded Storage** | - | Y | N | Not implemented |
 
@@ -330,16 +329,12 @@ let result = compactor.compact_range(scan_range, |chunk| {
 | Feature | Description | File | Reference |
 |---------|-------------|------|-----------|
 | **io_uring Full Implementation** | Linux high-performance async I/O | `device/io_uring.rs` | `file_linux.h` |
-| **Azure Blob Storage** | Azure storage backend | `device/azure.rs` | C# `Devices.cs` |
 | **Statistics Enhancement** | Performance metrics collection and reporting | `stats/collector.rs` | `faster.h` |
 | **TOML Configuration** | Configuration file support | `config.rs` | - |
 
 ```rust
 // Target API: io_uring
 let device = IoUringDevice::new(path)?;
-
-// Target API: Azure
-let device = AzureBlobDevice::new(connection_string, container)?;
 ```
 
 ---
@@ -729,7 +724,7 @@ Contributions are welcome! Please check the **Feature Comparison Table** and **D
 - **P0**: ~~Checkpoint/Recovery - Production essential~~ :white_check_mark: Complete
 - **P1**: ~~Read Cache, Compaction, Index Growth - Performance critical~~ :white_check_mark: Complete
 - **P2**: ~~F2 Checkpoint/Recovery, Statistics integration, Cold Index, Checkpoint Locks, Concurrent Compaction~~ :white_check_mark: Complete
-- **P3**: io_uring full implementation, Azure Storage, Configuration file - Ecosystem expansion
+- **P3**: io_uring full implementation, Configuration file - Ecosystem expansion
 
 ### Development Workflow
 

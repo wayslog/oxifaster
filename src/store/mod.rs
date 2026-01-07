@@ -51,6 +51,7 @@
 mod async_session;
 mod contexts;
 mod faster_kv;
+mod pending_io;
 mod session;
 mod state_transitions;
 
