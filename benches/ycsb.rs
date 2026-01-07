@@ -385,88 +385,134 @@ fn bench_concurrent_write(c: &mut Criterion) {
 // Large Key/Value Benchmarks (using SpanByte)
 // =============================================================================
 
-/// Benchmark read performance with different value sizes
-fn bench_large_value_read(c: &mut Criterion) {
-    let mut group = c.benchmark_group("large_value_read");
-    group.measurement_time(Duration::from_secs(5));
+/// Benchmark read with 1KB values
+fn bench_large_value_read_1kb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_read_1kb");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(1024));
 
-    // Test different value sizes: 1KB, 4KB, 64KB, 256KB
-    let value_sizes = [1024, 4096, 65536, 262144];
+    // Small store: 64MB
+    let store = create_spanb_store(1 << 14, 1 << 26);
+    let test_data = generate_random_bytes(1024);
+    let num_keys = 500u64;
 
-    for &value_size in &value_sizes {
-        // Use larger memory for larger values
-        let memory_size = std::cmp::max(1 << 28, (value_size as u64) * 10000);
-        let store = create_spanb_store(1 << 18, memory_size);
-
-        // Pre-generate test data
-        let num_keys = 1000u64;
-        let test_data = generate_random_bytes(value_size);
-
-        // Populate store
-        {
-            let mut session = store.start_session();
-            for i in 0..num_keys {
-                let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
-                let value = SpanByte::from_vec(test_data.clone());
-                session.upsert(key, value);
-            }
+    // Populate
+    {
+        let mut session = store.start_session();
+        for i in 0..num_keys {
+            let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
+            let value = SpanByte::from_vec(test_data.clone());
+            session.upsert(key, value);
         }
-
-        group.throughput(Throughput::Bytes(value_size as u64));
-
-        group.bench_with_input(
-            BenchmarkId::new("size_bytes", value_size),
-            &value_size,
-            |b, _| {
-                let mut session = store.start_session();
-                let mut rng = rand::thread_rng();
-
-                b.iter(|| {
-                    let key_num = rng.gen_range(0..num_keys);
-                    let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
-                    session.read(black_box(&key))
-                })
-            },
-        );
     }
+
+    group.bench_function("random", |b| {
+        let mut session = store.start_session();
+        let mut rng = rand::thread_rng();
+        b.iter(|| {
+            let key_num = rng.gen_range(0..num_keys);
+            let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+            session.read(black_box(&key))
+        })
+    });
 
     group.finish();
 }
 
-/// Benchmark write performance with different value sizes
-fn bench_large_value_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("large_value_write");
-    group.measurement_time(Duration::from_secs(5));
+/// Benchmark read with 4KB values
+fn bench_large_value_read_4kb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_read_4kb");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(4096));
 
-    // Test different value sizes: 1KB, 4KB, 64KB, 256KB
-    let value_sizes = [1024, 4096, 65536, 262144];
+    let store = create_spanb_store(1 << 14, 1 << 26);
+    let test_data = generate_random_bytes(4096);
+    let num_keys = 500u64;
 
-    for &value_size in &value_sizes {
-        // Use larger memory for larger values
-        let memory_size = std::cmp::max(1 << 28, (value_size as u64) * 10000);
-        let store = create_spanb_store(1 << 18, memory_size);
-
-        // Pre-generate test data
-        let test_data = generate_random_bytes(value_size);
-        let mut key_counter = 0u64;
-
-        group.throughput(Throughput::Bytes(value_size as u64));
-
-        group.bench_with_input(
-            BenchmarkId::new("size_bytes", value_size),
-            &value_size,
-            |b, _| {
-                let mut session = store.start_session();
-
-                b.iter(|| {
-                    let key = SpanByte::from_vec(key_counter.to_le_bytes().to_vec());
-                    let value = SpanByte::from_vec(test_data.clone());
-                    key_counter += 1;
-                    session.upsert(black_box(key), black_box(value))
-                })
-            },
-        );
+    {
+        let mut session = store.start_session();
+        for i in 0..num_keys {
+            let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
+            let value = SpanByte::from_vec(test_data.clone());
+            session.upsert(key, value);
+        }
     }
+
+    group.bench_function("random", |b| {
+        let mut session = store.start_session();
+        let mut rng = rand::thread_rng();
+        b.iter(|| {
+            let key_num = rng.gen_range(0..num_keys);
+            let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+            session.read(black_box(&key))
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark write with 1KB values using iter_batched to control memory
+fn bench_large_value_write_1kb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_write_1kb");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(1024));
+
+    let store = create_spanb_store(1 << 14, 1 << 26);
+    let test_data: Arc<Vec<u8>> = Arc::new(generate_random_bytes(1024));
+    let max_keys = 500u64;
+    let key_counter = Arc::new(AtomicU64::new(0));
+
+    group.bench_function("sequential", |b| {
+        let mut session = store.start_session();
+        let test_data = test_data.clone();
+        let key_counter = key_counter.clone();
+
+        b.iter_batched(
+            || {
+                let key_num = key_counter.fetch_add(1, Ordering::Relaxed) % max_keys;
+                let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+                let value = SpanByte::from_vec((*test_data).clone());
+                (key, value)
+            },
+            |(key, value)| session.upsert(black_box(key), black_box(value)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+/// Benchmark write with 4KB values using iter_batched to control memory
+fn bench_large_value_write_4kb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_value_write_4kb");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Bytes(4096));
+
+    let store = create_spanb_store(1 << 14, 1 << 26);
+    let test_data: Arc<Vec<u8>> = Arc::new(generate_random_bytes(4096));
+    let max_keys = 500u64;
+    let key_counter = Arc::new(AtomicU64::new(0));
+
+    group.bench_function("sequential", |b| {
+        let mut session = store.start_session();
+        let test_data = test_data.clone();
+        let key_counter = key_counter.clone();
+
+        b.iter_batched(
+            || {
+                let key_num = key_counter.fetch_add(1, Ordering::Relaxed) % max_keys;
+                let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+                let value = SpanByte::from_vec((*test_data).clone());
+                (key, value)
+            },
+            |(key, value)| session.upsert(black_box(key), black_box(value)),
+            criterion::BatchSize::SmallInput,
+        )
+    });
 
     group.finish();
 }
@@ -605,13 +651,16 @@ criterion_group!(
     targets = bench_concurrent_read, bench_concurrent_mixed, bench_concurrent_write
 );
 
-// Large value benchmarks using SpanByte
+// Large value benchmarks using SpanByte (separate functions to control memory)
 criterion_group!(
     name = large_value_benches;
     config = Criterion::default()
         .sample_size(50)
-        .measurement_time(Duration::from_secs(5));
-    targets = bench_large_value_read, bench_large_value_write
+        .measurement_time(Duration::from_secs(3));
+    targets = bench_large_value_read_1kb,
+              bench_large_value_read_4kb,
+              bench_large_value_write_1kb,
+              bench_large_value_write_4kb
 );
 
 // Real disk I/O benchmarks
