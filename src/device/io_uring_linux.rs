@@ -115,6 +115,7 @@ impl IoUringDevice {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&self.path)?;
 
         let entries = self.config.sq_entries.max(2);
@@ -144,8 +145,24 @@ impl IoUringDevice {
     }
 }
 
+/// 校验 offset 是否超出底层文件 API（off_t，通常为 i64）可表达的范围。
+///
+/// 虽然 io-uring 接口使用 u64 offset，但内核最终仍会转换为 off_t；
+/// 因此我们在用户态提前返回明确错误，避免触发不可预期行为。
+#[inline]
+fn checked_offset(offset: u64) -> io::Result<u64> {
+    if offset > i64::MAX as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("offset {offset} exceeds i64::MAX, not supported by io_uring/off_t"),
+        ));
+    }
+    Ok(offset)
+}
+
 impl SyncStorageDevice for IoUringDevice {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let offset = checked_offset(offset)?;
         self.with_state(|state| {
             let start = Instant::now();
 
@@ -174,6 +191,7 @@ impl SyncStorageDevice for IoUringDevice {
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        let offset = checked_offset(offset)?;
         self.with_state(|state| {
             let start = Instant::now();
 
