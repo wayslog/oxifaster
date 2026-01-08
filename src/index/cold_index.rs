@@ -375,25 +375,25 @@ impl ColdIndexStats {
     pub fn print_stats(&self) {
         let find_calls = self.find_entry_calls.load(Ordering::Relaxed);
         let find_success = self.find_entry_success.load(Ordering::Relaxed);
-        eprintln!("FindEntry Calls: {find_calls}");
+        tracing::info!("FindEntry Calls: {find_calls}");
         if find_calls > 0 {
             let rate = (find_success as f64 / find_calls as f64) * 100.0;
-            eprintln!("  Success Rate: {rate:.2}%");
+            tracing::info!("  Success Rate: {rate:.2}%");
         }
 
         let try_update_calls = self.try_update_calls.load(Ordering::Relaxed);
         let try_update_success = self.try_update_success.load(Ordering::Relaxed);
-        eprintln!("TryUpdateEntry Calls: {try_update_calls}");
+        tracing::info!("TryUpdateEntry Calls: {try_update_calls}");
         if try_update_calls > 0 {
             let rate = (try_update_success as f64 / try_update_calls as f64) * 100.0;
-            eprintln!("  Success Rate: {rate:.2}%");
+            tracing::info!("  Success Rate: {rate:.2}%");
         }
 
-        eprintln!(
+        tracing::info!(
             "FindOrCreateEntry Calls: {}",
             self.find_or_create_calls.load(Ordering::Relaxed)
         );
-        eprintln!(
+        tracing::info!(
             "UpdateEntry Calls: {}",
             self.update_entry_calls.load(Ordering::Relaxed)
         );
@@ -718,7 +718,7 @@ impl ColdIndex {
 
     /// Print statistics
     pub fn print_stats(&self) {
-        eprintln!("==== COLD-INDEX ====");
+        tracing::info!("==== COLD-INDEX ====");
         self.stats.print_stats();
     }
 }

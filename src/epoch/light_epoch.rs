@@ -376,7 +376,7 @@ impl LightEpoch {
                 retries += 1;
                 if retries >= 500 {
                     thread::sleep(Duration::from_secs(1));
-                    eprintln!("Warning: Unable to add trigger to epoch after many retries");
+                    tracing::warn!("Unable to add trigger to epoch after many retries");
                     // Execute the callback directly since we couldn't defer it
                     if let Some(cb) = callback.take() {
                         cb();

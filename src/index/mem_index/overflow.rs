@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering;
-use std::sync::RwLock;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::index::hash_bucket::FixedPageAddress;
 use crate::index::{HashBucket, HashBucketEntry, HashBucketOverflowEntry};
@@ -31,7 +30,7 @@ impl OverflowBucketPool {
     /// 需要 `&mut self`：在安全 Rust 中这保证了调用方拥有独占访问，避免与并发遍历产生 UAF。
     pub(super) fn clear(&mut self) {
         self.free_list.get_mut().clear();
-        let mut buckets = self.buckets.write().unwrap();
+        let mut buckets = self.buckets.write();
         for ptr in buckets.drain(..) {
             // SAFETY: ptr 来自 Box::into_raw，且只会在这里/Drop 中释放一次。
             unsafe { drop(Box::from_raw(ptr)) };
@@ -39,7 +38,7 @@ impl OverflowBucketPool {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.buckets.read().unwrap().len()
+        self.buckets.read().len()
     }
 
     fn reset_bucket(bucket: &HashBucket) {
@@ -62,7 +61,7 @@ impl OverflowBucketPool {
             return addr;
         }
 
-        let mut buckets = self.buckets.write().unwrap();
+        let mut buckets = self.buckets.write();
         let bucket = Box::new(HashBucket::new());
         buckets.push(Box::into_raw(bucket));
         FixedPageAddress::new(buckets.len() as u64)
@@ -90,7 +89,7 @@ impl OverflowBucketPool {
         if index == 0 {
             return None;
         }
-        let buckets = self.buckets.read().unwrap();
+        let buckets = self.buckets.read();
         buckets
             .get(index - 1)
             .copied()
@@ -99,7 +98,7 @@ impl OverflowBucketPool {
 
     /// 获取所有 overflow bucket 的快照（用于 checkpoint）。
     pub(super) fn snapshot_ptrs(&self) -> Vec<*const HashBucket> {
-        let buckets = self.buckets.read().unwrap();
+        let buckets = self.buckets.read();
         buckets
             .iter()
             .copied()
@@ -123,11 +122,10 @@ impl Drop for OverflowBucketPool {
     fn drop(&mut self) {
         // Drop 时不应阻塞，且此时不会有并发访问（结构体正在析构）。
         self.free_list.get_mut().clear();
-        if let Ok(buckets) = self.buckets.get_mut() {
-            for ptr in buckets.drain(..) {
-                // SAFETY: 同 clear()
-                unsafe { drop(Box::from_raw(ptr)) };
-            }
+        let buckets = self.buckets.get_mut();
+        for ptr in buckets.drain(..) {
+            // SAFETY: 同 clear()
+            unsafe { drop(Box::from_raw(ptr)) };
         }
     }
 }

@@ -162,194 +162,195 @@ impl SystemState {
     }
 
     /// Get the next state in the state machine
-    pub fn get_next_state(&self) -> Option<SystemState> {
+    pub fn get_next_state(&self) -> Result<SystemState, crate::status::Status> {
+        use crate::status::Status;
         match self.action {
-            Action::None => None,
+            Action::None => Err(Status::InvalidOperation),
 
             Action::CheckpointFull => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::PrepIndexChkpt,
                     self.version,
                 )),
-                Phase::PrepIndexChkpt => Some(SystemState::new(
+                Phase::PrepIndexChkpt => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::IndexChkpt,
                     self.version,
                 )),
-                Phase::IndexChkpt => Some(SystemState::new(
+                Phase::IndexChkpt => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::Prepare,
                     self.version,
                 )),
-                Phase::Prepare => Some(SystemState::new(
+                Phase::Prepare => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::InProgress,
                     self.version + 1, // Version increment happens here
                 )),
-                Phase::InProgress => Some(SystemState::new(
+                Phase::InProgress => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::WaitPending,
                     self.version,
                 )),
-                Phase::WaitPending => Some(SystemState::new(
+                Phase::WaitPending => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::WaitFlush,
                     self.version,
                 )),
-                Phase::WaitFlush => Some(SystemState::new(
+                Phase::WaitFlush => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::PersistenceCallback,
                     self.version,
                 )),
-                Phase::PersistenceCallback => Some(SystemState::new(
+                Phase::PersistenceCallback => Ok(SystemState::new(
                     Action::CheckpointFull,
                     Phase::Rest,
                     self.version,
                 )),
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
 
             Action::CheckpointIndex => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::CheckpointIndex,
                     Phase::PrepIndexChkpt,
                     self.version,
                 )),
-                Phase::PrepIndexChkpt => Some(SystemState::new(
+                Phase::PrepIndexChkpt => Ok(SystemState::new(
                     Action::CheckpointIndex,
                     Phase::IndexChkpt,
                     self.version,
                 )),
-                Phase::IndexChkpt => Some(SystemState::new(
+                Phase::IndexChkpt => Ok(SystemState::new(
                     Action::CheckpointIndex,
                     Phase::Rest,
                     self.version,
                 )),
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
 
             Action::CheckpointHybridLog => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::Prepare,
                     self.version,
                 )),
-                Phase::Prepare => Some(SystemState::new(
+                Phase::Prepare => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::InProgress,
                     self.version + 1,
                 )),
-                Phase::InProgress => Some(SystemState::new(
+                Phase::InProgress => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::WaitPending,
                     self.version,
                 )),
-                Phase::WaitPending => Some(SystemState::new(
+                Phase::WaitPending => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::WaitFlush,
                     self.version,
                 )),
-                Phase::WaitFlush => Some(SystemState::new(
+                Phase::WaitFlush => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::PersistenceCallback,
                     self.version,
                 )),
-                Phase::PersistenceCallback => Some(SystemState::new(
+                Phase::PersistenceCallback => Ok(SystemState::new(
                     Action::CheckpointHybridLog,
                     Phase::Rest,
                     self.version,
                 )),
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
 
             Action::GC => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::GC,
                     Phase::GcIoPending,
                     self.version,
                 )),
-                Phase::GcIoPending => Some(SystemState::new(
+                Phase::GcIoPending => Ok(SystemState::new(
                     Action::GC,
                     Phase::GcInProgress,
                     self.version,
                 )),
                 Phase::GcInProgress => {
-                    Some(SystemState::new(Action::GC, Phase::Rest, self.version))
+                    Ok(SystemState::new(Action::GC, Phase::Rest, self.version))
                 }
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
 
             Action::GrowIndex => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::GrowIndex,
                     Phase::GrowPrepare,
                     self.version,
                 )),
-                Phase::GrowPrepare => Some(SystemState::new(
+                Phase::GrowPrepare => Ok(SystemState::new(
                     Action::GrowIndex,
                     Phase::GrowInProgress,
                     self.version,
                 )),
-                Phase::GrowInProgress => Some(SystemState::new(
+                Phase::GrowInProgress => Ok(SystemState::new(
                     Action::GrowIndex,
                     Phase::Rest,
                     self.version,
                 )),
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
 
             Action::Recover => {
                 // Recovery doesn't have standard state transitions
                 // It's handled separately by the recovery module
-                None
+                Err(Status::InvalidOperation)
             }
 
             // Incremental checkpoints also need to persist index files (index.meta/index.dat),
             // otherwise validation/recovery will fail. Therefore, we reuse the full checkpoint
             // phase transitions (including index phases), and only write delta during IN_PROGRESS.
             Action::CheckpointIncremental => match self.phase {
-                Phase::Rest => Some(SystemState::new(
+                Phase::Rest => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::PrepIndexChkpt,
                     self.version,
                 )),
-                Phase::PrepIndexChkpt => Some(SystemState::new(
+                Phase::PrepIndexChkpt => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::IndexChkpt,
                     self.version,
                 )),
-                Phase::IndexChkpt => Some(SystemState::new(
+                Phase::IndexChkpt => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::Prepare,
                     self.version,
                 )),
-                Phase::Prepare => Some(SystemState::new(
+                Phase::Prepare => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::InProgress,
                     self.version + 1,
                 )),
-                Phase::InProgress => Some(SystemState::new(
+                Phase::InProgress => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::WaitPending,
                     self.version,
                 )),
-                Phase::WaitPending => Some(SystemState::new(
+                Phase::WaitPending => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::WaitFlush,
                     self.version,
                 )),
-                Phase::WaitFlush => Some(SystemState::new(
+                Phase::WaitFlush => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::PersistenceCallback,
                     self.version,
                 )),
-                Phase::PersistenceCallback => Some(SystemState::new(
+                Phase::PersistenceCallback => Ok(SystemState::new(
                     Action::CheckpointIncremental,
                     Phase::Rest,
                     self.version,
                 )),
-                _ => None,
+                _ => Err(Status::InvalidOperation),
             },
         }
     }
@@ -484,8 +485,8 @@ impl AtomicSystemState {
 
         // Get the first state in the action's sequence
         let next_state = match new_state.get_next_state() {
-            Some(s) => s,
-            None => return Err(current),
+            Ok(s) => s,
+            Err(_) => return Err(current),
         };
 
         self.compare_exchange(current, next_state, Ordering::AcqRel, Ordering::Acquire)
@@ -497,8 +498,8 @@ impl AtomicSystemState {
             let current = self.load(Ordering::Acquire);
 
             let next = match current.get_next_state() {
-                Some(s) => s,
-                None => return Err(current),
+                Ok(s) => s,
+                Err(_) => return Err(current),
             };
 
             match self.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {

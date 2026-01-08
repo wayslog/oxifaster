@@ -1055,9 +1055,15 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             }
 
             // Parse entry header
-            let page_num = u64::from_le_bytes(payload[0..8].try_into().unwrap()) as u32;
-            let offset = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
-            let length = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+            let page_num = u64::from_le_bytes(payload[0..8].try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid page_num in delta log")
+            })?) as u32;
+            let offset = u32::from_le_bytes(payload[8..12].try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid offset in delta log")
+            })?) as usize;
+            let length = u32::from_le_bytes(payload[12..16].try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid length in delta log")
+            })?) as usize;
 
             if payload.len() < 16 + length {
                 continue; // Invalid entry

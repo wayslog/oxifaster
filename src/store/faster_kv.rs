@@ -9,10 +9,10 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::address::Address;
@@ -496,19 +496,15 @@ where
     ///
     /// Called when a session starts or updates its state.
     pub fn register_session(&self, state: &SessionState) {
-        if let Ok(mut registry) = self.session_registry.write() {
-            registry.insert(state.guid, state.clone());
-        }
+        self.session_registry.write().insert(state.guid, state.clone());
     }
 
     /// Update a session's state in the registry
     ///
     /// Should be called periodically by sessions to keep checkpoint state current.
     pub fn update_session(&self, state: &SessionState) {
-        if let Ok(mut registry) = self.session_registry.write() {
-            if let Some(entry) = registry.get_mut(&state.guid) {
-                entry.serial_num = state.serial_num;
-            }
+        if let Some(entry) = self.session_registry.write().get_mut(&state.guid) {
+            entry.serial_num = state.serial_num;
         }
     }
 
@@ -516,38 +512,24 @@ where
     ///
     /// Called when a session ends.
     pub fn unregister_session(&self, guid: Uuid) {
-        if let Ok(mut registry) = self.session_registry.write() {
-            registry.remove(&guid);
-        }
+        self.session_registry.write().remove(&guid);
     }
 
     /// Get all active session states (for checkpointing)
     ///
     /// Returns a snapshot of all registered session states.
     pub fn get_session_states(&self) -> Vec<SessionState> {
-        if let Ok(registry) = self.session_registry.read() {
-            registry.values().cloned().collect()
-        } else {
-            Vec::new()
-        }
+        self.session_registry.read().values().cloned().collect()
     }
 
     /// Get the number of active sessions
     pub fn active_session_count(&self) -> usize {
-        if let Ok(registry) = self.session_registry.read() {
-            registry.len()
-        } else {
-            0
-        }
+        self.session_registry.read().len()
     }
 
     /// Get a specific session state by GUID
     pub fn get_session_state(&self, guid: Uuid) -> Option<SessionState> {
-        if let Ok(registry) = self.session_registry.read() {
-            registry.get(&guid).cloned()
-        } else {
-            None
-        }
+        self.session_registry.read().get(&guid).cloned()
     }
 
     /// Synchronous read operation
@@ -738,11 +720,10 @@ where
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
 
-        if result.atomic_entry.is_none() {
-            return (Status::OutOfMemory, 0);
-        }
-
-        let atomic_entry = result.atomic_entry.unwrap();
+        let atomic_entry = match result.atomic_entry {
+            Some(entry) => entry,
+            None => return (Status::OutOfMemory, 0),
+        };
         let old_address = result.entry.address();
 
         // Invalidate any existing read cache entry for this key
@@ -841,11 +822,10 @@ where
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
 
-        if !result.found() {
-            return Status::NotFound;
-        }
-
-        let atomic_entry = result.atomic_entry.unwrap();
+        let atomic_entry = match result.atomic_entry {
+            Some(entry) => entry,
+            None => return Status::NotFound,
+        };
         let old_address = result.entry.address();
 
         // Invalidate any existing read cache entry for this key
@@ -921,11 +901,10 @@ where
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
 
-        if result.atomic_entry.is_none() {
-            return Status::OutOfMemory;
-        }
-
-        let _atomic_entry = result.atomic_entry.unwrap();
+        let _atomic_entry = match result.atomic_entry {
+            Some(entry) => entry,
+            None => return Status::OutOfMemory,
+        };
         let old_address = result.entry.address();
 
         // Try to find existing record for in-place update
@@ -1539,7 +1518,7 @@ where
     /// The checkpoint token on success, or an error
     pub fn checkpoint_incremental(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
         // Check if we have a previous snapshot to base the incremental checkpoint on
-        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let prev_snapshot = self.last_snapshot_checkpoint.read();
         let can_use_incremental = prev_snapshot.is_some();
         drop(prev_snapshot);
 
@@ -1693,7 +1672,7 @@ where
                         // Both index and log metadata must have the same token for consistency
                         state.index_metadata.token = token;
                         state.log_metadata.token = token;
-                        *self.last_snapshot_checkpoint.write().unwrap() = Some(state);
+                        *self.last_snapshot_checkpoint.write() = Some(state);
                     }
                 }
 
@@ -1790,7 +1769,7 @@ where
         version: u32,
     ) -> io::Result<LogMetadata> {
         // Get the previous snapshot state
-        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let prev_snapshot = self.last_snapshot_checkpoint.read();
         let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1831,7 +1810,7 @@ where
         version: u32,
     ) -> io::Result<()> {
         // Get the previous snapshot state
-        let prev_snapshot = self.last_snapshot_checkpoint.read().unwrap();
+        let prev_snapshot = self.last_snapshot_checkpoint.read();
         let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
