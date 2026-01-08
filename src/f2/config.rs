@@ -3,6 +3,7 @@
 //! Configuration for the F2 hot-cold separation architecture.
 
 use crate::cache::ReadCacheConfig;
+use crate::index::ColdIndexConfig;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -81,6 +82,10 @@ pub struct ColdStoreConfig {
     pub log_path: PathBuf,
     /// Mutable fraction of the log (0.0 to 1.0)
     pub mutable_fraction: f64,
+    /// 可选：为 cold store 使用磁盘冷索引（ColdIndex）。
+    ///
+    /// 若为 `None`，cold store 使用内存索引（MemHashIndex）。
+    pub cold_index: Option<ColdIndexConfig>,
 }
 
 impl Default for ColdStoreConfig {
@@ -90,6 +95,7 @@ impl Default for ColdStoreConfig {
             log_mem_size: 256 * 1024 * 1024, // 256 MB
             log_path: PathBuf::from("cold_store.log"),
             mutable_fraction: 0.0, // Cold store is read-only in memory
+            cold_index: None,
         }
     }
 }
@@ -117,6 +123,43 @@ impl ColdStoreConfig {
         self.log_path = path;
         self
     }
+
+    /// 为 cold store 启用 ColdIndex（同时会把 `index_size` 同步为 cold index 的 `table_size`）。
+    pub fn with_cold_index_config(mut self, config: ColdIndexConfig) -> Self {
+        self.index_size = config.table_size;
+        self.cold_index = Some(config);
+        self
+    }
+
+    /// 设置 cold index（`None` 表示禁用，使用内存索引）。
+    pub fn with_cold_index(mut self, config: Option<ColdIndexConfig>) -> Self {
+        if let Some(cfg) = &config {
+            self.index_size = cfg.table_size;
+        }
+        self.cold_index = config;
+        self
+    }
+}
+
+/// 热→冷迁移策略（F2）
+#[derive(Debug, Clone)]
+pub enum HotToColdMigrationStrategy {
+    /// 按地址老化：hot-log compaction 扫描区间内的 live 记录迁移到 cold。
+    AddressAging,
+    /// 按访问率：访问次数高于阈值的 key 会保留在 hot（通过“复制到 hot 尾部”完成回收）。
+    ///
+    AccessFrequency {
+        /// 访问次数小于此值时迁移到 cold（即：>= 此值则保留在 hot）
+        min_hot_accesses: u64,
+        /// 每次 hot-log compaction 后把计数右移（衰减窗口），0 表示不衰减；取值必须 < 64
+        decay_shift: u8,
+    },
+}
+
+impl Default for HotToColdMigrationStrategy {
+    fn default() -> Self {
+        Self::AddressAging
+    }
 }
 
 /// Configuration for F2 compaction
@@ -140,6 +183,8 @@ pub struct F2CompactionConfig {
     pub check_interval: Duration,
     /// Number of compaction threads
     pub num_threads: usize,
+    /// Hot→Cold 迁移策略
+    pub hot_to_cold_migration: HotToColdMigrationStrategy,
 }
 
 impl Default for F2CompactionConfig {
@@ -154,6 +199,7 @@ impl Default for F2CompactionConfig {
             max_compact_size: 256 * 1024 * 1024, // 256 MB
             check_interval: Duration::from_secs(1),
             num_threads: 1,
+            hot_to_cold_migration: HotToColdMigrationStrategy::default(),
         }
     }
 }
@@ -197,6 +243,12 @@ impl F2CompactionConfig {
     /// Set the check interval
     pub fn with_check_interval(mut self, interval: Duration) -> Self {
         self.check_interval = interval;
+        self
+    }
+
+    /// 设置 hot→cold 迁移策略
+    pub fn with_hot_to_cold_migration(mut self, strategy: HotToColdMigrationStrategy) -> Self {
+        self.hot_to_cold_migration = strategy;
         self
     }
 }
@@ -256,6 +308,25 @@ impl F2Config {
             ));
         }
 
+        if let HotToColdMigrationStrategy::AccessFrequency { decay_shift, .. } =
+            self.compaction.hot_to_cold_migration
+        {
+            if decay_shift >= 64 {
+                return Err("AccessFrequency.decay_shift 必须小于 64".to_string());
+            }
+        }
+
+        if let Some(cfg) = &self.cold_store.cold_index {
+            if cfg.table_size != self.cold_store.index_size {
+                return Err(format!(
+                    "ColdStoreConfig.index_size({}) 必须与 ColdIndexConfig.table_size({}) 一致",
+                    self.cold_store.index_size, cfg.table_size
+                ));
+            }
+            cfg.validate()
+                .map_err(|e| format!("ColdIndexConfig 校验失败：{e:?}"))?;
+        }
+
         Ok(())
     }
 }
@@ -295,6 +366,16 @@ mod tests {
         // Invalid config
         let mut config = F2Config::default();
         config.compaction.hot_log_size_budget = 1 << 20; // 1 MB - too small
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_f2_config_validation_rejects_decay_shift_ge_64() {
+        let mut config = F2Config::default();
+        config.compaction.hot_to_cold_migration = HotToColdMigrationStrategy::AccessFrequency {
+            min_hot_accesses: 1,
+            decay_shift: 64,
+        };
         assert!(config.validate().is_err());
     }
 

@@ -149,8 +149,8 @@ This section details the feature comparison between oxifaster and the original C
 | **CPR Protocol** | Y | Y | Y | Complete (full state machine integration) |
 | **Snapshot Files** | Y | Y | Y | Complete (JSON + bincode) |
 | **Session Persistence** | Y | Y | Y | Complete (GUID + serial_num) |
-| **Incremental Checkpoint** | - | Y | N | Not implemented |
-| **Delta Log** | - | Y | N | Not implemented |
+| **Incremental Checkpoint** | - | Y | Y | Complete |
+| **Delta Log** | - | Y | Y | Complete |
 
 ### Performance Optimization
 
@@ -294,20 +294,47 @@ println!("Read ops: {}", stats.operations.reads);
 
 | Feature | Description | File | Status |
 |---------|-------------|------|:------:|
-| **F2 Hot-Cold Full Implementation** | Hot-cold data separation | `f2/store.rs` | :white_check_mark: |
-| **F2 Checkpoint/Recovery** | Hot-cold storage checkpoint and recovery | `f2/store.rs`, `f2/state.rs` | :white_check_mark: |
-| **F2 Background Migration** | Automatic data migration thread | `f2/store.rs` | :white_check_mark: |
-| **Cold Index** | Disk-based secondary hash index | `index/cold_index.rs` | :white_check_mark: |
+| **F2 Hot-Cold Full Implementation** | Hot-cold data separation | `f2/store.rs`, `f2/store/*.rs` | :white_check_mark: |
+| **F2 Checkpoint/Recovery** | Hot-cold storage checkpoint and recovery | `f2/store.rs`, `f2/store/*.rs`, `f2/state.rs` | :white_check_mark: |
+| **F2 Background Migration** | Hot-to-cold migration via hot-log compaction | `f2/store/log_compaction.rs` | :white_check_mark: |
+| **Cold Index** | Disk-based secondary hash index（可选用于 F2 cold store） | `index/cold_index.rs`, `f2/store/store_index.rs` | :white_check_mark: |
 | **Checkpoint Locks** | Lock protection during CPR protocol | `checkpoint/locks.rs` | :white_check_mark: |
+
+Hot→cold migration strategy options:
+
+- `AddressAging` (default): migrate live records in the compacted hot-log range into cold store.
+- `AccessFrequency`: keep hot records whose access count is above a threshold (counts writes + hot read hits); `decay_shift` optionally decays counts after each hot-log compaction.
 
 ```rust
 // Implemented API: F2 Hot-Cold Architecture
-let f2_store = F2Kv::new(config, hot_device, cold_device);
+use oxifaster::f2::{F2CompactionConfig, F2Config, HotToColdMigrationStrategy};
 
-// F2 Checkpoint
-let token = f2_store.checkpoint(checkpoint_dir)?;
+// Optional: choose hot→cold migration strategy
+let config = F2Config::default().with_compaction(
+    F2CompactionConfig::default().with_hot_to_cold_migration(
+        HotToColdMigrationStrategy::AccessFrequency {
+            min_hot_accesses: 3,
+            decay_shift: 1,
+        },
+    ),
+);
 
-// F2 Recovery
+// Optional: use ColdIndex for the cold store (reduces memory usage for large cold datasets)
+use oxifaster::index::ColdIndexConfig;
+let config = config.with_cold_store(
+    oxifaster::f2::ColdStoreConfig::default().with_cold_index_config(
+        ColdIndexConfig::new(1 << 16, 64 * 1024 * 1024, 0.5).with_root_path("cold-index"),
+    ),
+);
+
+let mut f2_store = F2Kv::new(config, hot_device, cold_device)?;
+let _session = f2_store.start_session()?;
+
+// F2 Checkpoint (2-step: request + persist files)
+let token = f2_store.checkpoint(false)?;
+f2_store.save_checkpoint(checkpoint_dir, token)?;
+
+// F2 Recovery (recover into a fresh instance is recommended in real apps)
 let version = f2_store.recover(checkpoint_dir, token)?;
 
 // Cold Index (disk secondary index)

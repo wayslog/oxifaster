@@ -18,7 +18,8 @@
 //! │              F2Kv Store                    │
 //! ├───────────────────┬───────────────────────┤
 //! │    Hot Store      │     Cold Store        │
-//! │  (MemHashIndex)   │    (ColdIndex)        │
+//! │  (MemHashIndex)   │ (默认 MemHashIndex；   │
+//! │                   │  可选 ColdIndex)      │
 //! │   (HybridLog)     │   (HybridLog)         │
 //! │   + Read Cache    │                       │
 //! └───────────────────┴───────────────────────┘
@@ -31,7 +32,7 @@
 //! - **Automatic Migration**: Background thread moves cold data to cold store
 //! - **Unified Interface**: Read/Write/RMW operations work transparently
 //! - **Checkpoint/Recovery**: Both stores can be checkpointed together
-//! - **Cold Index**: On-disk hash index for cold store
+//! - **Cold Index**: 冷端可选使用 ColdIndex（磁盘索引）以降低内存占用
 //!
 //! # Usage
 //!
@@ -54,6 +55,8 @@ mod config;
 mod state;
 mod store;
 
-pub use config::{ColdStoreConfig, F2CompactionConfig, F2Config, HotStoreConfig};
+pub use config::{
+    ColdStoreConfig, F2CompactionConfig, F2Config, HotStoreConfig, HotToColdMigrationStrategy,
+};
 pub use state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
 pub use store::{F2Kv, ReadOperationStage, RmwOperationStage, StoreStats, StoreType};

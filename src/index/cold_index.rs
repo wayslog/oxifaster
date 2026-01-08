@@ -29,6 +29,7 @@
 //! cold_index.try_update_entry(hash, old_addr, new_addr);
 //! ```
 
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -38,7 +39,6 @@ use crate::status::Status;
 
 /// Default number of entries per chunk (4 buckets * 8 entries = 32 entries)
 pub const DEFAULT_NUM_BUCKETS_PER_CHUNK: usize = 4;
-
 /// Default number of entries per bucket
 pub const ENTRIES_PER_BUCKET: usize = 8;
 
@@ -468,8 +468,8 @@ pub struct ColdIndex {
     config: ColdIndexConfig,
     /// Table size (number of chunks)
     table_size: u64,
-    /// In-memory chunk cache (simplified - in full impl would use FasterKV)
-    chunks: Vec<Option<Box<DefaultHashIndexChunk>>>,
+    /// In-memory chunk cache (fully allocated in this implementation)
+    chunks: Vec<DefaultHashIndexChunk>,
     /// Serial number for operations
     serial_num: AtomicU64,
     /// Whether the index is initialized
@@ -480,8 +480,8 @@ pub struct ColdIndex {
     pub checkpoint_failed: AtomicBool,
     /// Statistics
     stats: ColdIndexStats,
-    /// GC state
-    gc_state: GcStateColdIndex,
+    /// GC state (protected by Mutex for concurrent GC start)
+    gc_state: Mutex<GcStateColdIndex>,
 }
 
 impl ColdIndex {
@@ -497,7 +497,7 @@ impl ColdIndex {
             checkpoint_pending: AtomicBool::new(false),
             checkpoint_failed: AtomicBool::new(false),
             stats: ColdIndexStats::new(),
-            gc_state: GcStateColdIndex::new(),
+            gc_state: Mutex::new(GcStateColdIndex::new()),
         }
     }
 
@@ -507,8 +507,11 @@ impl ColdIndex {
 
         self.table_size = self.config.table_size;
 
-        // Initialize chunk storage (lazy allocation)
-        self.chunks = (0..self.table_size).map(|_| None).collect();
+        // Initialize chunk storage (full allocation)
+        self.chunks.reserve(self.table_size as usize);
+        for _ in 0..self.table_size {
+            self.chunks.push(DefaultHashIndexChunk::new());
+        }
         self.initialized = true;
 
         Ok(())
@@ -537,11 +540,17 @@ impl ColdIndex {
     /// Panics if the index is not initialized (table_size == 0)
     #[inline]
     fn compute_chunk_key(&self, hash: KeyHash) -> HashIndexChunkKey {
-        assert!(
+        debug_assert!(
             self.table_size > 0,
             "ColdIndex not initialized: table_size is 0. Call initialize() first."
         );
-        let chunk_id = hash.hash() % self.table_size;
+        // Safety fallback if assertions disabled
+        let size = if self.table_size > 0 {
+            self.table_size
+        } else {
+            1
+        };
+        let chunk_id = hash.hash() % size;
         let tag = hash.tag();
         HashIndexChunkKey::new(chunk_id, tag)
     }
@@ -555,21 +564,11 @@ impl ColdIndex {
         HashIndexChunkPos::new(bucket_index, entry_tag)
     }
 
-    /// Get or create a chunk
-    fn get_or_create_chunk(&mut self, chunk_id: u64) -> &DefaultHashIndexChunk {
-        let idx = chunk_id as usize;
-        if self.chunks[idx].is_none() {
-            self.chunks[idx] = Some(Box::new(DefaultHashIndexChunk::new()));
-        }
-        self.chunks[idx].as_ref().unwrap()
-    }
-
-    /// Get a chunk (if exists)
-    fn get_chunk(&self, chunk_id: u64) -> Option<&DefaultHashIndexChunk> {
-        let idx = chunk_id as usize;
-        self.chunks
-            .get(idx)
-            .and_then(|c| c.as_ref().map(|b| b.as_ref()))
+    /// Get a chunk
+    #[inline]
+    fn get_chunk(&self, chunk_id: u64) -> &DefaultHashIndexChunk {
+        // In fully-allocated mode, we can trust initialized chunks exist
+        &self.chunks[chunk_id as usize]
     }
 
     /// Find entry for the given hash
@@ -579,15 +578,13 @@ impl ColdIndex {
         let chunk_key = self.compute_chunk_key(hash);
         let pos = self.compute_chunk_pos(hash);
 
-        let result = if let Some(chunk) = self.get_chunk(chunk_key.chunk_id) {
-            let entry = chunk.get_entry(pos);
-            if entry.is_unused() {
-                ColdIndexFindResult::not_found(pos, chunk_key)
-            } else {
-                ColdIndexFindResult::found(entry, pos, chunk_key)
-            }
-        } else {
+        let chunk = self.get_chunk(chunk_key.chunk_id);
+        let entry = chunk.get_entry(pos);
+
+        let result = if entry.is_unused() {
             ColdIndexFindResult::not_found(pos, chunk_key)
+        } else {
+            ColdIndexFindResult::found(entry, pos, chunk_key)
         };
 
         self.stats.record_find_entry(result.status);
@@ -597,12 +594,11 @@ impl ColdIndex {
     /// Find or create an entry for the given hash
     ///
     /// If the entry doesn't exist, creates a new empty entry.
-    pub fn find_or_create_entry(&mut self, hash: KeyHash) -> ColdIndexFindResult {
+    pub fn find_or_create_entry(&self, hash: KeyHash) -> ColdIndexFindResult {
         let chunk_key = self.compute_chunk_key(hash);
         let pos = self.compute_chunk_pos(hash);
 
-        // Ensure chunk exists
-        let chunk = self.get_or_create_chunk(chunk_key.chunk_id);
+        let chunk = self.get_chunk(chunk_key.chunk_id);
         let entry = chunk.get_entry(pos);
 
         let result = if entry.is_unused() {
@@ -620,7 +616,7 @@ impl ColdIndex {
     ///
     /// The update succeeds only if the current entry matches `expected`.
     pub fn try_update_entry(
-        &mut self,
+        &self,
         hash: KeyHash,
         expected: HashBucketEntry,
         new_address: Address,
@@ -628,8 +624,7 @@ impl ColdIndex {
         let chunk_key = self.compute_chunk_key(hash);
         let pos = self.compute_chunk_pos(hash);
 
-        // Ensure chunk exists
-        let chunk = self.get_or_create_chunk(chunk_key.chunk_id);
+        let chunk = self.get_chunk(chunk_key.chunk_id);
         let new_entry = HashBucketEntry::new(new_address);
 
         let status = match chunk.cas_entry(pos, expected, new_entry) {
@@ -642,12 +637,11 @@ impl ColdIndex {
     }
 
     /// Update an entry unconditionally
-    pub fn update_entry(&mut self, hash: KeyHash, new_address: Address) -> Status {
+    pub fn update_entry(&self, hash: KeyHash, new_address: Address) -> Status {
         let chunk_key = self.compute_chunk_key(hash);
         let pos = self.compute_chunk_pos(hash);
 
-        // Ensure chunk exists
-        let chunk = self.get_or_create_chunk(chunk_key.chunk_id);
+        let chunk = self.get_chunk(chunk_key.chunk_id);
         let new_entry = HashBucketEntry::new(new_address);
         chunk.set_entry(pos, new_entry);
 
@@ -658,26 +652,29 @@ impl ColdIndex {
     /// Garbage collect entries pointing to addresses before the given address
     ///
     /// Returns the minimum valid address found, or None if no valid entries exist.
-    pub fn garbage_collect(&mut self, new_begin_address: Address) -> Option<Address> {
+    pub fn garbage_collect(&self, new_begin_address: Address) -> Option<Address> {
         let num_chunks = self.table_size.max(1);
-        self.gc_state.initialize(new_begin_address, num_chunks);
+
+        {
+            let mut gc_state = self.gc_state.lock();
+            gc_state.initialize(new_begin_address, num_chunks);
+        }
 
         let mut min_address = u64::MAX;
 
         // Process all chunks
         for chunk_idx in 0..self.table_size {
-            if let Some(chunk) = self.get_chunk(chunk_idx) {
-                for bucket in &chunk.buckets {
-                    for atomic_entry in &bucket.entries {
-                        let entry = atomic_entry.load(Ordering::Acquire);
-                        if entry.is_unused() {
-                            continue;
-                        }
+            let chunk = self.get_chunk(chunk_idx);
+            for bucket in &chunk.buckets {
+                for atomic_entry in &bucket.entries {
+                    let entry = atomic_entry.load(Ordering::Acquire);
+                    if entry.is_unused() {
+                        continue;
+                    }
 
-                        let addr = entry.address().control();
-                        if addr >= new_begin_address.control() && addr < min_address {
-                            min_address = addr;
-                        }
+                    let addr = entry.address().control();
+                    if addr >= new_begin_address.control() && addr < min_address {
+                        min_address = addr;
                     }
                 }
             }

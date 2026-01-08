@@ -149,8 +149,8 @@ fn main() -> std::io::Result<()> {
 | **CPR Protocol** | Y | Y | Y | 完成 (完整状态机集成) |
 | **Snapshot Files** | Y | Y | Y | 完成 (JSON + bincode) |
 | **Session Persistence** | Y | Y | Y | 完成 (GUID + serial_num) |
-| **Incremental Checkpoint** | - | Y | N | 未实现 |
-| **Delta Log** | - | Y | N | 未实现 |
+| **Incremental Checkpoint** | - | Y | Y | 完成 |
+| **Delta Log** | - | Y | Y | 完成 |
 
 ### 性能优化
 
@@ -294,20 +294,39 @@ println!("Read ops: {}", stats.operations.reads);
 
 | 功能 | 描述 | 文件 | 状态 |
 |------|------|------|:----:|
-| **F2 Hot-Cold 完整实现** | 热冷数据分离 | `f2/store.rs` | :white_check_mark: |
-| **F2 Checkpoint/Recovery** | 热冷存储检查点与恢复 | `f2/store.rs`, `f2/state.rs` | :white_check_mark: |
-| **F2 后台迁移** | 自动数据迁移线程 | `f2/store.rs` | :white_check_mark: |
+| **F2 Hot-Cold 完整实现** | 热冷数据分离 | `f2/store.rs`, `f2/store/*.rs` | :white_check_mark: |
+| **F2 Checkpoint/Recovery** | 热冷存储检查点与恢复 | `f2/store.rs`, `f2/store/*.rs`, `f2/state.rs` | :white_check_mark: |
+| **F2 后台迁移** | 通过 hot-log compaction 实现热→冷迁移 | `f2/store/log_compaction.rs` | :white_check_mark: |
 | **Cold Index** | 磁盘上的二级哈希索引 | `index/cold_index.rs` | :white_check_mark: |
 | **Checkpoint Locks** | CPR 协议期间的锁保护 | `checkpoint/locks.rs` | :white_check_mark: |
 
+热→冷迁移策略可选：
+
+- `AddressAging`（默认）：将 hot-log compaction 扫描区间内的 live 记录迁移到 cold。
+- `AccessFrequency`：访问次数高于阈值的 key 会保留在 hot（统计口径为“写入 + hot 命中读取”）；`decay_shift` 可在每次 hot-log compaction 后对计数衰减。
+
 ```rust
 // 已实现 API: F2 热冷架构
-let f2_store = F2Kv::new(config, hot_device, cold_device);
+use oxifaster::f2::{F2CompactionConfig, F2Config, HotToColdMigrationStrategy};
 
-// F2 Checkpoint
-let token = f2_store.checkpoint(checkpoint_dir)?;
+// 可选：选择热→冷迁移策略
+let config = F2Config::default().with_compaction(
+    F2CompactionConfig::default().with_hot_to_cold_migration(
+        HotToColdMigrationStrategy::AccessFrequency {
+            min_hot_accesses: 3,
+            decay_shift: 1,
+        },
+    ),
+);
 
-// F2 Recovery
+let mut f2_store = F2Kv::new(config, hot_device, cold_device)?;
+let _session = f2_store.start_session()?;
+
+// F2 Checkpoint（两步：发起请求 + 落盘保存文件）
+let token = f2_store.checkpoint(false)?;
+f2_store.save_checkpoint(checkpoint_dir, token)?;
+
+// F2 Recovery（生产环境更推荐在全新实例上 recover）
 let version = f2_store.recover(checkpoint_dir, token)?;
 
 // Cold Index (磁盘二级索引)
