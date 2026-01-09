@@ -114,14 +114,16 @@ where
     read_cache: Option<ReadCache<K, V>>,
     /// Storage device
     device: Arc<D>,
-    /// Pending I/O 管理器（为 Pending + complete_pending 的读回链路提供后台 I/O）
+    /// Pending I/O manager (background I/O for the `Pending + complete_pending` read-back path).
     pending_io: PendingIoManager<D>,
-    /// 读盘完成后的结果缓存（按 record address 绑定）
+    /// Disk read result cache (keyed by record address).
     ///
-    /// 约定：`read()` 在遇到磁盘地址时返回 Pending；当后台读完成后，
-    /// 结果会被放入该缓存，调用方 `complete_pending()` 后重试 `read()` 即可命中。
+    /// Convention: `read()` returns `Pending` when it hits a disk address. Once the background
+    /// read completes, the parsed result is stored here; the caller calls `complete_pending()`
+    /// and then retries `read()` to hit the cache.
     disk_read_results: Mutex<HashMap<u64, DiskReadResult<K, V>>>,
-    /// 后台 I/O 完成计数（按 thread_id 聚合，供 session 在 complete_pending 中消费）
+    /// Background I/O completion counter (aggregated by `thread_id` and consumed by sessions in
+    /// `complete_pending()`).
     pending_io_completed: Mutex<HashMap<PendingIoKey, u32>>,
     /// Next session ID
     next_session_id: AtomicU32,
@@ -220,7 +222,7 @@ where
         // Initialize read cache if configured
         let read_cache = cache_config.map(ReadCache::new);
 
-        // Pending I/O 管理器（独立线程，不依赖外部 tokio runtime）
+        // Pending I/O manager (dedicated thread, does not depend on an external Tokio runtime).
         let pending_io = PendingIoManager::new(device.clone());
 
         Self {
@@ -243,7 +245,7 @@ where
         }
     }
 
-    /// 驱动并处理后台 I/O 完成事件（全局）
+    /// Drive and process background I/O completions (global).
     fn process_pending_io_completions(&self) {
         let completions = self.pending_io.drain_completions();
         if completions.is_empty() {
@@ -283,7 +285,7 @@ where
         }
     }
 
-    /// 消费并返回指定线程已完成的 I/O 数量
+    /// Consume and return the number of completed I/Os for the given thread.
     pub(crate) fn take_completed_io_for_thread(&self, thread_id: usize, thread_tag: u64) -> u32 {
         self.process_pending_io_completions();
         self.pending_io_completed
@@ -295,22 +297,22 @@ where
             .unwrap_or(0)
     }
 
-    /// 从磁盘读回的 record bytes 中解析 key/value（并使用 clone 生成"安全拥有"的结果）
+    /// Parse key/value from disk-read record bytes (producing an owned result).
     ///
     /// # Safety Note
     ///
-    /// 此方法仅对 POD（Plain Old Data）类型安全。对于包含指针的类型（如 String, Vec），
-    /// 从磁盘读回的字节会包含无效指针，直接解释会导致未定义行为。
+    /// This method is only safe for POD (Plain Old Data) types. For types that contain pointers
+    /// (e.g. `String`, `Vec`), bytes read from disk would contain invalid pointers, and
+    /// interpreting them directly would be undefined behavior.
     ///
-    /// 因此，此方法会在运行时检查 `K` 和 `V` 是否需要 drop：
-    /// - 如果需要 drop（非 POD 类型），返回 `None` 跳过磁盘读取功能
-    /// - 只有 POD 类型（如 u64, i64, [u8; N] 等）才会实际解析
+    /// Therefore, this method checks at runtime whether `K` and `V` require drop:
+    /// - If they do, it returns `None` and disables disk parsing for this store.
+    /// - Only POD types (e.g. `u64`, `i64`, `[u8; N]`) are actually parsed.
     fn parse_disk_record(&self, bytes: &[u8]) -> Option<DiskReadResult<K, V>> {
-        // 安全检查：只有 POD 类型才能安全地从原始字节重建
-        // 非 POD 类型（如 String, Vec）包含指针，从磁盘读回会导致无效指针
+        // Safety check: only POD types can be safely reconstructed from raw bytes.
         if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
-            // 非 POD 类型不支持磁盘读取，返回 None
-            // 上层会因为无法命中缓存而一直返回 Pending（符合预期：该功能仅支持 POD 类型）
+            // Non-POD types are not supported; the caller will keep returning `Pending`
+            // because the cache will never be filled (expected behavior).
             return None;
         }
 
@@ -326,14 +328,14 @@ where
         let value_offset = Record::<K, V>::value_offset();
 
         // SAFETY:
-        // 1. 已通过 needs_drop 检查确保 K 和 V 是 POD 类型（无内部指针）
-        // 2. bytes 来源于 Record::<K,V>::disk_size() 的读回，长度已验证
-        // 3. offset 由 Record 布局计算得出，保证正确对齐
+        // 1. `needs_drop` checks ensure K and V are POD (no internal pointers)
+        // 2. bytes come from a read of `Record::<K,V>::disk_size()` and the length is checked
+        // 3. offsets are derived from `Record` layout
         unsafe {
             let key_ptr = bytes.as_ptr().add(key_offset) as *const K;
             let value_ptr = bytes.as_ptr().add(value_offset) as *const V;
 
-            // 对于 POD 类型，直接按位复制即可（等价于 Copy）
+            // For POD types, a bitwise copy is sufficient.
             let key: K = ptr::read_unaligned(key_ptr);
 
             let value = if header.is_tombstone() {
@@ -621,14 +623,14 @@ where
                 continue;
             }
 
-            // SAFETY: 只读访问 hybrid log 元数据
+            // SAFETY: read-only access to hybrid log metadata.
             let head_address = unsafe { self.hlog().get_head_address() };
 
             if address < head_address {
-                // 优先尝试命中“读盘完成结果缓存”，避免重复提交 I/O
+                // Prefer hitting the "disk read result cache" to avoid duplicate I/O submissions.
                 if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
                     if result.key == *key {
-                        // 读盘完成后会缓存 tombstone(None) 或 value(Some)
+                        // The cache stores tombstone(None) or value(Some) after a read completes.
                         if self.stats_collector.is_enabled() {
                             self.stats_collector
                                 .store_stats
@@ -647,7 +649,7 @@ where
                 if self.stats_collector.is_enabled() {
                     self.stats_collector.store_stats.operations.record_pending();
                 }
-                // Record is on disk - 提交异步读请求并返回 Pending
+                // Record is on disk: submit an async read request and return Pending.
                 let record_len = Record::<K, V>::disk_size() as usize;
                 if self.pending_io.submit_read_bytes(
                     ctx.thread_id,
@@ -1006,10 +1008,11 @@ where
 
     /// Simple compaction: shift log begin address and garbage collect index
     pub fn compact(&self, until_address: Address) -> Status {
-        // compact 的语义是“回收”，对应推进 begin_address，而不是 head_address。
-        // head_address 表示“是否在磁盘”，推进 head 会触发 Pending 读回语义（见 flush_and_shift_head）。
+        // `compact` reclaims space by advancing `begin_address`, not `head_address`.
+        // `head_address` represents the on-disk boundary; advancing it affects the `Pending`
+        // read-back behavior (see `flush_and_shift_head`).
         //
-        // 为保证被回收范围的数据已稳定落盘（例如用于后续诊断/读回），这里先执行一次 flush。
+        // To ensure the reclaimed range is durable (e.g. for diagnostics/read-back), flush first.
         if let Err(_e) = unsafe { self.hlog().flush_until(until_address) } {
             return Status::Corruption;
         }
@@ -1024,11 +1027,12 @@ where
         Status::Ok
     }
 
-    /// 把指定地址之前的数据“落盘并标记为磁盘区”（推进 head_address，不做索引回收）
+    /// Flush data up to the given address and mark it as on-disk (advance `head_address`
+    /// without index reclamation).
     ///
-    /// 这是实现 FASTER 风格 `Pending + complete_pending` 的关键：
-    /// 当 `address < head_address` 时，`read()` 返回 `Status::Pending`，
-    /// 调用方通过 `complete_pending()` 驱动读盘完成后重试即可成功。
+    /// This is key to a FASTER-style `Pending + complete_pending` flow:
+    /// when `address < head_address`, `read()` returns `Status::Pending`. The caller drives I/O
+    /// completion via `complete_pending()` and then retries `read()` to succeed.
     pub fn flush_and_shift_head(&self, new_head: Address) -> Status {
         if let Err(_e) = unsafe { self.hlog().flush_until(new_head) } {
             return Status::Corruption;
@@ -1446,19 +1450,16 @@ where
 
     /// Clear the read cache
     pub fn clear_read_cache(&self) {
-        if let Some(ref rc) = self.read_cache {
-            rc.clear();
+        if let Some(read_cache) = self.read_cache.as_ref() {
+            read_cache.clear();
         }
     }
 
     /// Try to read from read cache
     fn try_read_from_cache(&self, address: Address, key: &K) -> Option<V> {
-        if let Some(ref rc) = self.read_cache {
-            if let Some((value, _info)) = rc.read(address, key) {
-                return Some(value);
-            }
-        }
-        None
+        let read_cache = self.read_cache.as_ref()?;
+        let (value, _info) = read_cache.read(address, key)?;
+        Some(value)
     }
 
     /// Try to insert into read cache
@@ -1468,26 +1469,23 @@ where
         value: &V,
         previous_address: Address,
     ) -> Option<Address> {
-        if let Some(ref rc) = self.read_cache {
-            rc.try_insert(key, value, previous_address, false).ok()
-        } else {
-            None
-        }
+        let read_cache = self.read_cache.as_ref()?;
+        read_cache
+            .try_insert(key, value, previous_address, false)
+            .ok()
     }
 
     /// Skip read cache addresses to get underlying HybridLog address
     fn skip_read_cache(&self, address: Address) -> Address {
-        if let Some(ref rc) = self.read_cache {
-            rc.skip(address)
-        } else {
-            address
-        }
+        self.read_cache
+            .as_ref()
+            .map_or(address, |read_cache| read_cache.skip(address))
     }
 
     /// Invalidate a cache entry for a key
     fn invalidate_cache_entry(&self, address: Address, key: &K) {
-        if let Some(ref rc) = self.read_cache {
-            let _ = rc.invalidate(address, key);
+        if let Some(read_cache) = self.read_cache.as_ref() {
+            let _ = read_cache.invalidate(address, key);
         }
     }
 

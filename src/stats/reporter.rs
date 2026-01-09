@@ -2,9 +2,14 @@
 //!
 //! Provides formatting and output for statistics.
 
-use std::fmt::Write;
+use std::fmt::{Arguments, Write};
 
 use crate::stats::collector::{StatsCollector, StatsSnapshot};
+
+fn push_line(output: &mut String, args: Arguments) {
+    let _ = output.write_fmt(args);
+    output.push('\n');
+}
 
 /// Output format for statistics reports
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,65 +78,94 @@ impl StatsReporter {
     fn format_text(&self, snapshot: &StatsSnapshot) -> String {
         let mut output = String::new();
 
-        writeln!(output, "=== FASTER Statistics ===").unwrap();
-        writeln!(output, "Elapsed: {:.2?}", snapshot.elapsed).unwrap();
-        writeln!(output).unwrap();
+        push_line(&mut output, format_args!("=== FASTER Statistics ==="));
+        push_line(
+            &mut output,
+            format_args!("Elapsed: {:.2?}", snapshot.elapsed),
+        );
+        output.push('\n');
 
-        writeln!(output, "Operations:").unwrap();
-        writeln!(output, "  Total:    {}", snapshot.total_operations).unwrap();
-        writeln!(
-            output,
-            "  Reads:    {} (hits: {}, rate: {:.2}%)",
-            snapshot.reads,
-            snapshot.read_hits,
-            snapshot.hit_rate * 100.0
-        )
-        .unwrap();
-        writeln!(output, "  Upserts:  {}", snapshot.upserts).unwrap();
-        writeln!(output, "  RMWs:     {}", snapshot.rmws).unwrap();
-        writeln!(output, "  Deletes:  {}", snapshot.deletes).unwrap();
-        writeln!(output, "  Pending:  {}", snapshot.pending).unwrap();
-        writeln!(output).unwrap();
+        push_line(&mut output, format_args!("Operations:"));
+        push_line(
+            &mut output,
+            format_args!("  Total:    {}", snapshot.total_operations),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "  Reads:    {} (hits: {}, rate: {:.2}%)",
+                snapshot.reads,
+                snapshot.read_hits,
+                snapshot.hit_rate * 100.0
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!("  Upserts:  {}", snapshot.upserts),
+        );
+        push_line(&mut output, format_args!("  RMWs:     {}", snapshot.rmws));
+        push_line(
+            &mut output,
+            format_args!("  Deletes:  {}", snapshot.deletes),
+        );
+        push_line(
+            &mut output,
+            format_args!("  Pending:  {}", snapshot.pending),
+        );
+        output.push('\n');
 
-        writeln!(output, "Performance:").unwrap();
-        writeln!(output, "  Throughput: {:.2} ops/sec", snapshot.throughput).unwrap();
-        writeln!(output, "  Avg Latency: {:.2?}", snapshot.avg_latency).unwrap();
-        writeln!(output).unwrap();
+        push_line(&mut output, format_args!("Performance:"));
+        push_line(
+            &mut output,
+            format_args!("  Throughput: {:.2} ops/sec", snapshot.throughput),
+        );
+        push_line(
+            &mut output,
+            format_args!("  Avg Latency: {:.2?}", snapshot.avg_latency),
+        );
+        output.push('\n');
 
         if self.detailed {
-            writeln!(output, "Index:").unwrap();
-            writeln!(output, "  Entries: {}", snapshot.index_entries).unwrap();
-            writeln!(
-                output,
-                "  Load Factor: {:.2}%",
-                snapshot.index_load_factor * 100.0
-            )
-            .unwrap();
-            writeln!(output).unwrap();
+            push_line(&mut output, format_args!("Index:"));
+            push_line(
+                &mut output,
+                format_args!("  Entries: {}", snapshot.index_entries),
+            );
+            push_line(
+                &mut output,
+                format_args!("  Load Factor: {:.2}%", snapshot.index_load_factor * 100.0),
+            );
+            output.push('\n');
 
-            writeln!(output, "Memory:").unwrap();
-            writeln!(
-                output,
-                "  Allocated: {}",
-                StatsSnapshot::format_bytes(snapshot.bytes_allocated)
-            )
-            .unwrap();
-            writeln!(
-                output,
-                "  In Use: {}",
-                StatsSnapshot::format_bytes(snapshot.memory_in_use)
-            )
-            .unwrap();
-            writeln!(
-                output,
-                "  Peak: {}",
-                StatsSnapshot::format_bytes(snapshot.peak_memory)
-            )
-            .unwrap();
-            writeln!(output).unwrap();
+            push_line(&mut output, format_args!("Memory:"));
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Allocated: {}",
+                    StatsSnapshot::format_bytes(snapshot.bytes_allocated)
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  In Use: {}",
+                    StatsSnapshot::format_bytes(snapshot.memory_in_use)
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Peak: {}",
+                    StatsSnapshot::format_bytes(snapshot.peak_memory)
+                ),
+            );
+            output.push('\n');
 
-            writeln!(output, "I/O:").unwrap();
-            writeln!(output, "  Pages Flushed: {}", snapshot.pages_flushed).unwrap();
+            push_line(&mut output, format_args!("I/O:"));
+            push_line(
+                &mut output,
+                format_args!("  Pages Flushed: {}", snapshot.pages_flushed),
+            );
         }
 
         output
@@ -140,55 +174,89 @@ impl StatsReporter {
     fn format_json(&self, snapshot: &StatsSnapshot) -> String {
         let mut output = String::new();
 
-        writeln!(output, "{{").unwrap();
-        writeln!(
-            output,
-            "  \"elapsed_ms\": {},",
-            snapshot.elapsed.as_millis()
-        )
-        .unwrap();
-        writeln!(output, "  \"operations\": {{").unwrap();
-        writeln!(output, "    \"total\": {},", snapshot.total_operations).unwrap();
-        writeln!(output, "    \"reads\": {},", snapshot.reads).unwrap();
-        writeln!(output, "    \"read_hits\": {},", snapshot.read_hits).unwrap();
-        writeln!(output, "    \"upserts\": {},", snapshot.upserts).unwrap();
-        writeln!(output, "    \"rmws\": {},", snapshot.rmws).unwrap();
-        writeln!(output, "    \"deletes\": {},", snapshot.deletes).unwrap();
-        writeln!(output, "    \"pending\": {}", snapshot.pending).unwrap();
-        writeln!(output, "  }},").unwrap();
-        writeln!(output, "  \"performance\": {{").unwrap();
-        writeln!(output, "    \"throughput\": {:.2},", snapshot.throughput).unwrap();
-        writeln!(output, "    \"hit_rate\": {:.4},", snapshot.hit_rate).unwrap();
-        writeln!(
-            output,
-            "    \"avg_latency_ns\": {}",
-            snapshot.avg_latency.as_nanos()
-        )
-        .unwrap();
-        writeln!(output, "  }},").unwrap();
-        writeln!(output, "  \"index\": {{").unwrap();
-        writeln!(output, "    \"entries\": {},", snapshot.index_entries).unwrap();
-        writeln!(
-            output,
-            "    \"load_factor\": {:.4}",
-            snapshot.index_load_factor
-        )
-        .unwrap();
-        writeln!(output, "  }},").unwrap();
-        writeln!(output, "  \"memory\": {{").unwrap();
-        writeln!(
-            output,
-            "    \"bytes_allocated\": {},",
-            snapshot.bytes_allocated
-        )
-        .unwrap();
-        writeln!(output, "    \"in_use\": {},", snapshot.memory_in_use).unwrap();
-        writeln!(output, "    \"peak\": {}", snapshot.peak_memory).unwrap();
-        writeln!(output, "  }},").unwrap();
-        writeln!(output, "  \"io\": {{").unwrap();
-        writeln!(output, "    \"pages_flushed\": {}", snapshot.pages_flushed).unwrap();
-        writeln!(output, "  }}").unwrap();
-        writeln!(output, "}}").unwrap();
+        push_line(&mut output, format_args!("{{"));
+        push_line(
+            &mut output,
+            format_args!("  \"elapsed_ms\": {},", snapshot.elapsed.as_millis()),
+        );
+        push_line(&mut output, format_args!("  \"operations\": {{"));
+        push_line(
+            &mut output,
+            format_args!("    \"total\": {},", snapshot.total_operations),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"reads\": {},", snapshot.reads),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"read_hits\": {},", snapshot.read_hits),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"upserts\": {},", snapshot.upserts),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"rmws\": {},", snapshot.rmws),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"deletes\": {},", snapshot.deletes),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"pending\": {}", snapshot.pending),
+        );
+        push_line(&mut output, format_args!("  }},"));
+        push_line(&mut output, format_args!("  \"performance\": {{"));
+        push_line(
+            &mut output,
+            format_args!("    \"throughput\": {:.2},", snapshot.throughput),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"hit_rate\": {:.4},", snapshot.hit_rate),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"avg_latency_ns\": {}",
+                snapshot.avg_latency.as_nanos()
+            ),
+        );
+        push_line(&mut output, format_args!("  }},"));
+        push_line(&mut output, format_args!("  \"index\": {{"));
+        push_line(
+            &mut output,
+            format_args!("    \"entries\": {},", snapshot.index_entries),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"load_factor\": {:.4}", snapshot.index_load_factor),
+        );
+        push_line(&mut output, format_args!("  }},"));
+        push_line(&mut output, format_args!("  \"memory\": {{"));
+        push_line(
+            &mut output,
+            format_args!("    \"bytes_allocated\": {},", snapshot.bytes_allocated),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"in_use\": {},", snapshot.memory_in_use),
+        );
+        push_line(
+            &mut output,
+            format_args!("    \"peak\": {}", snapshot.peak_memory),
+        );
+        push_line(&mut output, format_args!("  }},"));
+        push_line(&mut output, format_args!("  \"io\": {{"));
+        push_line(
+            &mut output,
+            format_args!("    \"pages_flushed\": {}", snapshot.pages_flushed),
+        );
+        push_line(&mut output, format_args!("  }}"));
+        push_line(&mut output, format_args!("}}"));
 
         output
     }

@@ -1,7 +1,8 @@
-//! Pending I/O 管理器
+//! Pending I/O manager
 //!
-//! 目标：为 `Status::Pending + complete_pending()` 提供一个最小可用的真实 I/O 推进机制。
-//! 当前阶段主要用于“读盘完成 -> 允许上层重试 read() 成功”的链路。
+//! Goal: provide a minimal, real I/O progress mechanism for
+//! `Status::Pending + complete_pending()`.
+//! At the moment this is mainly used for the "disk read completes -> caller retries read()" path.
 
 use std::collections::HashSet;
 use std::io;
@@ -35,11 +36,11 @@ pub(crate) enum IoCompletion {
     },
 }
 
-/// Pending I/O 管理器（后台线程执行 async I/O，并通过 channel 回传完成事件）
+/// Pending I/O manager (runs async I/O in a background thread and reports completions via channels).
 pub(crate) struct PendingIoManager<D: StorageDevice> {
     tx: Sender<IoRequest>,
     rx: Receiver<IoCompletion>,
-    /// 防止重复提交同一地址的读请求（粒度：Address）
+    /// Prevent submitting duplicate reads for the same address.
     inflight_reads: Mutex<HashSet<u64>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     _marker: std::marker::PhantomData<D>,
@@ -51,7 +52,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
         let (comp_tx, rx) = unbounded::<IoCompletion>();
 
         let worker = thread::spawn(move || {
-            // 独立 runtime：不依赖调用方是否运行在 tokio runtime 内
+            // Dedicated runtime: do not depend on the caller being inside a Tokio runtime.
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
                 Err(e) => {
@@ -106,11 +107,13 @@ impl<D: StorageDevice> PendingIoManager<D> {
         }
     }
 
-    /// 提交一次读请求（若该地址已在 inflight，则不重复提交）
+    /// Submit a read request.
     ///
-    /// 返回值：
-    /// - `true`：本次成功提交（调用方应增加 pending 计数）
-    /// - `false`：已存在 inflight（调用方不应增加 pending 计数）
+    /// If the address is already inflight, this is a no-op.
+    ///
+    /// Returns:
+    /// - `true`: the request was newly submitted (caller should increment pending count)
+    /// - `false`: a request is already inflight (caller should not increment pending count)
     pub(crate) fn submit_read_bytes(
         &self,
         thread_id: usize,
@@ -118,13 +121,14 @@ impl<D: StorageDevice> PendingIoManager<D> {
         address: Address,
         len: usize,
     ) -> bool {
-        let mut inflight = self.inflight_reads.lock();
-        if !inflight.insert(address.control()) {
-            return false;
+        {
+            let mut inflight = self.inflight_reads.lock();
+            if !inflight.insert(address.control()) {
+                return false;
+            }
         }
-        drop(inflight);
 
-        // 如果发送失败，说明 worker 已退出；视作未提交（允许上层重试再次提交）
+        // If send fails, the worker has exited; treat as "not submitted" and allow retry.
         if self
             .tx
             .send(IoRequest::ReadBytes {
@@ -135,19 +139,18 @@ impl<D: StorageDevice> PendingIoManager<D> {
             })
             .is_err()
         {
-            let mut inflight = self.inflight_reads.lock();
-            inflight.remove(&address.control());
+            self.inflight_reads.lock().remove(&address.control());
             return false;
         }
 
         true
     }
 
-    /// 尝试拉取一批完成事件（非阻塞）
+    /// Drain a batch of completion events (non-blocking).
     pub(crate) fn drain_completions(&self) -> Vec<IoCompletion> {
         let mut out = Vec::new();
         while let Ok(c) = self.rx.try_recv() {
-            // 读完成（无论成功/失败）都认为 inflight 结束，允许重试再次提交
+            // A completion (success or failure) ends inflight, allowing a resubmission.
             let IoCompletion::ReadBytesDone { address, .. } = &c;
             let mut inflight = self.inflight_reads.lock();
             inflight.remove(&address.control());
