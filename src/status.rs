@@ -31,6 +31,10 @@ pub enum Status {
     NotSupported = 9,
     /// Overflow buckets were skipped during index growth (potential data loss)
     OverflowBucketsSkipped = 10,
+    /// Too many threads are concurrently using the library.
+    TooManyThreads = 11,
+    /// A resource limit was reached.
+    ResourceExhausted = 12,
 }
 
 impl Status {
@@ -65,6 +69,8 @@ impl Status {
                 | Status::InvalidOperation
                 | Status::NotSupported
                 | Status::OverflowBucketsSkipped
+                | Status::TooManyThreads
+                | Status::ResourceExhausted
         )
     }
 
@@ -82,6 +88,8 @@ impl Status {
             Status::InvalidOperation => "InvalidOperation",
             Status::NotSupported => "NotSupported",
             Status::OverflowBucketsSkipped => "OverflowBucketsSkipped",
+            Status::TooManyThreads => "TooManyThreads",
+            Status::ResourceExhausted => "ResourceExhausted",
         }
     }
 }

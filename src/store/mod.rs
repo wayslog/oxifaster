@@ -31,7 +31,7 @@
 //! let store = Arc::new(FasterKv::new(FasterKvConfig::default(), NullDisk::new()));
 //!
 //! // Start a session (bound to current thread)
-//! let mut session = store.start_session();
+//! let mut session = store.start_session().expect("failed to start session");
 //!
 //! // Perform operations
 //! session.upsert(1u64, 100u64);

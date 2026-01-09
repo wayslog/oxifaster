@@ -36,7 +36,7 @@ fn main() {
 
     // 3. Create the store and perform basic operations.
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let upsert_status = session.upsert(1, 100);
     assert_eq!(upsert_status, Status::Ok);

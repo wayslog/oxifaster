@@ -26,7 +26,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
 #[test]
 fn test_async_session_from_store() {
     let store = create_test_store();
-    let session = store.start_async_session();
+    let session = store.start_async_session().unwrap();
 
     assert!(session.is_active());
 }
@@ -34,8 +34,8 @@ fn test_async_session_from_store() {
 #[test]
 fn test_async_session_guid_unique() {
     let store = create_test_store();
-    let session1 = store.start_async_session();
-    let session2 = store.start_async_session();
+    let session1 = store.start_async_session().unwrap();
+    let session2 = store.start_async_session().unwrap();
 
     assert_ne!(session1.guid(), session2.guid());
 }
@@ -65,7 +65,7 @@ fn test_async_session_builder_from_state() {
 #[test]
 fn test_async_session_upsert() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     let status = session.upsert(1u64, 100u64);
     assert_eq!(status, Status::Ok);
@@ -74,7 +74,7 @@ fn test_async_session_upsert() {
 #[test]
 fn test_async_session_read() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
     let result = session.read(&1u64);
@@ -85,7 +85,7 @@ fn test_async_session_read() {
 #[test]
 fn test_async_session_read_not_found() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     let result = session.read(&999u64);
     assert_eq!(result, Ok(None));
@@ -94,7 +94,7 @@ fn test_async_session_read_not_found() {
 #[test]
 fn test_async_session_delete() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
     let delete_status = session.delete(&1u64);
@@ -109,7 +109,7 @@ fn test_async_session_delete() {
 #[test]
 fn test_async_session_rmw() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
 
@@ -129,7 +129,7 @@ fn test_async_session_rmw() {
 #[test]
 fn test_async_session_to_state() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     // Do some operations to increment serial number
     session.upsert(1u64, 100u64);
@@ -144,14 +144,14 @@ fn test_async_session_to_state() {
 #[test]
 fn test_async_session_continue_from_state() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
     let original_guid = session.guid();
 
     session.upsert(1u64, 100u64);
     let state = session.to_session_state();
 
     // Create new session and continue from state
-    let mut new_session = store.start_async_session();
+    let mut new_session = store.start_async_session().unwrap();
     new_session.continue_from_state(&state);
 
     // GUID should match when continuing same session
@@ -163,13 +163,13 @@ fn test_async_session_continue_from_state() {
 #[test]
 fn test_async_session_continue_async_session() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
     let state = session.to_session_state();
 
     // Continue using store method
-    let continued = store.continue_async_session(state.clone());
+    let continued = store.continue_async_session(state.clone()).unwrap();
 
     assert_eq!(continued.guid(), state.guid);
     assert_eq!(continued.serial_num(), state.serial_num);
@@ -194,7 +194,7 @@ fn test_async_session_start_end() {
 #[test]
 fn test_async_session_refresh() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     // Refresh should not panic
     session.refresh();
@@ -203,7 +203,7 @@ fn test_async_session_refresh() {
 #[test]
 fn test_async_session_complete_pending() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     // With no pending operations, should return true immediately
     assert!(session.complete_pending(false));
@@ -214,7 +214,7 @@ fn test_async_session_complete_pending() {
 #[test]
 fn test_async_session_context() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
 
@@ -225,7 +225,7 @@ fn test_async_session_context() {
 #[test]
 fn test_async_session_context_mut() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     let ctx = session.context_mut();
     ctx.version = 42;
@@ -238,7 +238,7 @@ fn test_async_session_context_mut() {
 #[test]
 fn test_async_session_multiple_upserts() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     for i in 1u64..=100 {
         let status = session.upsert(i, i * 10);
@@ -254,7 +254,7 @@ fn test_async_session_multiple_upserts() {
 #[test]
 fn test_async_session_update_existing() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
     session.upsert(1u64, 200u64);
@@ -266,7 +266,7 @@ fn test_async_session_update_existing() {
 #[test]
 fn test_async_session_serial_increments() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     let initial = session.serial_num();
     session.upsert(1u64, 100u64);
@@ -289,7 +289,7 @@ fn test_multiple_sessions_different_threads() {
         .map(|t| {
             let store = store.clone();
             thread::spawn(move || {
-                let mut session = store.start_async_session();
+                let mut session = store.start_async_session().unwrap();
                 for i in 0..ops_per_thread {
                     let key = (t * ops_per_thread + i) as u64;
                     session.upsert(key, key * 10);
@@ -308,7 +308,7 @@ fn test_multiple_sessions_different_threads() {
 #[test]
 fn test_async_session_rmw_abort() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     session.upsert(1u64, 100u64);
 
@@ -327,7 +327,7 @@ fn test_async_session_rmw_abort() {
 #[test]
 fn test_async_session_delete_nonexistent() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     let status = session.delete(&999u64);
     // Deleting non-existent key should return NotFound
@@ -337,7 +337,7 @@ fn test_async_session_delete_nonexistent() {
 #[test]
 fn test_async_session_rmw_create_new() {
     let store = create_test_store();
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
 
     // RMW on non-existent key - behavior depends on implementation
     // Most implementations would create a new entry

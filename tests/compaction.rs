@@ -423,14 +423,14 @@ fn test_store_with_compaction_config() {
 
     // Store should be functional
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }
     }
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             let result = session.read(&i);
             assert!(result.is_ok());
@@ -444,7 +444,7 @@ fn test_store_with_updates_creates_versions() {
     let store = create_store_with_compaction();
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert initial values
         for i in 1u64..=50 {
@@ -469,7 +469,7 @@ fn test_store_with_deletes() {
     let store = create_store_with_compaction();
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert values
         for i in 1u64..=100 {

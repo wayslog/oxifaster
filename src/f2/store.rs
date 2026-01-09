@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::compaction::{CompactionConfig, Compactor};
@@ -54,6 +55,8 @@ where
     checkpoint: F2CheckpointState,
     /// Background worker active flag
     background_worker_active: AtomicBool,
+    /// Background worker join handle (joined on stop/drop).
+    background_worker_handle: Mutex<Option<thread::JoinHandle<()>>>,
     /// Compaction scheduled flag
     compaction_scheduled: AtomicBool,
     /// Compactor for hot store
@@ -142,6 +145,7 @@ where
             cold_store,
             checkpoint: F2CheckpointState::new(),
             background_worker_active: AtomicBool::new(false),
+            background_worker_handle: Mutex::new(None),
             compaction_scheduled: AtomicBool::new(false),
             hot_compactor: Compactor::with_config(hot_compaction_config),
             cold_compactor: Compactor::with_config(cold_compaction_config),
@@ -522,6 +526,16 @@ where
 
     /// Start the background worker thread
     pub fn start_background_worker(self: &Arc<Self>) {
+        let mut handle = self.background_worker_handle.lock();
+        if handle.as_ref().is_some_and(|h| h.is_finished()) {
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
+        if handle.is_some() {
+            return;
+        }
+
         if self
             .background_worker_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -530,162 +544,182 @@ where
             return; // Already running
         }
 
-        let f2 = Arc::clone(self);
-        thread::spawn(move || {
-            f2.background_worker_loop();
-        });
+        let weak = Arc::downgrade(self);
+        *handle = Some(thread::spawn(move || loop {
+            let Some(f2) = weak.upgrade() else {
+                break;
+            };
+
+            if !f2.background_worker_active.load(Ordering::Acquire) {
+                break;
+            }
+
+            f2.background_worker_tick();
+
+            let interval = f2.config.compaction.check_interval;
+            thread::park_timeout(interval);
+        }));
     }
 
-    /// Background worker loop
-    fn background_worker_loop(&self) {
-        let check_interval = self.config.compaction.check_interval;
+    /// Background worker single iteration.
+    fn background_worker_tick(&self) {
+        struct ClearOnDrop<'a>(&'a AtomicBool);
 
-        while self.background_worker_active.load(Ordering::Acquire) {
-            self.compaction_scheduled.store(true, Ordering::Release);
+        impl Drop for ClearOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
 
-            // Check hot store checkpoint
-            if self.checkpoint.hot_store_status.load(Ordering::Acquire)
-                == StoreCheckpointStatus::Requested
-            {
-                // Issue hot store checkpoint
+        self.compaction_scheduled.store(true, Ordering::Release);
+        let _clear = ClearOnDrop(&self.compaction_scheduled);
+
+        // Check hot store checkpoint
+        if self.checkpoint.hot_store_status.load(Ordering::Acquire)
+            == StoreCheckpointStatus::Requested
+        {
+            // Issue hot store checkpoint
+            self.checkpoint
+                .hot_store_status
+                .store(StoreCheckpointStatus::Active, Ordering::Release);
+
+            // Actually checkpoint hot store - index first
+            let token = self.checkpoint.token();
+            let checkpoint_version = self.checkpoint.version();
+            let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
+                let hot_dir = cp_dir.join(token.to_string()).join("hot");
+                let dir_created = std::fs::create_dir_all(&hot_dir).is_ok();
+
+                if dir_created {
+                    // Checkpoint hot store index
+                    let index_ok = self
+                        .hot_store
+                        .hash_index
+                        .checkpoint(&hot_dir, token)
+                        .is_ok();
+
+                    // Checkpoint hot store hybrid log (writes both metadata and snapshot)
+                    let log_ok = self
+                        .hot_store
+                        .hlog()
+                        .checkpoint(&hot_dir, token, checkpoint_version)
+                        .is_ok();
+
+                    index_ok && log_ok
+                } else {
+                    false
+                }
+            } else {
+                // No checkpoint directory configured - cannot checkpoint without a directory.
+                false
+            };
+
+            if checkpoint_success {
                 self.checkpoint
                     .hot_store_status
-                    .store(StoreCheckpointStatus::Active, Ordering::Release);
+                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
-                // Actually checkpoint hot store - index first
-                let token = self.checkpoint.token();
-                let checkpoint_version = self.checkpoint.version();
-                let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
-                    let hot_dir = cp_dir.join(token.to_string()).join("hot");
-                    let dir_created = std::fs::create_dir_all(&hot_dir).is_ok();
-
-                    if dir_created {
-                        // Checkpoint hot store index
-                        let index_ok = self
-                            .hot_store
-                            .hash_index
-                            .checkpoint(&hot_dir, token)
-                            .is_ok();
-
-                        // Checkpoint hot store hybrid log (writes both metadata and snapshot)
-                        let log_ok = self
-                            .hot_store
-                            .hlog()
-                            .checkpoint(&hot_dir, token, checkpoint_version)
-                            .is_ok();
-
-                        index_ok && log_ok
-                    } else {
-                        false
-                    }
-                } else {
-                    // No checkpoint directory configured - this is an error condition
-                    // Cannot checkpoint without a directory
-                    false
-                };
-
-                if checkpoint_success {
-                    self.checkpoint
-                        .hot_store_status
-                        .store(StoreCheckpointStatus::Finished, Ordering::Release);
-
-                    // Move to cold store checkpoint phase
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
-                    self.checkpoint
-                        .cold_store_status
-                        .store(StoreCheckpointStatus::Requested, Ordering::Release);
-                } else {
-                    // Checkpoint failed - mark as failed and reset phase
-                    self.checkpoint
-                        .hot_store_status
-                        .store(StoreCheckpointStatus::Failed, Ordering::Release);
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
-                }
-            }
-
-            // Check cold store checkpoint
-            if self.checkpoint.cold_store_status.load(Ordering::Acquire)
-                == StoreCheckpointStatus::Requested
-            {
-                // Issue cold store checkpoint
+                // Move to cold store checkpoint phase
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
                 self.checkpoint
                     .cold_store_status
-                    .store(StoreCheckpointStatus::Active, Ordering::Release);
+                    .store(StoreCheckpointStatus::Requested, Ordering::Release);
+            } else {
+                // Checkpoint failed - mark as failed and reset phase
+                self.checkpoint
+                    .hot_store_status
+                    .store(StoreCheckpointStatus::Failed, Ordering::Release);
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
+            }
+        }
 
-                // Actually checkpoint cold store
-                let token = self.checkpoint.token();
-                let checkpoint_version = self.checkpoint.version();
-                let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
-                    let cold_dir = cp_dir.join(token.to_string()).join("cold");
-                    let dir_created = std::fs::create_dir_all(&cold_dir).is_ok();
+        // Check cold store checkpoint
+        if self.checkpoint.cold_store_status.load(Ordering::Acquire)
+            == StoreCheckpointStatus::Requested
+        {
+            // Issue cold store checkpoint
+            self.checkpoint
+                .cold_store_status
+                .store(StoreCheckpointStatus::Active, Ordering::Release);
 
-                    if dir_created {
-                        // Checkpoint cold store index
-                        let index_ok = self
-                            .cold_store
-                            .hash_index
-                            .checkpoint(&cold_dir, token)
-                            .is_ok();
+            // Actually checkpoint cold store
+            let token = self.checkpoint.token();
+            let checkpoint_version = self.checkpoint.version();
+            let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
+                let cold_dir = cp_dir.join(token.to_string()).join("cold");
+                let dir_created = std::fs::create_dir_all(&cold_dir).is_ok();
 
-                        // Checkpoint cold store hybrid log (writes both metadata and snapshot)
-                        let log_ok = self
-                            .cold_store
-                            .hlog()
-                            .checkpoint(&cold_dir, token, checkpoint_version)
-                            .is_ok();
+                if dir_created {
+                    // Checkpoint cold store index
+                    let index_ok = self
+                        .cold_store
+                        .hash_index
+                        .checkpoint(&cold_dir, token)
+                        .is_ok();
 
-                        index_ok && log_ok
-                    } else {
-                        false
-                    }
+                    // Checkpoint cold store hybrid log (writes both metadata and snapshot)
+                    let log_ok = self
+                        .cold_store
+                        .hlog()
+                        .checkpoint(&cold_dir, token, checkpoint_version)
+                        .is_ok();
+
+                    index_ok && log_ok
                 } else {
-                    // No checkpoint directory configured - this is an error condition
                     false
-                };
-
-                if checkpoint_success {
-                    self.checkpoint
-                        .cold_store_status
-                        .store(StoreCheckpointStatus::Finished, Ordering::Release);
-
-                    // Move back to REST
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
-                } else {
-                    // Checkpoint failed - mark as failed and reset phase
-                    self.checkpoint
-                        .cold_store_status
-                        .store(StoreCheckpointStatus::Failed, Ordering::Release);
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
                 }
-            }
+            } else {
+                // No checkpoint directory configured - cannot checkpoint without a directory.
+                false
+            };
 
-            // Hot-cold compaction
-            if let Some(until_addr) = self.should_compact_hot_log() {
-                let _ = self.compact_hot_log(until_addr);
-            }
+            if checkpoint_success {
+                self.checkpoint
+                    .cold_store_status
+                    .store(StoreCheckpointStatus::Finished, Ordering::Release);
 
-            // Cold-cold compaction
-            if let Some(until_addr) = self.should_compact_cold_log() {
-                let _ = self.compact_cold_log(until_addr);
+                // Move back to REST
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
+            } else {
+                // Checkpoint failed - mark as failed and reset phase
+                self.checkpoint
+                    .cold_store_status
+                    .store(StoreCheckpointStatus::Failed, Ordering::Release);
+                self.checkpoint
+                    .phase
+                    .store(F2CheckpointPhase::Rest, Ordering::Release);
             }
+        }
 
-            self.compaction_scheduled.store(false, Ordering::Release);
-            thread::sleep(check_interval);
+        // Hot-cold compaction
+        if let Some(until_addr) = self.should_compact_hot_log() {
+            let _ = self.compact_hot_log(until_addr);
+        }
+
+        // Cold-cold compaction
+        if let Some(until_addr) = self.should_compact_cold_log() {
+            let _ = self.compact_cold_log(until_addr);
         }
     }
 
     /// Stop the background worker thread
     pub fn stop_background_worker(&self) {
-        self.background_worker_active
-            .store(false, Ordering::Release);
+        let handle = {
+            let mut handle = self.background_worker_handle.lock();
+            self.background_worker_active
+                .store(false, Ordering::Release);
+            handle.take()
+        };
+        if let Some(handle) = handle {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
     }
 
     /// Get compaction configuration

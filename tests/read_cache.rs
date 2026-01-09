@@ -319,7 +319,7 @@ fn test_fasterkv_cache_operations() {
 
     // Insert data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }
@@ -327,7 +327,7 @@ fn test_fasterkv_cache_operations() {
 
     // Read data (will populate cache)
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             let result = session.read(&i);
             assert!(result.is_ok());
@@ -346,26 +346,26 @@ fn test_fasterkv_cache_invalidation_on_update() {
 
     // Insert initial value
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(key, 100);
     }
 
     // Read to populate cache
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let result = session.read(&key);
         assert_eq!(result.unwrap(), Some(100));
     }
 
     // Update value
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(key, 200);
     }
 
     // Read should return updated value
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let result = session.read(&key);
         assert_eq!(result.unwrap(), Some(200));
     }
@@ -378,26 +378,26 @@ fn test_fasterkv_cache_invalidation_on_delete() {
 
     // Insert value
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(key, 100);
     }
 
     // Read to populate cache
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let result = session.read(&key);
         assert_eq!(result.unwrap(), Some(100));
     }
 
     // Delete
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.delete(&key);
     }
 
     // Read should return None
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let result = session.read(&key);
         assert_eq!(result.unwrap(), None);
     }
@@ -409,7 +409,7 @@ fn test_fasterkv_clear_read_cache() {
 
     // Insert and read data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(1u64, 100);
         let _ = session.read(&1u64);
     }
@@ -435,7 +435,7 @@ fn test_fasterkv_without_read_cache() {
 
     // Operations should still work
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(1u64, 100);
         let result = session.read(&1u64);
         assert_eq!(result.unwrap(), Some(100));
@@ -450,7 +450,7 @@ fn test_concurrent_cache_access() {
 
     // Pre-populate data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }
@@ -464,7 +464,7 @@ fn test_concurrent_cache_access() {
         .map(|_| {
             let store = store.clone();
             thread::spawn(move || {
-                let mut session = store.start_session();
+                let mut session = store.start_session().unwrap();
                 for i in 0..ops_per_thread {
                     let key = (i % 100) + 1;
                     let result = session.read(&key);
@@ -480,7 +480,7 @@ fn test_concurrent_cache_access() {
 
     // Verify store is still consistent
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             let result = session.read(&i);
             assert!(result.is_ok());
@@ -497,7 +497,7 @@ fn test_concurrent_cache_insert_and_read() {
         .map(|t| {
             let store = store.clone();
             thread::spawn(move || {
-                let mut session = store.start_session();
+                let mut session = store.start_session().unwrap();
                 for i in 0..25 {
                     let key = (t * 25 + i + 1) as u64;
                     session.upsert(key, key * 100);
@@ -513,7 +513,7 @@ fn test_concurrent_cache_insert_and_read() {
 
     // Verify all data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             let result = session.read(&i);
             assert!(result.is_ok());

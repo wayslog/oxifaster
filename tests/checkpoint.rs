@@ -28,7 +28,7 @@ fn test_checkpoint_basic() {
 
     // Insert some data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..21 {
             let status = session.upsert(i, i * 10);
             assert_eq!(status, Status::Ok);
@@ -61,7 +61,7 @@ fn test_checkpoint_and_recover_data() {
     // Phase 1: Create store and insert data
     {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         for (k, v) in &test_data {
             let status = session.upsert(*k, *v);
@@ -80,7 +80,7 @@ fn test_checkpoint_and_recover_data() {
             FasterKv::recover(temp_dir.path(), token, config, device).unwrap();
 
         let recovered = Arc::new(recovered);
-        let _session = recovered.start_session();
+        let _session = recovered.start_session().unwrap();
 
         // Note: With NullDisk, the actual data won't persist because NullDisk
         // doesn't actually store data. This test verifies the recovery flow
@@ -99,7 +99,7 @@ fn test_multiple_checkpoints() {
 
     // Insert initial data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..11 {
             session.upsert(i, i);
         }
@@ -110,7 +110,7 @@ fn test_multiple_checkpoints() {
 
     // Insert more data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 11u64..21 {
             session.upsert(i, i);
         }
@@ -121,7 +121,7 @@ fn test_multiple_checkpoints() {
 
     // Insert even more data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 21u64..31 {
             session.upsert(i, i);
         }
@@ -208,7 +208,7 @@ fn test_checkpoint_with_deletes() {
 
     // Insert and then delete some data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert 20 keys
         for i in 1u64..21 {
@@ -238,7 +238,7 @@ fn test_checkpoint_metadata_consistency() {
 
     // Insert data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..101 {
             session.upsert(i, i * 1000);
         }
@@ -283,7 +283,7 @@ fn test_checkpoint_files_structure() {
     let temp_dir = tempfile::tempdir().unwrap();
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(1u64, 100u64);
     }
 
@@ -313,7 +313,7 @@ fn test_concurrent_reads_during_checkpoint() {
 
     // Insert data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..101 {
             session.upsert(i, i * 10);
         }
@@ -327,7 +327,7 @@ fn test_concurrent_reads_during_checkpoint() {
 
     // Continue reading while checkpoint happens
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..101 {
             let _ = session.read(&i);
         }

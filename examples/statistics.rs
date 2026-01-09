@@ -52,7 +52,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
     // 插入数据
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=1000 {
             session.upsert(i, i * 10);
         }
@@ -61,7 +61,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
     // 读取数据
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=500 {
             let _ = session.read(&i);
         }
@@ -70,7 +70,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
     // 更新数据
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=200 {
             session.upsert(i, i * 100);
         }
@@ -79,7 +79,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
     // 删除数据
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.delete(&i);
         }

@@ -3,6 +3,10 @@
 //! This module provides automatic background compaction functionality.
 //! A background worker thread periodically checks if compaction is needed
 //! and triggers compaction when the log exceeds configured thresholds.
+//!
+//! The primary entrypoint for users is [`crate::store::FasterKv::start_auto_compaction`],
+//! which returns an [`AutoCompactionHandle`]. Dropping the handle stops the worker and
+//! joins its thread.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -11,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::address::Address;
 use crate::compaction::{CompactionResult, CompactionStats};
+use crate::status::Status;
 
 /// Configuration for automatic compaction
 #[derive(Debug, Clone)]
@@ -84,39 +89,93 @@ impl AutoCompactionConfig {
 ///
 /// Implementations of this trait provide the necessary operations
 /// for the auto compaction worker to interact with the store.
-pub trait AutoCompactionTarget: Send + Sync + 'static {
-    /// Check if compaction should be triggered
-    ///
-    /// Returns (should_compact, current_utilization, log_size)
-    fn should_compact(&self) -> (bool, f64, u64);
+pub(crate) trait AutoCompactionTarget: Send + Sync + 'static {
+    /// Get the current begin address.
+    fn begin_address(&self) -> Address;
 
-    /// Get the current begin address
-    fn get_begin_address(&self) -> Address;
+    /// Get the safe head address (oldest address in memory).
+    fn safe_head_address(&self) -> Address;
 
-    /// Get the safe head address (oldest address in memory)
-    fn get_safe_head_address(&self) -> Address;
+    /// Get the current log size in bytes.
+    fn log_size_bytes(&self) -> u64;
+
+    /// Get the current log utilization ratio (0.0 to 1.0).
+    fn log_utilization(&self) -> f64;
 
     /// Perform compaction up to the specified address
     fn compact_until(&self, until_address: Address) -> CompactionResult;
+}
+
+/// A handle that owns an auto-compaction worker.
+///
+/// Dropping this handle stops the worker thread and joins it.
+pub struct AutoCompactionHandle<T> {
+    worker: AutoCompactionWorker<T>,
+}
+
+impl<T> AutoCompactionHandle<T> {
+    pub(crate) fn start_new(target: Weak<T>, config: AutoCompactionConfig) -> Self
+    where
+        T: AutoCompactionTarget,
+    {
+        let mut worker = AutoCompactionWorker::new(target, config);
+        let _ = worker.start();
+        Self { worker }
+    }
+
+    /// Stop the worker and join its background thread.
+    pub fn stop(&mut self) {
+        self.worker.stop();
+    }
+
+    /// Pause compaction checks and work.
+    pub fn pause(&self) {
+        self.worker.pause();
+    }
+
+    /// Resume compaction checks and work.
+    pub fn resume(&self) {
+        self.worker.resume();
+    }
+
+    /// Return whether the worker thread is currently running.
+    pub fn is_running(&self) -> bool {
+        self.worker.is_running()
+    }
+
+    /// Return the current worker state.
+    pub fn state(&self) -> AutoCompactionState {
+        self.worker.state()
+    }
+
+    /// Return a snapshot handle to the worker statistics.
+    pub fn stats(&self) -> Arc<AutoCompactionStats> {
+        Arc::clone(self.worker.stats())
+    }
+
+    /// Return the configuration used by this worker.
+    pub fn config(&self) -> AutoCompactionConfig {
+        self.worker.config().clone()
+    }
 }
 
 /// Statistics for auto compaction
 #[derive(Debug, Default)]
 pub struct AutoCompactionStats {
     /// Total compactions performed
-    pub total_compactions: AtomicU64,
+    total_compactions: AtomicU64,
     /// Successful compactions
-    pub successful_compactions: AtomicU64,
+    successful_compactions: AtomicU64,
     /// Failed compactions
-    pub failed_compactions: AtomicU64,
+    failed_compactions: AtomicU64,
     /// Total bytes reclaimed
-    pub total_bytes_reclaimed: AtomicU64,
+    total_bytes_reclaimed: AtomicU64,
     /// Total records compacted
-    pub total_records_compacted: AtomicU64,
+    total_records_compacted: AtomicU64,
     /// Last compaction timestamp (Unix epoch seconds)
-    pub last_compaction_time: AtomicU64,
+    last_compaction_time: AtomicU64,
     /// Last compaction duration in milliseconds
-    pub last_compaction_duration_ms: AtomicU64,
+    last_compaction_duration_ms: AtomicU64,
 }
 
 impl AutoCompactionStats {
@@ -125,8 +184,43 @@ impl AutoCompactionStats {
         Self::default()
     }
 
-    /// Record a successful compaction
-    pub fn record_success(&self, stats: &CompactionStats) {
+    /// Total compactions performed.
+    pub fn total_compactions(&self) -> u64 {
+        self.total_compactions.load(Ordering::Relaxed)
+    }
+
+    /// Successful compactions performed.
+    pub fn successful_compactions(&self) -> u64 {
+        self.successful_compactions.load(Ordering::Relaxed)
+    }
+
+    /// Failed compactions performed.
+    pub fn failed_compactions(&self) -> u64 {
+        self.failed_compactions.load(Ordering::Relaxed)
+    }
+
+    /// Total bytes reclaimed by successful compactions.
+    pub fn total_bytes_reclaimed(&self) -> u64 {
+        self.total_bytes_reclaimed.load(Ordering::Relaxed)
+    }
+
+    /// Total records compacted by successful compactions.
+    pub fn total_records_compacted(&self) -> u64 {
+        self.total_records_compacted.load(Ordering::Relaxed)
+    }
+
+    /// The Unix timestamp (seconds) of the last successful compaction.
+    pub fn last_compaction_time(&self) -> u64 {
+        self.last_compaction_time.load(Ordering::Relaxed)
+    }
+
+    /// The duration (milliseconds) of the last successful compaction.
+    pub fn last_compaction_duration_ms(&self) -> u64 {
+        self.last_compaction_duration_ms.load(Ordering::Relaxed)
+    }
+
+    /// Record a successful compaction.
+    pub(crate) fn record_success(&self, stats: &CompactionStats) {
         self.total_compactions.fetch_add(1, Ordering::Relaxed);
         self.successful_compactions.fetch_add(1, Ordering::Relaxed);
         self.total_bytes_reclaimed
@@ -144,19 +238,19 @@ impl AutoCompactionStats {
         );
     }
 
-    /// Record a failed compaction
-    pub fn record_failure(&self) {
+    /// Record a failed compaction.
+    pub(crate) fn record_failure(&self) {
         self.total_compactions.fetch_add(1, Ordering::Relaxed);
         self.failed_compactions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get the success rate
     pub fn success_rate(&self) -> f64 {
-        let total = self.total_compactions.load(Ordering::Relaxed);
+        let total = self.total_compactions();
         if total == 0 {
             return 1.0;
         }
-        self.successful_compactions.load(Ordering::Relaxed) as f64 / total as f64
+        self.successful_compactions() as f64 / total as f64
     }
 
     /// Reset statistics
@@ -188,7 +282,7 @@ pub enum AutoCompactionState {
 ///
 /// Runs a background thread that periodically checks if compaction
 /// is needed and triggers compaction when appropriate.
-pub struct AutoCompactionWorker<T: AutoCompactionTarget> {
+pub(crate) struct AutoCompactionWorker<T> {
     /// Configuration
     config: AutoCompactionConfig,
     /// Weak reference to the target store
@@ -205,7 +299,7 @@ pub struct AutoCompactionWorker<T: AutoCompactionTarget> {
     state: Arc<std::sync::atomic::AtomicU8>,
 }
 
-impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
+impl<T> AutoCompactionWorker<T> {
     /// Create a new auto compaction worker
     pub fn new(target: Weak<T>, config: AutoCompactionConfig) -> Self {
         Self {
@@ -252,29 +346,6 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
         &self.config
     }
 
-    /// Start the auto compaction worker
-    ///
-    /// Returns true if the worker was started, false if already running.
-    pub fn start(&mut self) -> bool {
-        if self.running.swap(true, Ordering::AcqRel) {
-            return false;
-        }
-
-        let running = Arc::clone(&self.running);
-        let paused = Arc::clone(&self.paused);
-        let stats = Arc::clone(&self.stats);
-        let state = Arc::clone(&self.state);
-        let target = self.target.clone();
-        let config = self.config.clone();
-
-        let handle = thread::spawn(move || {
-            Self::worker_loop(running, paused, stats, state, target, config);
-        });
-
-        self.handle = Some(handle);
-        true
-    }
-
     /// Stop the auto compaction worker
     ///
     /// Signals the worker to stop and waits for it to finish.
@@ -304,6 +375,31 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
                 .store(AutoCompactionState::Idle as u8, Ordering::Release);
         }
     }
+}
+
+impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
+    /// Start the auto compaction worker
+    ///
+    /// Returns true if the worker was started, false if already running.
+    pub fn start(&mut self) -> bool {
+        if self.running.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+
+        let running = Arc::clone(&self.running);
+        let paused = Arc::clone(&self.paused);
+        let stats = Arc::clone(&self.stats);
+        let state = Arc::clone(&self.state);
+        let target = self.target.clone();
+        let config = self.config.clone();
+
+        let handle = thread::spawn(move || {
+            Self::worker_loop(running, paused, stats, state, target, config);
+        });
+
+        self.handle = Some(handle);
+        true
+    }
 
     /// Worker loop that runs in the background thread
     fn worker_loop(
@@ -321,8 +417,20 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
         state.store(AutoCompactionState::Idle as u8, Ordering::Release);
 
         while running.load(Ordering::Acquire) {
+            // Try to get the target early so we can stop promptly when the store is dropped.
+            let store = match target.upgrade() {
+                Some(s) => s,
+                None => {
+                    // Target has been dropped, clear running flag and stop the worker.
+                    // This ensures is_running() returns false and start() can restart.
+                    running.store(false, Ordering::Release);
+                    break;
+                }
+            };
+
             // Check if paused
             if paused.load(Ordering::Acquire) {
+                drop(store);
                 thread::sleep(config.check_interval);
                 continue;
             }
@@ -336,31 +444,24 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
             if config.max_compactions_per_hour > 0
                 && compactions_this_hour >= config.max_compactions_per_hour
             {
+                drop(store);
                 thread::sleep(config.check_interval);
                 continue;
             }
 
             // Check quiet period
             if last_compaction.elapsed() < config.quiet_period {
+                drop(store);
                 thread::sleep(config.check_interval);
                 continue;
             }
 
-            // Try to get the target
-            let store = match target.upgrade() {
-                Some(s) => s,
-                None => {
-                    // Target has been dropped, clear running flag and stop the worker
-                    // This ensures is_running() returns false and start() can restart
-                    running.store(false, Ordering::Release);
-                    break;
-                }
-            };
-
-            // Check if compaction is needed
-            let (should_compact, _utilization, log_size) = store.should_compact();
+            let utilization = store.log_utilization();
+            let log_size = store.log_size_bytes();
+            let should_compact = utilization < config.target_utilization;
 
             if !should_compact || log_size < config.min_log_size {
+                drop(store);
                 thread::sleep(config.check_interval);
                 continue;
             }
@@ -368,13 +469,16 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
             // Perform compaction
             state.store(AutoCompactionState::Compacting as u8, Ordering::Release);
 
-            let begin_address = store.get_begin_address();
-            let safe_head = store.get_safe_head_address();
+            let begin_address = store.begin_address();
+            let safe_head = store.safe_head_address();
 
             // Calculate target address (compact up to safe head)
             let result = store.compact_until(safe_head);
+            drop(store);
 
-            if result.status.is_ok() && result.new_begin_address > begin_address {
+            if result.status == Status::Aborted {
+                // Another compaction is in progress; do not count as failure.
+            } else if result.status.is_ok() && result.new_begin_address > begin_address {
                 stats.record_success(&result.stats);
                 compactions_this_hour += 1;
             } else {
@@ -392,7 +496,7 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
     }
 }
 
-impl<T: AutoCompactionTarget> Drop for AutoCompactionWorker<T> {
+impl<T> Drop for AutoCompactionWorker<T> {
     fn drop(&mut self) {
         self.stop();
     }
@@ -401,12 +505,10 @@ impl<T: AutoCompactionTarget> Drop for AutoCompactionWorker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::Status;
     use std::sync::atomic::AtomicU64;
 
     /// Mock target for testing
     struct MockTarget {
-        should_compact_result: AtomicBool,
         utilization: std::sync::atomic::AtomicU64,
         log_size: AtomicU64,
         begin_address: Address,
@@ -417,7 +519,6 @@ mod tests {
     impl MockTarget {
         fn new() -> Self {
             Self {
-                should_compact_result: AtomicBool::new(false),
                 utilization: AtomicU64::new(50), // 0.50
                 log_size: AtomicU64::new(100 * 1024 * 1024),
                 begin_address: Address::new(0, 0),
@@ -426,8 +527,10 @@ mod tests {
             }
         }
 
-        fn set_should_compact(&self, value: bool) {
-            self.should_compact_result.store(value, Ordering::Release);
+        fn set_utilization(&self, ratio: f64) {
+            let ratio = ratio.clamp(0.0, 1.0);
+            self.utilization
+                .store((ratio * 100.0).round() as u64, Ordering::Release);
         }
 
         fn get_compact_count(&self) -> u64 {
@@ -436,19 +539,20 @@ mod tests {
     }
 
     impl AutoCompactionTarget for MockTarget {
-        fn should_compact(&self) -> (bool, f64, u64) {
-            let should = self.should_compact_result.load(Ordering::Acquire);
-            let util = self.utilization.load(Ordering::Acquire) as f64 / 100.0;
-            let size = self.log_size.load(Ordering::Acquire);
-            (should, util, size)
-        }
-
-        fn get_begin_address(&self) -> Address {
+        fn begin_address(&self) -> Address {
             self.begin_address
         }
 
-        fn get_safe_head_address(&self) -> Address {
+        fn safe_head_address(&self) -> Address {
             self.safe_head
+        }
+
+        fn log_size_bytes(&self) -> u64 {
+            self.log_size.load(Ordering::Acquire)
+        }
+
+        fn log_utilization(&self) -> f64 {
+            self.utilization.load(Ordering::Acquire) as f64 / 100.0
         }
 
         fn compact_until(&self, _until_address: Address) -> CompactionResult {
@@ -495,12 +599,12 @@ mod tests {
         };
 
         stats.record_success(&compaction_stats);
-        assert_eq!(stats.successful_compactions.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.total_bytes_reclaimed.load(Ordering::Relaxed), 5000);
+        assert_eq!(stats.successful_compactions(), 1);
+        assert_eq!(stats.total_bytes_reclaimed(), 5000);
 
         stats.record_failure();
-        assert_eq!(stats.total_compactions.load(Ordering::Relaxed), 2);
-        assert_eq!(stats.failed_compactions.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.total_compactions(), 2);
+        assert_eq!(stats.failed_compactions(), 1);
         assert_eq!(stats.success_rate(), 0.5);
     }
 
@@ -533,8 +637,7 @@ mod tests {
     #[test]
     fn test_auto_compaction_worker_pause_resume() {
         let target = Arc::new(MockTarget::new());
-        let config = AutoCompactionConfig::new()
-            .with_check_interval(Duration::from_millis(50));
+        let config = AutoCompactionConfig::new().with_check_interval(Duration::from_millis(50));
 
         let mut worker = AutoCompactionWorker::new(Arc::downgrade(&target), config);
         worker.start();
@@ -553,7 +656,7 @@ mod tests {
     #[test]
     fn test_auto_compaction_worker_triggers_compaction() {
         let target = Arc::new(MockTarget::new());
-        target.set_should_compact(true);
+        target.set_utilization(0.1);
 
         let config = AutoCompactionConfig::new()
             .with_check_interval(Duration::from_millis(50))
@@ -570,6 +673,6 @@ mod tests {
 
         // Should have performed at least one compaction
         assert!(target.get_compact_count() >= 1);
-        assert!(worker.stats().successful_compactions.load(Ordering::Relaxed) >= 1);
+        assert!(worker.stats().successful_compactions() >= 1);
     }
 }

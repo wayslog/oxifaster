@@ -24,7 +24,9 @@
 //!
 //! async fn example() {
 //!     let store = FasterKv::new(config, device);
-//!     let mut session = store.start_async_session();
+//!     let mut session = store
+//!         .start_async_session()
+//!         .expect("failed to start async session");
 //!     
 //!     // Async operations
 //!     session.upsert_async(key, value).await;

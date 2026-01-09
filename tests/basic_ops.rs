@@ -24,7 +24,7 @@ fn create_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
 #[test]
 fn test_basic_upsert_read() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Test basic upsert and read
     let key = 42u64;
@@ -41,7 +41,7 @@ fn test_basic_upsert_read() {
 #[test]
 fn test_read_nonexistent() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let result = session.read(&999u64);
     assert!(result.is_ok());
@@ -51,7 +51,7 @@ fn test_read_nonexistent() {
 #[test]
 fn test_update_existing() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = 42u64;
 
@@ -67,7 +67,7 @@ fn test_update_existing() {
 #[test]
 fn test_delete() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = 42u64;
 
@@ -86,7 +86,7 @@ fn test_delete() {
 #[test]
 fn test_delete_nonexistent() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let status = session.delete(&999u64);
     assert_eq!(status, Status::NotFound);
@@ -95,7 +95,7 @@ fn test_delete_nonexistent() {
 #[test]
 fn test_multiple_keys() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let num_keys = 1000u64;
 
@@ -115,7 +115,7 @@ fn test_multiple_keys() {
 #[test]
 fn test_overwrite_chain() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = 42u64;
 
@@ -136,7 +136,7 @@ fn test_concurrent_sessions() {
 
     // Populate store first
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..1000u64 {
             session.upsert(i, i * 10);
         }
@@ -146,7 +146,7 @@ fn test_concurrent_sessions() {
         .map(|t| {
             let store = store.clone();
             thread::spawn(move || {
-                let mut session = store.start_session();
+                let mut session = store.start_session().unwrap();
 
                 for i in 0..ops_per_thread {
                     let key = (t * ops_per_thread + i) as u64 % 1000;
@@ -162,7 +162,7 @@ fn test_concurrent_sessions() {
     }
 
     // Verify store is still consistent
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
     for i in 0..1000u64 {
         let result = session.read(&i);
         assert!(result.is_ok());
@@ -175,14 +175,14 @@ fn test_session_lifecycle() {
 
     // Create and drop multiple sessions
     for _ in 0..10 {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         session.upsert(1, 1);
         let _ = session.read(&1u64);
         // Session automatically ends when dropped
     }
 
     // Final verification
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
     let result = session.read(&1u64);
     assert!(result.is_ok());
 }
@@ -192,7 +192,7 @@ fn test_large_values() {
     // This test would require a value type that supports larger sizes
     // For u64, this is a simple test
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = 42u64;
     let value = u64::MAX;
@@ -204,7 +204,7 @@ fn test_large_values() {
 #[test]
 fn test_index_stats() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Insert some data
     for i in 0..100u64 {
@@ -219,7 +219,7 @@ fn test_index_stats() {
 #[test]
 fn test_log_stats() {
     let store = create_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Insert some data
     for i in 0..100u64 {

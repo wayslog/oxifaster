@@ -58,7 +58,7 @@ fn main() -> std::io::Result<()> {
     let store = Arc::new(FasterKv::new(config, device));
     
     // Start session
-    let mut session = store.start_session();
+    let mut session = store.start_session().expect("failed to start session");
     
     // Insert data
     session.upsert(42u64, 100u64);
@@ -270,7 +270,7 @@ let store_device = FileSystemDisk::single_file("oxifaster.db")?;
 let store = Arc::new(FasterKv::new(config, store_device));
 
 // Start session
-let mut session = store.start_session();
+let mut session = store.start_session().expect("failed to start session");
 
 // Basic operations
 session.upsert(key, value);                    // Insert/Update
@@ -289,7 +289,9 @@ let recovered = FasterKv::recover(            // Recover from checkpoint
 
 // Session persistence
 let states = store.get_recovered_sessions();   // Get recovered session states
-let session = store.continue_session(state);   // Restore session from saved state
+let session = store
+    .continue_session(state)
+    .expect("failed to continue session");     // Restore session from saved state
 ```
 
 ### FasterKv with Read Cache
@@ -318,6 +320,17 @@ let compaction_config = CompactionConfig::default()
     .with_num_threads(2);
 
 let store = FasterKv::with_compaction_config(config, device, compaction_config);
+```
+
+### Automatic Background Compaction
+
+Start a background compaction worker and manage its lifecycle via the returned handle:
+
+```rust
+use oxifaster::compaction::AutoCompactionConfig;
+
+let handle = store.start_auto_compaction(AutoCompactionConfig::new());
+drop(handle); // Stops and joins the worker thread
 ```
 
 ### FasterLog

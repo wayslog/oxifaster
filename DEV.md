@@ -2,6 +2,11 @@
 
 This document outlines the roadmap and requirements for transitioning `oxifaster` from an experimental project to a commercially viable, production-ready system.
 
+## Tooling Gates
+
+- MSRV: Rust 1.92.0 (`Cargo.toml` `rust-version`)
+- CI: `./scripts/check-fmt.sh`, `./scripts/check-clippy.sh`, `./scripts/check-test.sh`, `./scripts/check-test-all-features.sh`, and `cargo package`
+
 ## 1. Commercialization Roadmap
 
 To achieve production readiness, the following areas must be addressed.

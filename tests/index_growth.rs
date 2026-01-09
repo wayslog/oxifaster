@@ -405,7 +405,7 @@ fn test_store_index_stats() {
 
     // Insert some data
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }

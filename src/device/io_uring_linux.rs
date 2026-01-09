@@ -245,22 +245,40 @@ impl SyncStorageDevice for IoUringDevice {
         self.with_state(|state| {
             let start = Instant::now();
 
-            let fd = if state.use_registered_file {
-                types::Fixed(0)
-            } else {
-                types::Fd(state.file.as_raw_fd())
-            };
-            let entry = match state.fixed_buffers.as_mut() {
-                Some(fixed) if buf.len() <= fixed.buffer_size() => {
-                    opcode::ReadFixed::new(fd, fixed.buffer_mut().as_mut_ptr(), buf.len() as u32, 0)
-                        .offset(offset)
-                        .build()
-                        .user_data(0)
-                }
-                _ => opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+            let entry = if state.use_registered_file {
+                let fd = types::Fixed(0);
+                match state.fixed_buffers.as_mut() {
+                    Some(fixed) if buf.len() <= fixed.buffer_size() => opcode::ReadFixed::new(
+                        fd,
+                        fixed.buffer_mut().as_mut_ptr(),
+                        buf.len() as u32,
+                        0,
+                    )
                     .offset(offset)
                     .build()
                     .user_data(0),
+                    _ => opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+                        .offset(offset)
+                        .build()
+                        .user_data(0),
+                }
+            } else {
+                let fd = types::Fd(state.file.as_raw_fd());
+                match state.fixed_buffers.as_mut() {
+                    Some(fixed) if buf.len() <= fixed.buffer_size() => opcode::ReadFixed::new(
+                        fd,
+                        fixed.buffer_mut().as_mut_ptr(),
+                        buf.len() as u32,
+                        0,
+                    )
+                    .offset(offset)
+                    .build()
+                    .user_data(0),
+                    _ => opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+                        .offset(offset)
+                        .build()
+                        .user_data(0),
+                }
             };
 
             unsafe {
@@ -292,24 +310,38 @@ impl SyncStorageDevice for IoUringDevice {
         self.with_state(|state| {
             let start = Instant::now();
 
-            let fd = if state.use_registered_file {
-                types::Fixed(0)
-            } else {
-                types::Fd(state.file.as_raw_fd())
-            };
-            let entry = match state.fixed_buffers.as_mut() {
-                Some(fixed) if buf.len() <= fixed.buffer_size() => {
-                    let fixed_buf = fixed.buffer_mut();
-                    fixed_buf[..buf.len()].copy_from_slice(buf);
-                    opcode::WriteFixed::new(fd, fixed_buf.as_ptr(), buf.len() as u32, 0)
+            let entry = if state.use_registered_file {
+                let fd = types::Fixed(0);
+                match state.fixed_buffers.as_mut() {
+                    Some(fixed) if buf.len() <= fixed.buffer_size() => {
+                        let fixed_buf = fixed.buffer_mut();
+                        fixed_buf[..buf.len()].copy_from_slice(buf);
+                        opcode::WriteFixed::new(fd, fixed_buf.as_ptr(), buf.len() as u32, 0)
+                            .offset(offset)
+                            .build()
+                            .user_data(0)
+                    }
+                    _ => opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
                         .offset(offset)
                         .build()
-                        .user_data(0)
+                        .user_data(0),
                 }
-                _ => opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
-                    .offset(offset)
-                    .build()
-                    .user_data(0),
+            } else {
+                let fd = types::Fd(state.file.as_raw_fd());
+                match state.fixed_buffers.as_mut() {
+                    Some(fixed) if buf.len() <= fixed.buffer_size() => {
+                        let fixed_buf = fixed.buffer_mut();
+                        fixed_buf[..buf.len()].copy_from_slice(buf);
+                        opcode::WriteFixed::new(fd, fixed_buf.as_ptr(), buf.len() as u32, 0)
+                            .offset(offset)
+                            .build()
+                            .user_data(0)
+                    }
+                    _ => opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
+                        .offset(offset)
+                        .build()
+                        .user_data(0),
+                }
             };
 
             unsafe {
@@ -332,12 +364,13 @@ impl SyncStorageDevice for IoUringDevice {
 
     fn flush_sync(&self) -> io::Result<()> {
         self.with_state(|state| {
-            let fd = if state.use_registered_file {
-                types::Fixed(0)
+            let entry = if state.use_registered_file {
+                let fd = types::Fixed(0);
+                opcode::Fsync::new(fd).build().user_data(0)
             } else {
-                types::Fd(state.file.as_raw_fd())
+                let fd = types::Fd(state.file.as_raw_fd());
+                opcode::Fsync::new(fd).build().user_data(0)
             };
-            let entry = opcode::Fsync::new(fd).build().user_data(0);
 
             unsafe {
                 state

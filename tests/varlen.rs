@@ -280,7 +280,7 @@ fn create_test_store() -> Arc<FasterKv<SpanByte, SpanByte, NullDisk>> {
 #[test]
 fn test_fasterkv_span_byte_upsert_read() {
     let store = create_test_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = SpanByte::from_string("key1");
     let value = SpanByte::from_string("value1");
@@ -295,7 +295,7 @@ fn test_fasterkv_span_byte_upsert_read() {
 #[test]
 fn test_fasterkv_span_byte_delete() {
     let store = create_test_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = SpanByte::from_string("key1");
     let value = SpanByte::from_string("value1");
@@ -311,7 +311,7 @@ fn test_fasterkv_span_byte_delete() {
 #[test]
 fn test_fasterkv_span_byte_update() {
     let store = create_test_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = SpanByte::from_string("key1");
     let value1 = SpanByte::from_string("value1");
@@ -327,7 +327,7 @@ fn test_fasterkv_span_byte_update() {
 #[test]
 fn test_fasterkv_span_byte_multiple_keys() {
     let store = create_test_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     for i in 0..100 {
         let key = SpanByte::from_string(&format!("key{i}"));
@@ -346,7 +346,7 @@ fn test_fasterkv_span_byte_multiple_keys() {
 #[test]
 fn test_fasterkv_span_byte_binary_data() {
     let store = create_test_store();
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     let key = SpanByte::from_vec(vec![0, 1, 2, 3, 4]);
     let value = SpanByte::from_vec((0u8..=255).collect());

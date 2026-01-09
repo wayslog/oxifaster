@@ -48,7 +48,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 3. 插入大量数据以创建可压缩的日志
     println!("--- 3. 插入和删除数据 ---");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // 先插入一批数据
         for i in 1u64..=500 {
@@ -156,7 +156,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 9. 验证数据完整性 (压缩后未删除的数据应该仍然存在)
     println!("--- 9. 验证数据完整性 ---");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let mut found = 0;
         let mut not_found = 0;
 

@@ -49,6 +49,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-test.sh
 
+  test-all-features:
+    name: Test (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-test-all-features.sh
+
+  msrv:
+    name: MSRV (1.92.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-test.sh
+
+  package:
+    name: Package (dry run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --verbose
+
   bench:
     name: Bench (compile check)
     runs-on: ubuntu-latest

@@ -34,7 +34,7 @@ fn test_pending_read_and_complete_pending_readback() {
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     session.upsert(1u64, 100u64);
 
@@ -65,7 +65,7 @@ fn test_complete_pending_with_custom_timeout() {
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     session.upsert(42u64, 999u64);
     assert_eq!(store.flush_and_shift_head(Address::new(1, 0)), Status::Ok);
@@ -95,7 +95,7 @@ fn test_complete_pending_no_wait_returns_immediately() {
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     session.upsert(1u64, 100u64);
     assert_eq!(store.flush_and_shift_head(Address::new(1, 0)), Status::Ok);

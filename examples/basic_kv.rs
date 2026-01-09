@@ -26,7 +26,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("存储创建成功!");
 
     // 4. 启动会话
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
     println!("会话已启动\n");
 
     // 5. 插入数据 (Upsert)

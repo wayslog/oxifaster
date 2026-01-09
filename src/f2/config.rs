@@ -142,9 +142,10 @@ impl ColdStoreConfig {
 }
 
 /// 热→冷迁移策略（F2）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum HotToColdMigrationStrategy {
     /// 按地址老化：hot-log compaction 扫描区间内的 live 记录迁移到 cold。
+    #[default]
     AddressAging,
     /// 按访问率：访问次数高于阈值的 key 会保留在 hot（通过“复制到 hot 尾部”完成回收）。
     ///
@@ -154,12 +155,6 @@ pub enum HotToColdMigrationStrategy {
         /// 每次 hot-log compaction 后把计数右移（衰减窗口），0 表示不衰减；取值必须 < 64
         decay_shift: u8,
     },
-}
-
-impl Default for HotToColdMigrationStrategy {
-    fn default() -> Self {
-        Self::AddressAging
-    }
 }
 
 /// Configuration for F2 compaction

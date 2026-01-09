@@ -253,7 +253,7 @@ fn test_store_full_checkpoint_enables_incremental() {
 
     // Insert some data using a session
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..100u64 {
             let _ = session.upsert(i, i * 10);
         }
@@ -368,7 +368,7 @@ fn test_multiple_checkpoint_cycles() {
     for cycle in 0..5 {
         // Insert some data
         {
-            let mut session = store.start_session();
+            let mut session = store.start_session().unwrap();
             for i in 0..50u64 {
                 let key = cycle * 100 + i;
                 let _ = session.upsert(key, key * 10);
@@ -393,7 +393,7 @@ fn test_store_incremental_checkpoint_persists_index_files() {
 
     // 先做一次完整快照，作为增量检查点的 base。
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..100u64 {
             let _ = session.upsert(i, i);
         }
@@ -404,7 +404,7 @@ fn test_store_incremental_checkpoint_persists_index_files() {
 
     // 写入一些变更，确保后续增量检查点会产生 delta。
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 50..150u64 {
             let _ = session.upsert(i, i * 10);
         }

@@ -23,10 +23,13 @@ use crate::checkpoint::{
     CheckpointToken, CheckpointType, DeltaLogMetadata, IndexMetadata, LogMetadata, RecoveryState,
     SessionState,
 };
-use crate::compaction::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
+use crate::compaction::{
+    AutoCompactionConfig, AutoCompactionHandle, AutoCompactionTarget, CompactionConfig,
+    CompactionResult, CompactionStats, Compactor,
+};
 use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
-use crate::epoch::{current_thread_tag_for, get_thread_id, get_thread_tag, LightEpoch};
+use crate::epoch::{current_thread_tag_for, get_thread_tag, try_get_thread_id, LightEpoch};
 use crate::index::{GrowResult, GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
 use crate::record::{Key, Record, RecordInfo, Value};
 use crate::stats::StatsCollector;
@@ -454,18 +457,25 @@ where
     ///
     /// Sessions are not thread-safe and should only be used from the thread that
     /// created them. Each thread should have at most one active session.
-    pub fn start_session(self: &Arc<Self>) -> Session<K, V, D> {
-        // Increment session counter for tracking purposes
+    pub fn start_session(self: &Arc<Self>) -> Result<Session<K, V, D>, Status> {
+        self.start_session_with_thread_id(try_get_thread_id())
+    }
+
+    fn start_session_with_thread_id(
+        self: &Arc<Self>,
+        thread_id: Option<usize>,
+    ) -> Result<Session<K, V, D>, Status> {
+        // Increment session counter for tracking purposes.
         let _session_id = self.next_session_id.fetch_add(1, Ordering::AcqRel);
-        // Use the thread-local ID for epoch protection, not the session counter
-        let thread_id = get_thread_id();
+        // Use the thread-local ID for epoch protection, not the session counter.
+        let thread_id = thread_id.ok_or(Status::TooManyThreads)?;
         let mut session = Session::new(self.clone(), thread_id);
         session.start();
 
-        // Register session in the registry
+        // Register session in the registry.
         self.register_session(&session.to_session_state());
 
-        session
+        Ok(session)
     }
 
     /// Start a new async session for this store
@@ -478,17 +488,20 @@ where
     ///
     /// Async sessions are not thread-safe and should only be used from the thread
     /// that created them.
-    pub fn start_async_session(self: &Arc<Self>) -> AsyncSession<K, V, D> {
-        let session = self.start_session();
-        AsyncSession::new(session)
+    pub fn start_async_session(self: &Arc<Self>) -> Result<AsyncSession<K, V, D>, Status> {
+        let session = self.start_session()?;
+        Ok(AsyncSession::new(session))
     }
 
     /// Continue an async session from a saved state (for recovery)
     ///
     /// Restores an async session using the GUID and serial number from a previous checkpoint.
-    pub fn continue_async_session(self: &Arc<Self>, state: SessionState) -> AsyncSession<K, V, D> {
-        let session = self.continue_session(state);
-        AsyncSession::new(session)
+    pub fn continue_async_session(
+        self: &Arc<Self>,
+        state: SessionState,
+    ) -> Result<AsyncSession<K, V, D>, Status> {
+        let session = self.continue_session(state)?;
+        Ok(AsyncSession::new(session))
     }
 
     /// Continue a session from a saved state (for recovery)
@@ -499,18 +512,21 @@ where
     /// # Note
     ///
     /// The restored session should be used from the same thread that calls this method.
-    pub fn continue_session(self: &Arc<Self>, state: SessionState) -> Session<K, V, D> {
+    pub fn continue_session(
+        self: &Arc<Self>,
+        state: SessionState,
+    ) -> Result<Session<K, V, D>, Status> {
         // Increment session counter for tracking purposes
         let _session_id = self.next_session_id.fetch_add(1, Ordering::AcqRel);
         // Use the thread-local ID for epoch protection
-        let thread_id = get_thread_id();
+        let thread_id = try_get_thread_id().ok_or(Status::TooManyThreads)?;
         let mut session = Session::from_state(self.clone(), thread_id, &state);
         session.start();
 
         // Register restored session
         self.register_session(&session.to_session_state());
 
-        session
+        Ok(session)
     }
 
     /// Register a session state in the registry
@@ -1355,6 +1371,47 @@ where
     /// Check if compaction is recommended based on configuration
     pub fn should_compact(&self) -> bool {
         self.log_utilization() < self.compactor.config().target_utilization
+    }
+
+    /// Start an automatic background compaction worker for this store.
+    ///
+    /// This can be called multiple times to start multiple independent workers.
+    /// Dropping the returned handle stops the worker thread and joins it.
+    ///
+    /// Notes:
+    /// - The worker triggers based on [`FasterKv::log_utilization`] and `AutoCompactionConfig`.
+    /// - Actual compaction uses the existing [`FasterKv::log_compact_until`] path, so at most
+    ///   one compaction can run at a time (subsequent triggers will be skipped while busy).
+    pub fn start_auto_compaction(
+        self: &Arc<Self>,
+        config: AutoCompactionConfig,
+    ) -> AutoCompactionHandle<Self> {
+        AutoCompactionHandle::start_new(Arc::downgrade(self), config)
+    }
+
+    /// Get the hybrid log begin address.
+    pub fn log_begin_address(&self) -> Address {
+        // SAFETY: Read-only access.
+        unsafe { self.hlog().get_begin_address() }
+    }
+
+    /// Get the hybrid log head address.
+    pub fn log_head_address(&self) -> Address {
+        // SAFETY: Read-only access.
+        unsafe { self.hlog().get_head_address() }
+    }
+
+    /// Get the hybrid log tail address.
+    pub fn log_tail_address(&self) -> Address {
+        // SAFETY: Read-only access.
+        unsafe { self.hlog().get_tail_address() }
+    }
+
+    /// Get the hybrid log size in bytes (tail - begin).
+    pub fn log_size_bytes(&self) -> u64 {
+        let begin = self.log_begin_address();
+        let tail = self.log_tail_address();
+        tail.control().saturating_sub(begin.control())
     }
 
     // ============ Index Growth API ============
@@ -2367,6 +2424,33 @@ where
     }
 }
 
+impl<K, V, D> AutoCompactionTarget for FasterKv<K, V, D>
+where
+    K: Key,
+    V: Value,
+    D: StorageDevice,
+{
+    fn begin_address(&self) -> Address {
+        self.log_begin_address()
+    }
+
+    fn safe_head_address(&self) -> Address {
+        self.log_head_address()
+    }
+
+    fn log_size_bytes(&self) -> u64 {
+        FasterKv::<K, V, D>::log_size_bytes(self)
+    }
+
+    fn log_utilization(&self) -> f64 {
+        FasterKv::<K, V, D>::log_utilization(self)
+    }
+
+    fn compact_until(&self, until_address: Address) -> CompactionResult {
+        self.log_compact_until(Some(until_address))
+    }
+}
+
 /// Kind of checkpoint that exists
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointKind {
@@ -2405,9 +2489,18 @@ mod tests {
     }
 
     #[test]
+    fn test_start_session_returns_too_many_threads_on_exhaustion() {
+        let store = create_test_store();
+        match store.start_session_with_thread_id(None) {
+            Ok(_) => panic!("expected TooManyThreads"),
+            Err(err) => assert_eq!(err, Status::TooManyThreads),
+        }
+    }
+
+    #[test]
     fn test_upsert_and_read() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Upsert
         let status = session.upsert(42u64, 100u64);
@@ -2422,7 +2515,7 @@ mod tests {
     #[test]
     fn test_read_not_found() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         let result = session.read(&999u64);
         assert!(result.is_ok());
@@ -2432,7 +2525,7 @@ mod tests {
     #[test]
     fn test_delete() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert
         session.upsert(42u64, 100u64);
@@ -2453,7 +2546,7 @@ mod tests {
     #[test]
     fn test_multiple_operations() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert multiple keys
         for i in 1u64..101 {
@@ -2497,7 +2590,7 @@ mod tests {
     #[test]
     fn test_index_stats() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert some data
         for i in 0u64..10 {
@@ -2511,7 +2604,7 @@ mod tests {
     #[test]
     fn test_log_stats() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert some data
         for i in 0u64..10 {
@@ -2550,7 +2643,7 @@ mod tests {
     #[test]
     fn test_checkpoint_with_data() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert some data
         for i in 1u64..11 {
@@ -2742,7 +2835,7 @@ mod tests {
     #[test]
     fn test_log_utilization() {
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Initial utilization
         let util = store.log_utilization();
@@ -2769,7 +2862,7 @@ mod tests {
         // This test verifies that compaction properly copies live records
         // to the tail before reclaiming the original space.
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert some records (start from 1, not 0, for consistency with other tests)
         let num_records = 100u64;
@@ -2823,7 +2916,7 @@ mod tests {
     fn test_compaction_removes_obsolete_records() {
         // Test that compaction properly removes obsolete (superseded) records
         let store = create_test_store();
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // Insert initial values (start from 1, not 0, to avoid key=0 edge case)
         for i in 1u64..=50 {

@@ -62,7 +62,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device));
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=500 {
             session.upsert(i, i * 100);
         }

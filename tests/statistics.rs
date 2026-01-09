@@ -157,7 +157,7 @@ fn test_index_stats_after_inserts() {
     let store = create_test_store();
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }
@@ -184,7 +184,7 @@ fn test_log_stats_after_inserts() {
     let store = create_test_store();
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1u64..=100 {
             session.upsert(i, i * 10);
         }

@@ -26,7 +26,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
     // 2. 创建 AsyncSession
     println!("--- 2. 创建 AsyncSession ---");
-    let mut session = store.start_async_session();
+    let mut session = store.start_async_session().unwrap();
     println!("  Session GUID: {}", session.guid());
     println!("  Thread ID: {}", session.thread_id());
     println!("  是否活动: {}\n", session.is_active());
@@ -63,7 +63,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("  当前 Serial Num: {}", state.serial_num);
 
     // 恢复 session
-    let mut restored_session = store.continue_async_session(state.clone());
+    let mut restored_session = store.continue_async_session(state.clone()).unwrap();
     println!("  恢复后 GUID: {}", restored_session.guid());
     println!("  恢复后 Serial Num: {}\n", restored_session.serial_num());
 

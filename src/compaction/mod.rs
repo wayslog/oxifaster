@@ -41,10 +41,14 @@
 //! - Preserving records that fail to copy or update
 //! - Only reclaiming space after all copies complete successfully
 
+mod auto_compact;
 mod compact;
 mod concurrent;
 mod contexts;
 
+pub use auto_compact::{
+    AutoCompactionConfig, AutoCompactionHandle, AutoCompactionState, AutoCompactionStats,
+};
 pub use compact::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
 pub use concurrent::{
     CompactionWorkerHandle, ConcurrentCompactionConfig, ConcurrentCompactionContext,
@@ -52,3 +56,5 @@ pub use concurrent::{
     ConcurrentLogPageIterator, PageChunk,
 };
 pub use contexts::{CompactionContext, CompactionInsertContext};
+
+pub(crate) use auto_compact::AutoCompactionTarget;

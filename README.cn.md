@@ -58,7 +58,7 @@ fn main() -> std::io::Result<()> {
     let store = Arc::new(FasterKv::new(config, device));
     
     // 启动会话
-    let mut session = store.start_session();
+    let mut session = store.start_session().expect("failed to start session");
     
     // 插入数据
     session.upsert(42u64, 100u64);
@@ -270,7 +270,7 @@ let store_device = FileSystemDisk::single_file("oxifaster.db")?;
 let store = Arc::new(FasterKv::new(config, store_device));
 
 // 启动会话
-let mut session = store.start_session();
+let mut session = store.start_session().expect("failed to start session");
 
 // 基本操作
 session.upsert(key, value);                    // 插入/更新
@@ -289,7 +289,9 @@ let recovered = FasterKv::recover(            // 从检查点恢复
 
 // Session 持久化
 let states = store.get_recovered_sessions();   // 获取恢复的 session 状态
-let session = store.continue_session(state);   // 从保存的状态恢复 session
+let session = store
+    .continue_session(state)
+    .expect("failed to continue session");     // 从保存的状态恢复 session
 ```
 
 ### FasterKv with Read Cache
@@ -318,6 +320,17 @@ let compaction_config = CompactionConfig::default()
     .with_num_threads(2);
 
 let store = FasterKv::with_compaction_config(config, device, compaction_config);
+```
+
+### 自动后台 Compaction
+
+启动后台 compaction worker，并通过返回的 handle 管理其生命周期：
+
+```rust
+use oxifaster::compaction::AutoCompactionConfig;
+
+let handle = store.start_auto_compaction(AutoCompactionConfig::new());
+drop(handle); // Stops and joins the worker thread
 ```
 
 ### FasterLog

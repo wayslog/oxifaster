@@ -74,7 +74,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     };
     let store = Arc::new(FasterKv::<UserId, UserInfo, _>::new(config, device));
 
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // 创建测试数据
     let users = vec![

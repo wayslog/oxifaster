@@ -41,7 +41,7 @@
 //! let store = Arc::new(FasterKv::new(config, device));
 //!
 //! // Start a session (required for all operations)
-//! let mut session = store.start_session();
+//! let mut session = store.start_session().expect("failed to start session");
 //!
 //! // Insert or update a key-value pair
 //! session.upsert(42u64, 100u64);
@@ -80,7 +80,9 @@
 //!
 //! // Continue sessions from checkpoint
 //! for session_state in recovered_store.get_recovered_sessions() {
-//!     let session = recovered_store.continue_session(session_state);
+//!     let session = recovered_store
+//!         .continue_session(session_state)
+//!         .expect("failed to continue session");
 //!     // Use the recovered session...
 //! }
 //! ```

@@ -48,7 +48,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("--- 3. 插入测试数据 ---");
     let num_keys = 1000u64;
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1..=num_keys {
             let status = session.upsert(i, i * 100);
             assert_eq!(status, Status::Ok);
@@ -59,7 +59,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 4. 首次读取 (缓存冷启动)
     println!("--- 4. 首次读取 (缓存冷启动) ---");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // 读取一部分数据，这些数据会被缓存
         let hot_keys: Vec<u64> = (1..=100).collect();
@@ -85,7 +85,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 6. 重复读取热点数据 (应有更高命中率)
     println!("--- 6. 重复读取热点数据 ---");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // 多次读取相同的热点数据
         let hot_keys: Vec<u64> = (1..=100).collect();
@@ -123,7 +123,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 9. 演示缓存失效 (更新数据)
     println!("--- 9. 演示缓存失效 ---");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // 先读取一个 key
         let key = 42u64;

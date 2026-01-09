@@ -83,7 +83,7 @@ fn bench_upsert(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
     let mut key = 0u64;
 
     group.bench_function("sequential", |b| {
@@ -104,7 +104,7 @@ fn bench_read(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Populate store
     let num_keys = 100_000u64;
@@ -132,7 +132,7 @@ fn bench_mixed_a(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Populate store
     let num_keys = 100_000u64;
@@ -165,7 +165,7 @@ fn bench_mixed_b(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Populate store
     let num_keys = 100_000u64;
@@ -196,7 +196,7 @@ fn bench_rmw(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
-    let mut session = store.start_session();
+    let mut session = store.start_session().unwrap();
 
     // Populate store
     let num_keys = 100_000u64;
@@ -244,7 +244,7 @@ fn bench_concurrent_read(c: &mut Criterion) {
         // Populate store with initial data
         let num_keys = 100_000u64;
         pool.install(|| {
-            let mut session = store.start_session();
+            let mut session = store.start_session().unwrap();
             for i in 0..num_keys {
                 session.upsert(i, i * 10);
             }
@@ -261,7 +261,7 @@ fn bench_concurrent_read(c: &mut Criterion) {
                     let total_ops = AtomicU64::new(0);
                     pool.install(|| {
                         (0..num_threads).into_par_iter().for_each(|_| {
-                            let mut session = store.start_session();
+                            let mut session = store.start_session().unwrap();
                             let mut rng = rand::thread_rng();
                             for _ in 0..ops_per_thread {
                                 let key = rng.gen_range(0..num_keys);
@@ -296,7 +296,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
         // Populate store with initial data
         let num_keys = 100_000u64;
         pool.install(|| {
-            let mut session = store.start_session();
+            let mut session = store.start_session().unwrap();
             for i in 0..num_keys {
                 session.upsert(i, i * 10);
             }
@@ -313,7 +313,7 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
                     let total_ops = AtomicU64::new(0);
                     pool.install(|| {
                         (0..num_threads).into_par_iter().for_each(|thread_id| {
-                            let mut session = store.start_session();
+                            let mut session = store.start_session().unwrap();
                             let mut rng = rand::thread_rng();
                             for i in 0..ops_per_thread {
                                 let key = rng.gen_range(0..num_keys);
@@ -362,7 +362,7 @@ fn bench_concurrent_write(c: &mut Criterion) {
                     let total_ops = AtomicU64::new(0);
                     pool.install(|| {
                         (0..num_threads).into_par_iter().for_each(|thread_id| {
-                            let mut session = store.start_session();
+                            let mut session = store.start_session().unwrap();
                             let base_key = thread_id as u64 * ops_per_thread;
                             for i in 0..ops_per_thread {
                                 let key = base_key + i;
@@ -399,7 +399,7 @@ fn bench_large_value_read_1kb(c: &mut Criterion) {
 
     // Populate
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
             let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
             let value = SpanByte::from_vec(test_data.clone());
@@ -408,7 +408,7 @@ fn bench_large_value_read_1kb(c: &mut Criterion) {
     }
 
     group.bench_function("random", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let mut rng = rand::thread_rng();
         b.iter(|| {
             let key_num = rng.gen_range(0..num_keys);
@@ -432,7 +432,7 @@ fn bench_large_value_read_4kb(c: &mut Criterion) {
     let num_keys = 500u64;
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
             let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
             let value = SpanByte::from_vec(test_data.clone());
@@ -441,7 +441,7 @@ fn bench_large_value_read_4kb(c: &mut Criterion) {
     }
 
     group.bench_function("random", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let mut rng = rand::thread_rng();
         b.iter(|| {
             let key_num = rng.gen_range(0..num_keys);
@@ -466,7 +466,7 @@ fn bench_large_value_write_1kb(c: &mut Criterion) {
     let key_counter = Arc::new(AtomicU64::new(0));
 
     group.bench_function("sequential", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let test_data = test_data.clone();
         let key_counter = key_counter.clone();
 
@@ -498,7 +498,7 @@ fn bench_large_value_write_4kb(c: &mut Criterion) {
     let key_counter = Arc::new(AtomicU64::new(0));
 
     group.bench_function("sequential", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         let test_data = test_data.clone();
         let key_counter = key_counter.clone();
 
@@ -538,7 +538,7 @@ fn bench_disk_read(c: &mut Criterion) {
     // Populate store with data
     let num_keys = 50_000u64;
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
             session.upsert(i, i * 10);
         }
@@ -547,7 +547,7 @@ fn bench_disk_read(c: &mut Criterion) {
     let mut rng = rand::thread_rng();
 
     group.bench_function("random", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         b.iter(|| {
             let key = rng.gen_range(0..num_keys);
@@ -574,7 +574,7 @@ fn bench_disk_write(c: &mut Criterion) {
     let mut key_counter = 0u64;
 
     group.bench_function("sequential", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         b.iter(|| {
             let status = session.upsert(black_box(key_counter), black_box(key_counter * 10));
@@ -601,7 +601,7 @@ fn bench_disk_mixed(c: &mut Criterion) {
     // Populate store
     let num_keys = 50_000u64;
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
             session.upsert(i, i * 10);
         }
@@ -611,7 +611,7 @@ fn bench_disk_mixed(c: &mut Criterion) {
     let mut op_counter = 0u64;
 
     group.bench_function("random_ops", |b| {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         b.iter(|| {
             let key = rng.gen_range(0..num_keys);

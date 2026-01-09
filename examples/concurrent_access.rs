@@ -33,7 +33,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 预填充数据
     println!("预填充 {key_range} 个键...");
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
         for i in 1..=key_range {
             session.upsert(i, i);
         }
@@ -57,7 +57,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
             let successful_reads = successful_reads.clone();
 
             thread::spawn(move || {
-                let mut session = store.start_session();
+                let mut session = store.start_session().unwrap();
                 let mut local_reads = 0u64;
                 let mut local_writes = 0u64;
                 let mut local_success = 0u64;

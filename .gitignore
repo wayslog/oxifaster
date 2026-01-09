@@ -19,6 +19,8 @@ Thumbs.db
 # Benchmark results
 criterion/
 
+# Temporary local analysis directories
+FASTER/
 
 .gemini/
 gha-creds-*.json

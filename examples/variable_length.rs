@@ -23,7 +23,7 @@ fn run_fasterkv_with_spanbyte<D: StorageDevice>(device_name: &str, device: D) {
     let store = Arc::new(FasterKv::<SpanByte, SpanByte, _>::new(config, device));
 
     {
-        let mut session = store.start_session();
+        let mut session = store.start_session().unwrap();
 
         // 插入字符串键值
         let key = SpanByte::from_string("user:1");
