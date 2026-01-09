@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::checkpoint::SessionState;
 use crate::device::StorageDevice;
+use crate::epoch::get_thread_tag;
 use crate::record::{Key, Value};
 use crate::status::Status;
 use crate::store::FasterKv;
@@ -320,7 +321,9 @@ where
         let start = Instant::now();
 
         loop {
-            let completed = self.store.take_completed_io_for_thread(self.ctx.thread_id);
+            let completed = self
+                .store
+                .take_completed_io_for_thread(self.ctx.thread_id, get_thread_tag());
             if completed > 0 {
                 self.ctx.pending_count = self.ctx.pending_count.saturating_sub(completed);
             }

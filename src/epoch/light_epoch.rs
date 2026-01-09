@@ -3,10 +3,13 @@
 //! This module implements the epoch protection mechanism used by FASTER
 //! to safely reclaim memory in lock-free data structures.
 
-use std::cell::UnsafeCell;
+use std::cell::{RefCell, RefMut, UnsafeCell};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use crate::constants::{CACHE_LINE_BYTES, MAX_THREADS};
 
@@ -15,14 +18,74 @@ use crate::constants::{CACHE_LINE_BYTES, MAX_THREADS};
 /// Global counter for allocating thread-local IDs
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
 
-thread_local! {
-    /// Thread-local ID for epoch table indexing
-    /// Each thread gets a unique ID (0..MAX_THREADS-1) on first access
-    static THREAD_ID: usize = {
-        // Note: In production, we should handle thread ID exhaustion more gracefully
-        // For now, we rely on debug_assert in protect/unprotect to catch overflow
-        NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed)
+/// Recycled thread IDs (used when threads exit).
+static FREE_THREAD_IDS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+
+/// Per-slot generation counter.
+///
+/// This allows other subsystems (e.g., async I/O routing) to safely distinguish
+/// a reused `thread_id` slot across different thread lifetimes.
+static THREAD_ID_GENERATIONS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
+
+fn free_thread_ids() -> &'static Mutex<Vec<usize>> {
+    FREE_THREAD_IDS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn thread_id_generations() -> &'static [AtomicU64] {
+    THREAD_ID_GENERATIONS
+        .get_or_init(|| (0..MAX_THREADS).map(|_| AtomicU64::new(0)).collect())
+        .as_slice()
+}
+
+#[derive(Debug)]
+struct ThreadIdGuard {
+    id: usize,
+    generation: u64,
+}
+
+impl Drop for ThreadIdGuard {
+    fn drop(&mut self) {
+        if let Some(gens) = THREAD_ID_GENERATIONS.get() {
+            if let Some(gen) = gens.get(self.id) {
+                gen.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        if let Some(free) = FREE_THREAD_IDS.get() {
+            free.lock().push(self.id);
+        }
+    }
+}
+
+fn try_allocate_thread_id() -> Option<ThreadIdGuard> {
+    let make_guard = |id: usize| ThreadIdGuard {
+        id,
+        generation: thread_id_generations()
+            .get(id)
+            .map(|g| g.load(Ordering::Acquire))
+            .unwrap_or(0),
     };
+
+    if let Some(id) = free_thread_ids().lock().pop() {
+        return Some(make_guard(id));
+    }
+
+    match NEXT_THREAD_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+        if next < MAX_THREADS {
+            Some(next + 1)
+        } else {
+            None
+        }
+    }) {
+        Ok(id) => Some(make_guard(id)),
+        Err(_) => {
+            // Another thread may have just returned an ID. Re-check before giving up.
+            free_thread_ids().lock().pop().map(make_guard)
+        }
+    }
+}
+
+thread_local! {
+    static THREAD_ID: RefCell<Option<ThreadIdGuard>> = const { RefCell::new(None) };
 }
 
 /// Get the current thread's ID for epoch protection
@@ -33,10 +96,54 @@ thread_local! {
 ///
 /// # Panics
 ///
-/// Debug builds will panic in `protect`/`unprotect` if the ID >= MAX_THREADS.
+/// Panics if more than `MAX_THREADS` threads concurrently use the library.
 #[inline]
 pub fn get_thread_id() -> usize {
-    THREAD_ID.with(|id| *id)
+    try_get_thread_id().unwrap_or_else(|| {
+        panic!(
+            "LightEpoch thread_id exhausted: MAX_THREADS={MAX_THREADS}. \
+             Too many threads are concurrently using oxifaster. \
+             Reduce thread concurrency or increase `oxifaster::constants::MAX_THREADS`."
+        )
+    })
+}
+
+/// Try to get the current thread's ID for epoch protection.
+///
+/// Returns `None` if more than `MAX_THREADS` threads concurrently use the library.
+#[inline]
+pub fn try_get_thread_id() -> Option<usize> {
+    THREAD_ID.with(|slot| {
+        let mut slot: RefMut<'_, Option<ThreadIdGuard>> = slot.borrow_mut();
+        if let Some(guard) = slot.as_ref() {
+            return Some(guard.id);
+        }
+
+        let guard = try_allocate_thread_id()?;
+        let id = guard.id;
+        *slot = Some(guard);
+        Some(id)
+    })
+}
+
+/// Get the current thread's generation tag for its `thread_id`.
+///
+/// This value changes whenever a `thread_id` slot is recycled and can be used
+/// to disambiguate stale events associated with a prior owner of the same slot.
+#[inline]
+pub fn get_thread_tag() -> u64 {
+    THREAD_ID.with(|slot| slot.borrow().as_ref().map(|g| g.generation).unwrap_or(0))
+}
+
+/// Return the current generation tag for a given `thread_id` slot.
+///
+/// This is primarily intended for internal filtering of stale events.
+#[inline]
+pub(crate) fn current_thread_tag_for(thread_id: usize) -> u64 {
+    thread_id_generations()
+        .get(thread_id)
+        .map(|g| g.load(Ordering::Acquire))
+        .unwrap_or(0)
 }
 
 /// Special epoch value indicating the thread is not protected
@@ -582,5 +689,40 @@ mod tests {
         // Note: The current implementation has specific behavior
         // where subsequent reentrant_protect calls when already protected
         // return the current epoch without incrementing the counter
+    }
+
+    #[test]
+    fn test_thread_id_reuse_changes_generation() {
+        use std::collections::{HashMap, HashSet};
+
+        let mut generations_by_id: HashMap<usize, HashSet<u64>> = HashMap::new();
+
+        for _ in 0..(MAX_THREADS * 2) {
+            let (id, tag) = std::thread::spawn(|| {
+                let id = get_thread_id();
+                let tag = get_thread_tag();
+                (id, tag)
+            })
+            .join()
+            .unwrap();
+
+            assert!(id < MAX_THREADS);
+            generations_by_id.entry(id).or_default().insert(tag);
+        }
+
+        assert!(generations_by_id.values().any(|tags| tags.len() >= 2));
+    }
+
+    #[test]
+    fn test_thread_id_does_not_exhaust_under_sequential_churn() {
+        // This would previously panic after MAX_THREADS spawns due to monotonically increasing IDs.
+        for _ in 0..(MAX_THREADS * 2) {
+            std::thread::spawn(|| {
+                let id = get_thread_id();
+                assert!(id < MAX_THREADS);
+            })
+            .join()
+            .unwrap();
+        }
     }
 }

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -47,18 +47,20 @@ impl MemHashIndex {
     fn write_index_data(&self, path: &Path) -> io::Result<()> {
         let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
-        let overflow_count = self.overflow_pools[version].len() as u64;
 
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
 
-        // index.dat 新格式：
+        // index.dat v1:
         // - table_size: u64
         // - overflow_bucket_count: u64
         // - main buckets: (7 entries + 1 overflow ptr) * table_size
         // - overflow buckets: (7 entries + 1 overflow ptr) * overflow_bucket_count
+        //
+        // To be consistent under concurrent overflow bucket allocation, we write a placeholder
+        // overflow count and patch it at the end based on a single overflow bucket snapshot.
         writer.write_all(&table_size.to_le_bytes())?;
-        writer.write_all(&overflow_count.to_le_bytes())?;
+        writer.write_all(&0u64.to_le_bytes())?;
 
         for idx in 0..table_size {
             let bucket = self.tables[version].bucket_at(idx);
@@ -72,8 +74,11 @@ impl MemHashIndex {
             writer.write_all(&overflow.control().to_le_bytes())?;
         }
 
-        for bucket_ptr in self.overflow_pools[version].snapshot_ptrs() {
-            // SAFETY: snapshot_ptrs 返回的指针来自 Box<HashBucket>，在池生命周期内稳定有效。
+        let overflow_snapshot = self.overflow_pools[version].snapshot_ptrs();
+        let overflow_count = overflow_snapshot.len() as u64;
+
+        for bucket_ptr in overflow_snapshot {
+            // SAFETY: snapshot_ptrs returns pointers from Box<HashBucket>, stable for pool lifetime.
             let bucket = unsafe { &*bucket_ptr };
 
             for i in 0..HashBucket::NUM_ENTRIES {
@@ -85,6 +90,9 @@ impl MemHashIndex {
             writer.write_all(&overflow.control().to_le_bytes())?;
         }
 
+        writer.flush()?;
+        writer.seek(SeekFrom::Start(8))?;
+        writer.write_all(&overflow_count.to_le_bytes())?;
         writer.flush()?;
         Ok(())
     }
@@ -163,7 +171,6 @@ impl MemHashIndex {
             );
         }
 
-        // 读取 overflow bucket 区段
         self.overflow_pools[version].clear();
         for _ in 0..overflow_count {
             let _ = self.overflow_pools[version].allocate();
@@ -177,7 +184,7 @@ impl MemHashIndex {
                     io::Error::new(io::ErrorKind::InvalidData, "overflow bucket missing")
                 })?;
 
-            // SAFETY: bucket_ptr 指向池内 bucket，且我们只通过原子 store 写入字段。
+            // SAFETY: bucket_ptr points to a valid overflow bucket.
             let bucket = unsafe { &*bucket_ptr };
 
             for j in 0..HashBucket::NUM_ENTRIES {

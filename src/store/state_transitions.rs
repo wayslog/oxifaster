@@ -275,9 +275,7 @@ impl SystemState {
                     Phase::GcInProgress,
                     self.version,
                 )),
-                Phase::GcInProgress => {
-                    Ok(SystemState::new(Action::GC, Phase::Rest, self.version))
-                }
+                Phase::GcInProgress => Ok(SystemState::new(Action::GC, Phase::Rest, self.version)),
                 _ => Err(Status::InvalidOperation),
             },
 

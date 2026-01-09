@@ -18,6 +18,7 @@ use crate::device::StorageDevice;
 pub(crate) enum IoRequest {
     ReadBytes {
         thread_id: usize,
+        thread_tag: u64,
         address: Address,
         len: usize,
     },
@@ -28,6 +29,7 @@ pub(crate) enum IoRequest {
 pub(crate) enum IoCompletion {
     ReadBytesDone {
         thread_id: usize,
+        thread_tag: u64,
         address: Address,
         result: io::Result<Vec<u8>>,
     },
@@ -55,6 +57,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                 Err(e) => {
                     let _ = comp_tx.send(IoCompletion::ReadBytesDone {
                         thread_id: 0,
+                        thread_tag: 0,
                         address: Address::INVALID,
                         result: Err(io::Error::other(e.to_string())),
                     });
@@ -66,6 +69,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                 match req {
                     IoRequest::ReadBytes {
                         thread_id,
+                        thread_tag,
                         address,
                         len,
                     } => {
@@ -83,6 +87,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
 
                         let _ = comp_tx.send(IoCompletion::ReadBytesDone {
                             thread_id,
+                            thread_tag,
                             address,
                             result,
                         });
@@ -106,7 +111,13 @@ impl<D: StorageDevice> PendingIoManager<D> {
     /// 返回值：
     /// - `true`：本次成功提交（调用方应增加 pending 计数）
     /// - `false`：已存在 inflight（调用方不应增加 pending 计数）
-    pub(crate) fn submit_read_bytes(&self, thread_id: usize, address: Address, len: usize) -> bool {
+    pub(crate) fn submit_read_bytes(
+        &self,
+        thread_id: usize,
+        thread_tag: u64,
+        address: Address,
+        len: usize,
+    ) -> bool {
         let mut inflight = self.inflight_reads.lock();
         if !inflight.insert(address.control()) {
             return false;
@@ -118,6 +129,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
             .tx
             .send(IoRequest::ReadBytes {
                 thread_id,
+                thread_tag,
                 address,
                 len,
             })

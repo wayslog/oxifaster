@@ -2,6 +2,7 @@ use super::*;
 
 use crate::address::Address;
 use crate::index::grow::GrowConfig;
+use crate::index::HashBucket;
 use crate::index::KeyHash;
 use crate::status::Status;
 
@@ -178,6 +179,89 @@ fn test_checkpoint_and_recover() {
             assert_eq!(original.entry.tag(), recovered.entry.tag());
         }
     }
+}
+
+#[test]
+fn test_checkpoint_header_matches_overflow_snapshot_under_concurrent_allocations() {
+    use std::fs::File;
+    use std::io::Read;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    // Use a large table to make the main-bucket serialization take long enough
+    // for concurrent overflow allocations to overlap deterministically.
+    let mut index = MemHashIndex::new();
+    let config = MemHashIndexConfig::new(1 << 15);
+    index.initialize(&config);
+
+    let index = Arc::new(index);
+
+    // Pre-fill the target bucket with a few entries to reduce noise.
+    for i in 0u64..7 {
+        let hash = KeyHash::new((i + 1) << 48);
+        let result = index.find_or_create_entry(hash);
+        if let Some(atomic_entry) = result.atomic_entry {
+            index.update_entry(atomic_entry, Address::new(0, (i + 1) as u32), hash.tag());
+        }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let token = uuid::Uuid::new_v4();
+    let index_dat_path = temp_dir.path().join("index.dat");
+    let barrier = Arc::new(Barrier::new(2));
+
+    let index_for_checkpoint = index.clone();
+    let checkpoint_dir = temp_dir.path().to_path_buf();
+    let barrier_for_checkpoint = barrier.clone();
+    let checkpoint_handle = thread::spawn(move || {
+        barrier_for_checkpoint.wait();
+        index_for_checkpoint
+            .checkpoint(&checkpoint_dir, token)
+            .unwrap();
+    });
+
+    let index_for_alloc = index.clone();
+    let barrier_for_alloc = barrier.clone();
+    let index_dat_path_for_alloc = index_dat_path.clone();
+    let alloc_handle = thread::spawn(move || {
+        barrier_for_alloc.wait();
+
+        // Wait until the checkpoint thread has written past the header.
+        for _ in 0..2000 {
+            if let Ok(meta) = std::fs::metadata(&index_dat_path_for_alloc) {
+                if meta.len() > 16 {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // Drive overflow bucket allocations while checkpoint is running.
+        for i in 7u64..2000 {
+            let tag = i + 1;
+            let hash = KeyHash::new(tag << 48);
+            let result = index_for_alloc.find_or_create_entry(hash);
+            if let Some(atomic_entry) = result.atomic_entry {
+                index_for_alloc.update_entry(atomic_entry, Address::new(1, tag as u32), hash.tag());
+            }
+        }
+    });
+
+    checkpoint_handle.join().unwrap();
+    alloc_handle.join().unwrap();
+
+    let file_len = std::fs::metadata(&index_dat_path).unwrap().len();
+
+    let mut f = File::open(&index_dat_path).unwrap();
+    let mut header = [0u8; 16];
+    f.read_exact(&mut header).unwrap();
+    let table_size = u64::from_le_bytes(header[0..8].try_into().unwrap());
+    let overflow_count = u64::from_le_bytes(header[8..16].try_into().unwrap());
+
+    let bucket_bytes = (HashBucket::NUM_ENTRIES as u64 + 1) * 8;
+    let expected_len = 16 + bucket_bytes * (table_size + overflow_count);
+    assert_eq!(file_len, expected_len);
 }
 
 #[test]

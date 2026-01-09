@@ -32,7 +32,8 @@ impl OverflowBucketPool {
         self.free_list.get_mut().clear();
         let mut buckets = self.buckets.write();
         for ptr in buckets.drain(..) {
-            // SAFETY: ptr 来自 Box::into_raw，且只会在这里/Drop 中释放一次。
+            // SAFETY: `ptr` originates from `Box::into_raw` and is freed exactly once, here or in
+            // `Drop`, after being removed from the pool's vector.
             unsafe { drop(Box::from_raw(ptr)) };
         }
     }
@@ -54,11 +55,13 @@ impl OverflowBucketPool {
     pub(super) fn allocate(&self) -> FixedPageAddress {
         if let Some(addr) = self.free_list.lock().pop() {
             if let Some(ptr) = self.bucket_ptr(addr) {
-                // SAFETY: ptr 指向池内 bucket；重置只通过原子 store 写字段。
+                // SAFETY: `ptr` originates from `Box::into_raw` and remains owned by the pool.
+                // Resetting only performs atomic stores to fields inside the bucket.
                 let bucket = unsafe { &*ptr };
                 Self::reset_bucket(bucket);
+                return addr;
             }
-            return addr;
+            // Discard invalid addresses and fall through to allocate a new bucket.
         }
 
         let mut buckets = self.buckets.write();
@@ -72,11 +75,15 @@ impl OverflowBucketPool {
         if addr.is_invalid() || addr.control() == 0 {
             return;
         }
-        if let Some(ptr) = self.bucket_ptr(addr) {
-            // SAFETY: bucket_ptr 指向池内 bucket；此方法仅用于“未链接/未被任何线程使用”的 bucket。
-            let bucket = unsafe { &*ptr };
-            Self::reset_bucket(bucket);
-        }
+        let Some(ptr) = self.bucket_ptr(addr) else {
+            return;
+        };
+
+        // SAFETY: `bucket_ptr` only returns pointers owned by this pool. This method must only be
+        // called for buckets that are not linked into any hash chain (e.g. after a failed CAS),
+        // so no other thread may concurrently access the returned bucket.
+        let bucket = unsafe { &*ptr };
+        Self::reset_bucket(bucket);
         self.free_list.lock().push(addr);
     }
 
@@ -124,7 +131,7 @@ impl Drop for OverflowBucketPool {
         self.free_list.get_mut().clear();
         let buckets = self.buckets.get_mut();
         for ptr in buckets.drain(..) {
-            // SAFETY: 同 clear()
+            // SAFETY: Same rationale as `clear()`.
             unsafe { drop(Box::from_raw(ptr)) };
         }
     }

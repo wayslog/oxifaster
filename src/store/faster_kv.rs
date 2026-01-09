@@ -26,7 +26,7 @@ use crate::checkpoint::{
 use crate::compaction::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
 use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
-use crate::epoch::{get_thread_id, LightEpoch};
+use crate::epoch::{current_thread_tag_for, get_thread_id, get_thread_tag, LightEpoch};
 use crate::index::{GrowResult, GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
 use crate::record::{Key, Record, RecordInfo, Value};
 use crate::stats::StatsCollector;
@@ -77,6 +77,12 @@ struct DiskReadResult<K, V> {
     value: Option<V>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PendingIoKey {
+    thread_id: usize,
+    thread_tag: u64,
+}
+
 /// FasterKV - High-performance concurrent key-value store
 ///
 /// This is the main store implementation that coordinates:
@@ -116,7 +122,7 @@ where
     /// 结果会被放入该缓存，调用方 `complete_pending()` 后重试 `read()` 即可命中。
     disk_read_results: Mutex<HashMap<u64, DiskReadResult<K, V>>>,
     /// 后台 I/O 完成计数（按 thread_id 聚合，供 session 在 complete_pending 中消费）
-    pending_io_completed: Mutex<HashMap<usize, u32>>,
+    pending_io_completed: Mutex<HashMap<PendingIoKey, u32>>,
     /// Next session ID
     next_session_id: AtomicU32,
     /// Compactor for log compaction
@@ -250,6 +256,7 @@ where
             match c {
                 crate::store::pending_io::IoCompletion::ReadBytesDone {
                     thread_id,
+                    thread_tag,
                     address,
                     result,
                 } => {
@@ -261,18 +268,30 @@ where
                         }
                     }
 
-                    *completed.entry(thread_id).or_insert(0) += 1;
+                    if current_thread_tag_for(thread_id) != thread_tag {
+                        continue;
+                    }
+
+                    *completed
+                        .entry(PendingIoKey {
+                            thread_id,
+                            thread_tag,
+                        })
+                        .or_insert(0) += 1;
                 }
             }
         }
     }
 
     /// 消费并返回指定线程已完成的 I/O 数量
-    pub(crate) fn take_completed_io_for_thread(&self, thread_id: usize) -> u32 {
+    pub(crate) fn take_completed_io_for_thread(&self, thread_id: usize, thread_tag: u64) -> u32 {
         self.process_pending_io_completions();
         self.pending_io_completed
             .lock()
-            .remove(&thread_id)
+            .remove(&PendingIoKey {
+                thread_id,
+                thread_tag,
+            })
             .unwrap_or(0)
     }
 
@@ -496,7 +515,9 @@ where
     ///
     /// Called when a session starts or updates its state.
     pub fn register_session(&self, state: &SessionState) {
-        self.session_registry.write().insert(state.guid, state.clone());
+        self.session_registry
+            .write()
+            .insert(state.guid, state.clone());
     }
 
     /// Update a session's state in the registry
@@ -628,10 +649,12 @@ where
                 }
                 // Record is on disk - 提交异步读请求并返回 Pending
                 let record_len = Record::<K, V>::disk_size() as usize;
-                if self
-                    .pending_io
-                    .submit_read_bytes(ctx.thread_id, address, record_len)
-                {
+                if self.pending_io.submit_read_bytes(
+                    ctx.thread_id,
+                    get_thread_tag(),
+                    address,
+                    record_len,
+                ) {
                     ctx.pending_count = ctx.pending_count.saturating_add(1);
                 }
                 return Err(Status::Pending);

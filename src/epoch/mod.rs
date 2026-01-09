@@ -48,4 +48,7 @@
 
 mod light_epoch;
 
-pub use light_epoch::{get_thread_id, EpochAction, EpochGuard, LightEpoch};
+pub(crate) use light_epoch::current_thread_tag_for;
+pub use light_epoch::{
+    get_thread_id, get_thread_tag, try_get_thread_id, EpochAction, EpochGuard, LightEpoch,
+};

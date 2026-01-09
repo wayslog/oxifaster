@@ -308,11 +308,24 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Get a pointer to a record at the given address
     ///
     /// # Safety
-    /// The address must be valid and the record must exist.
+    /// The caller must ensure that:
+    /// - `address` refers to a live record that is still resident in memory (i.e.
+    ///   `self.get_head_address() <= address < self.get_tail_address()`).
+    /// - `address.offset() < self.page_size()`.
+    /// - The returned pointer is only used to read bytes that belong to the record at `address`.
+    /// - No mutable aliasing occurs while the returned pointer is in use.
     #[inline]
     pub unsafe fn get(&self, address: Address) -> Option<NonNull<u8>> {
-        let page = address.page();
+        if address < self.get_head_address() || address >= self.get_tail_address() {
+            return None;
+        }
+
         let offset = address.offset() as usize;
+        if offset >= self.config.page_size {
+            return None;
+        }
+
+        let page = address.page();
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page(page) {
@@ -326,11 +339,28 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Get a mutable pointer to a record at the given address
     ///
     /// # Safety
-    /// The address must be valid and the record must exist.
+    /// The caller must ensure that:
+    /// - `address` refers to a live record that is still resident in memory (i.e.
+    ///   `self.get_head_address() <= address < self.get_tail_address()`).
+    /// - `address` is in the mutable region (i.e. `self.is_mutable(address)`).
+    /// - `address.offset() < self.page_size()`.
+    /// - The returned pointer is only used to write bytes that belong to the record at `address`.
+    /// - No other thread concurrently reads/writes the same bytes without synchronization.
     #[inline]
     pub unsafe fn get_mut(&mut self, address: Address) -> Option<NonNull<u8>> {
-        let page = address.page();
+        if address < self.get_head_address()
+            || address >= self.get_tail_address()
+            || !self.is_mutable(address)
+        {
+            return None;
+        }
+
         let offset = address.offset() as usize;
+        if offset >= self.config.page_size {
+            return None;
+        }
+
+        let page = address.page();
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page_mut(page) {
@@ -1109,7 +1139,11 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     }
 }
 
-// Safety: PersistentMemoryMalloc uses atomic operations for concurrent access
+// SAFETY: `PersistentMemoryMalloc` is safe to send/share between threads because:
+// - All concurrent state is stored in atomics (`*_address`, `tail_page_offset`, `pending_flushes`).
+// - The in-memory page ring (`pages`) is pre-allocated during construction and only mutated through
+//   `&mut self` methods; shared `&self` access only reads from those buffers.
+// - `D: StorageDevice` is `Send + Sync` and is held behind an `Arc`.
 unsafe impl<D: StorageDevice> Send for PersistentMemoryMalloc<D> {}
 unsafe impl<D: StorageDevice> Sync for PersistentMemoryMalloc<D> {}
 
