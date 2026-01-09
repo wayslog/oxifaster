@@ -19,3 +19,6 @@ Thumbs.db
 # Benchmark results
 criterion/
 
+
+.gemini/
+gha-creds-*.json
