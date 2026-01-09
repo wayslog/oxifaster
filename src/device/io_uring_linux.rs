@@ -1,4 +1,4 @@
-//! Linux io_uring 完整实现（需要 `feature = "io_uring"`）
+//! Linux `io_uring` backend implementation (requires `feature = "io_uring"`).
 
 #![cfg(all(target_os = "linux", feature = "io_uring"))]
 
@@ -9,19 +9,64 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use io_uring::{opcode, types, IoUring};
+use libc::iovec;
 use parking_lot::Mutex;
 
 use crate::device::traits::SyncStorageDevice;
 use crate::status::Status;
 
-use super::io_uring_common::{IoUringConfig, IoUringError, IoUringFeatures, IoUringStats};
+use super::io_uring_common::{
+    checked_offset, IoUringConfig, IoUringError, IoUringFeatures, IoUringStats,
+};
 
 struct LinuxState {
     ring: IoUring,
     file: std::fs::File,
+    fixed_buffers: Option<FixedBuffers>,
+    use_registered_file: bool,
 }
 
-/// io_uring-based storage device（Linux 实现）
+struct FixedBuffers {
+    buffers: Vec<Vec<u8>>,
+}
+
+impl FixedBuffers {
+    fn buffer_size(&self) -> usize {
+        self.buffers.first().map(|b| b.len()).unwrap_or_default()
+    }
+
+    fn buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffers[0]
+    }
+
+    fn try_register(ring: &IoUring, buffer_size: usize, num_buffers: usize) -> io::Result<Self> {
+        let buffer_size = buffer_size.max(1);
+        let num_buffers = num_buffers.max(1);
+
+        let mut buffers = Vec::with_capacity(num_buffers);
+        for _ in 0..num_buffers {
+            buffers.push(vec![0u8; buffer_size]);
+        }
+
+        let iovecs: Vec<iovec> = buffers
+            .iter_mut()
+            .map(|buf| iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
+            })
+            .collect();
+
+        // Safety: `buffers` are heap-allocated and stored inside `LinuxState` for the lifetime of
+        // the ring (or until explicitly unregistered).
+        unsafe {
+            ring.submitter().register_buffers(&iovecs)?;
+        }
+
+        Ok(Self { buffers })
+    }
+}
+
+/// `io_uring`-based storage device (Linux backend).
 pub struct IoUringDevice {
     config: IoUringConfig,
     path: PathBuf,
@@ -31,7 +76,7 @@ pub struct IoUringDevice {
 }
 
 impl IoUringDevice {
-    /// Create a new io_uring device（延迟初始化）
+    /// Create a new io_uring device (lazy initialization).
     pub fn new(path: impl AsRef<Path>, config: IoUringConfig) -> Self {
         Self {
             config,
@@ -47,7 +92,7 @@ impl IoUringDevice {
         Self::new(path, IoUringConfig::default())
     }
 
-    /// Initialize io_uring + file（可重复调用）
+    /// Initialize io_uring + file (idempotent).
     pub fn initialize(&mut self) -> Result<(), Status> {
         match self.ensure_initialized_inner() {
             Ok(_) => {
@@ -58,7 +103,7 @@ impl IoUringDevice {
         }
     }
 
-    /// Shutdown（释放 ring/file）
+    /// Shutdown (drop ring and file handles).
     pub fn shutdown(&mut self) {
         *self.state.lock() = None;
         self.initialized = false;
@@ -69,7 +114,9 @@ impl IoUringDevice {
         &self.config
     }
 
-    /// Get the statistics（当前实现为静态快照：SyncStorageDevice 的 I/O 不更新该统计）
+    /// Get the statistics.
+    ///
+    /// Note: currently a static snapshot; `SyncStorageDevice` operations do not update it.
     pub fn stats(&self) -> &IoUringStats {
         &self.stats
     }
@@ -89,14 +136,21 @@ impl IoUringDevice {
         IoUring::new(2).is_ok()
     }
 
-    /// Get the supported features on this system（保守：以 is_available 为准）
+    /// Get supported features on this system (best-effort).
     pub fn supported_features() -> IoUringFeatures {
-        let ok = Self::is_available();
+        let Ok(ring) = IoUring::new(2) else {
+            return IoUringFeatures::default();
+        };
+
+        let mut probe = io_uring::Probe::new();
+        let _ = ring.submitter().register_probe(&mut probe);
+
         IoUringFeatures {
-            sqpoll: ok,
-            fixed_buffers: ok,
-            registered_files: ok,
-            io_drain: ok,
+            sqpoll: true,
+            fixed_buffers: probe.is_supported(opcode::ReadFixed::CODE)
+                && probe.is_supported(opcode::WriteFixed::CODE),
+            registered_files: true,
+            io_drain: true,
         }
     }
 
@@ -119,9 +173,49 @@ impl IoUringDevice {
             .open(&self.path)?;
 
         let entries = self.config.sq_entries.max(2);
-        let ring = IoUring::new(entries).map_err(|e| io::Error::other(e.to_string()))?;
 
-        *guard = Some(LinuxState { ring, file });
+        let mut builder = IoUring::builder();
+        if self.config.cq_entries > entries {
+            builder.setup_cqsize(self.config.cq_entries);
+        }
+        if self.config.sqpoll {
+            builder.setup_sqpoll(self.config.sqpoll_idle_ms);
+        }
+
+        let ring = builder
+            .build(entries)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Best-effort fixed buffer registration: when it fails (e.g. low memlock limit), fall back
+        // to normal read/write opcodes.
+        let fixed_buffers = if self.config.use_fixed_buffers {
+            FixedBuffers::try_register(
+                &ring,
+                self.config.fixed_buffer_size,
+                self.config.num_fixed_buffers,
+            )
+            .ok()
+        } else {
+            None
+        };
+
+        // SQPOLL required registered files prior to Linux 5.11.
+        // If the kernel reports `IORING_FEAT_SQPOLL_NONFIXED`, fixed files are no longer required.
+        let need_registered_files = self.config.register_files
+            || (self.config.sqpoll && !ring.params().is_feature_sqpoll_nonfixed());
+        let use_registered_file = if need_registered_files {
+            ring.submitter().register_files(&[file.as_raw_fd()])?;
+            true
+        } else {
+            false
+        };
+
+        *guard = Some(LinuxState {
+            ring,
+            file,
+            fixed_buffers,
+            use_registered_file,
+        });
         Ok(())
     }
 
@@ -145,32 +239,29 @@ impl IoUringDevice {
     }
 }
 
-/// 校验 offset 是否超出底层文件 API（off_t，通常为 i64）可表达的范围。
-///
-/// 虽然 io-uring 接口使用 u64 offset，但内核最终仍会转换为 off_t；
-/// 因此我们在用户态提前返回明确错误，避免触发不可预期行为。
-#[inline]
-fn checked_offset(offset: u64) -> io::Result<u64> {
-    if offset > i64::MAX as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("offset {offset} exceeds i64::MAX, not supported by io_uring/off_t"),
-        ));
-    }
-    Ok(offset)
-}
-
 impl SyncStorageDevice for IoUringDevice {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let offset = checked_offset(offset)?;
         self.with_state(|state| {
             let start = Instant::now();
 
-            let fd = types::Fd(state.file.as_raw_fd());
-            let entry = opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
-                .offset(offset)
-                .build()
-                .user_data(0);
+            let fd = if state.use_registered_file {
+                types::Fixed(0)
+            } else {
+                types::Fd(state.file.as_raw_fd())
+            };
+            let entry = match state.fixed_buffers.as_mut() {
+                Some(fixed) if buf.len() <= fixed.buffer_size() => {
+                    opcode::ReadFixed::new(fd, fixed.buffer_mut().as_mut_ptr(), buf.len() as u32, 0)
+                        .offset(offset)
+                        .build()
+                        .user_data(0)
+                }
+                _ => opcode::Read::new(fd, buf.as_mut_ptr(), buf.len() as u32)
+                    .offset(offset)
+                    .build()
+                    .user_data(0),
+            };
 
             unsafe {
                 state
@@ -185,6 +276,12 @@ impl SyncStorageDevice for IoUringDevice {
                 return Err(io::Error::from_raw_os_error(-res));
             }
 
+            if let Some(fixed) = state.fixed_buffers.as_mut() {
+                if (res as usize) <= buf.len() && buf.len() <= fixed.buffer_size() {
+                    buf[..res as usize].copy_from_slice(&fixed.buffer_mut()[..res as usize]);
+                }
+            }
+
             let _elapsed = start.elapsed();
             Ok(res as usize)
         })
@@ -195,11 +292,25 @@ impl SyncStorageDevice for IoUringDevice {
         self.with_state(|state| {
             let start = Instant::now();
 
-            let fd = types::Fd(state.file.as_raw_fd());
-            let entry = opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
-                .offset(offset)
-                .build()
-                .user_data(0);
+            let fd = if state.use_registered_file {
+                types::Fixed(0)
+            } else {
+                types::Fd(state.file.as_raw_fd())
+            };
+            let entry = match state.fixed_buffers.as_mut() {
+                Some(fixed) if buf.len() <= fixed.buffer_size() => {
+                    let fixed_buf = fixed.buffer_mut();
+                    fixed_buf[..buf.len()].copy_from_slice(buf);
+                    opcode::WriteFixed::new(fd, fixed_buf.as_ptr(), buf.len() as u32, 0)
+                        .offset(offset)
+                        .build()
+                        .user_data(0)
+                }
+                _ => opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
+                    .offset(offset)
+                    .build()
+                    .user_data(0),
+            };
 
             unsafe {
                 state
@@ -221,7 +332,11 @@ impl SyncStorageDevice for IoUringDevice {
 
     fn flush_sync(&self) -> io::Result<()> {
         self.with_state(|state| {
-            let fd = types::Fd(state.file.as_raw_fd());
+            let fd = if state.use_registered_file {
+                types::Fixed(0)
+            } else {
+                types::Fd(state.file.as_raw_fd())
+            };
             let entry = opcode::Fsync::new(fd).build().user_data(0);
 
             unsafe {
@@ -257,7 +372,7 @@ impl SyncStorageDevice for IoUringDevice {
 }
 
 fn map_io_err_to_status(_e: &io::Error) -> Status {
-    // 这里先做保守映射：设备初始化失败属于环境/配置问题
+    // Conservative mapping: initialization failures are typically environment/config issues.
     Status::NotSupported
 }
 
@@ -293,7 +408,7 @@ mod tests {
         let mut dev = IoUringDevice::with_defaults(&path);
         dev.initialize().unwrap();
 
-        // 测试超过 i64::MAX 的 offset 应该返回错误，而非产生未定义行为
+        // Offsets beyond i64::MAX should return an error instead of triggering platform behavior.
         let huge_offset = u64::MAX;
         let mut buf = [0u8; 16];
 
@@ -310,13 +425,13 @@ mod tests {
 
     #[test]
     fn test_checked_offset_boundary() {
-        // i64::MAX 是合法的
+        // i64::MAX is allowed.
         assert!(checked_offset(i64::MAX as u64).is_ok());
 
-        // i64::MAX + 1 应该失败
+        // i64::MAX + 1 should fail.
         assert!(checked_offset(i64::MAX as u64 + 1).is_err());
 
-        // u64::MAX 应该失败
+        // u64::MAX should fail.
         assert!(checked_offset(u64::MAX).is_err());
     }
 }

@@ -38,7 +38,7 @@ oxifaster = { path = "oxifaster" }
 oxifaster = { path = "oxifaster", features = ["io_uring"] }
 ```
 
-说明：真实 `io_uring` 后端仅在 Linux 可用；在非 Linux（或未开启 feature）时，`IoUringDevice` 会回退到 mock 实现以保持 API 兼容与可编译。
+说明：真实 `io_uring` 后端仅在 Linux 可用；在非 Linux（或未开启 feature）时，`IoUringDevice` 会回退到可移植的基于文件的实现（非 io_uring），以保持 API 可用与可编译。
 
 ### 基本使用
 
@@ -119,7 +119,7 @@ oxifaster/
 │   │   ├── io_uring.rs        # io_uring 入口（Linux + mock）
 │   │   ├── io_uring_common.rs # 公共类型
 │   │   ├── io_uring_linux.rs  # Linux 后端（feature = "io_uring"）
-│   │   └── io_uring_mock.rs   # 非 Linux / 未开 feature
+│   │   └── io_uring_mock.rs   # 非 Linux / 未开 feature 的回退实现
 │   │
 │   ├── store/              # FasterKV 存储
 │   │   ├── mod.rs

@@ -13,7 +13,7 @@
 //!
 //! - [`NullDisk`]: In-memory storage for testing (no persistence)
 //! - [`FileSystemDisk`]: Standard file system storage
-//! - [`IoUringDevice`]: Linux io_uring-based async I/O (mock implementation)
+//! - [`IoUringDevice`]: Linux `io_uring` backend (with a portable fallback on non-Linux/feature-off)
 //!
 //! # Usage
 //!

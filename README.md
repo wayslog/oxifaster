@@ -38,7 +38,7 @@ Enable the Linux `io_uring` backend (feature-gated):
 oxifaster = { path = "oxifaster", features = ["io_uring"] }
 ```
 
-Note: the real `io_uring` backend is only available on Linux. On non-Linux platforms (or when the feature is disabled), `IoUringDevice` falls back to a mock implementation to keep the API compatible.
+Note: the real `io_uring` backend is only available on Linux. On non-Linux platforms (or when the feature is disabled), `IoUringDevice` falls back to a portable file-backed implementation.
 
 ### Basic Usage
 
@@ -119,7 +119,7 @@ oxifaster/
 │   │   ├── io_uring.rs        # io_uring entrypoint (Linux + mock)
 │   │   ├── io_uring_common.rs # Shared types
 │   │   ├── io_uring_linux.rs  # Linux backend (feature = "io_uring")
-│   │   └── io_uring_mock.rs   # Non-Linux / feature off
+│   │   └── io_uring_mock.rs   # Non-Linux / feature off fallback
 │   │
 │   ├── store/              # FasterKV store
 │   │   ├── mod.rs

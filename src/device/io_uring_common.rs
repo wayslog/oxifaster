@@ -1,9 +1,24 @@
-//! io_uring 公共类型定义（与平台实现解耦）
+//! Shared `io_uring` types (decoupled from platform-specific backends).
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::status::Status;
+
+/// Validate `offset` against the platform's underlying `off_t` width (typically `i64`).
+///
+/// Even though user-facing APIs take `u64`, the kernel/filesystem layer usually uses `off_t`.
+/// Returning a clear error early avoids platform-specific wrap/UB behavior.
+#[inline]
+pub(crate) fn checked_offset(offset: u64) -> io::Result<u64> {
+    if offset > i64::MAX as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("offset {offset} exceeds i64::MAX, not supported by off_t"),
+        ));
+    }
+    Ok(offset)
+}
 
 /// Error type for io_uring operations
 #[derive(Debug, Clone, PartialEq, Eq)]

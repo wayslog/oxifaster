@@ -1,7 +1,7 @@
-//! io_uring 设备实现
+//! `IoUringDevice` backend selection.
 //!
-//! - 默认情况下（非 Linux 或未启用 `feature = "io_uring"`）提供 **mock 实现**，用于保持 API 兼容与编译通过。
-//! - 在 **Linux + `feature = "io_uring"`** 下提供真实 io_uring 后端实现。
+//! - On **Linux + `feature = "io_uring"`**, this module exposes the real `io_uring` backend.
+//! - Otherwise, it exposes a portable file-backed fallback implementation.
 
 #[path = "io_uring_common.rs"]
 mod io_uring_common;

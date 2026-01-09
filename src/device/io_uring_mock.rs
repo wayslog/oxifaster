@@ -1,16 +1,31 @@
-//! io_uring mock 实现（默认启用）
+//! Portable fallback backend for `IoUringDevice`.
 //!
-//! 说明：该实现用于在非 Linux 或未开启 `feature="io_uring"` 时保持 API 兼容。
+//! This module is compiled when either:
+//! - the target is not Linux, or
+//! - `feature = "io_uring"` is not enabled.
+//!
+//! It provides a real, thread-safe file-backed implementation so non-Linux platforms (e.g. macOS)
+//! can still use `IoUringDevice` for correctness testing and development.
 
+use std::fs::OpenOptions;
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+
+use parking_lot::Mutex;
 
 use crate::device::traits::SyncStorageDevice;
 use crate::status::Status;
 
-use super::io_uring_common::{IoUringConfig, IoUringError, IoUringFeatures, IoUringStats};
+use super::io_uring_common::{
+    checked_offset, IoUringConfig, IoUringError, IoUringFeatures, IoUringStats,
+};
 
-/// io_uring-based storage device（mock）
+struct FallbackState {
+    file: std::fs::File,
+}
+
+/// `IoUringDevice` fallback implementation (non-io_uring).
 pub struct IoUringDevice {
     /// Configuration
     config: IoUringConfig,
@@ -18,42 +33,35 @@ pub struct IoUringDevice {
     path: PathBuf,
     /// Statistics
     stats: IoUringStats,
-    /// Whether the device is initialized
-    initialized: bool,
-    /// Pending operations count
-    pending_ops: u32,
-    /// Maximum pending operations
-    max_pending_ops: u32,
+    state: Mutex<Option<FallbackState>>,
 }
 
 impl IoUringDevice {
     /// Create a new io_uring device
-    pub fn new(path: impl AsRef<std::path::Path>, config: IoUringConfig) -> Self {
-        let max_pending = config.sq_entries;
+    pub fn new(path: impl AsRef<Path>, config: IoUringConfig) -> Self {
         Self {
             config,
             path: path.as_ref().to_path_buf(),
             stats: IoUringStats::default(),
-            initialized: false,
-            pending_ops: 0,
-            max_pending_ops: max_pending,
+            state: Mutex::new(None),
         }
     }
 
     /// Create with default configuration
-    pub fn with_defaults(path: impl AsRef<std::path::Path>) -> Self {
+    pub fn with_defaults(path: impl AsRef<Path>) -> Self {
         Self::new(path, IoUringConfig::default())
     }
 
-    /// Initialize the io_uring instance（mock：总是成功）
+    /// Eagerly initialize (open/create) the backing file.
     pub fn initialize(&mut self) -> Result<(), Status> {
-        self.initialized = true;
-        Ok(())
+        self.ensure_initialized_inner()
+            .map(|_| ())
+            .map_err(map_io_err_to_status)
     }
 
-    /// Shutdown the io_uring instance（mock）
+    /// Shutdown (close the backing file).
     pub fn shutdown(&mut self) {
-        self.initialized = false;
+        *self.state.lock() = None;
     }
 
     /// Get the configuration
@@ -73,64 +81,52 @@ impl IoUringDevice {
 
     /// Check if the device is initialized
     pub fn is_initialized(&self) -> bool {
-        self.initialized
+        self.state.lock().is_some()
     }
 
-    /// Get pending operation count
+    /// Get pending operation count (always 0 for the synchronous fallback).
     pub fn pending_operations(&self) -> u32 {
-        self.pending_ops
-    }
-
-    /// Check if there is space for more submissions
-    pub fn can_submit(&self) -> bool {
-        self.pending_ops < self.max_pending_ops
-    }
-
-    /// Submit a batch of operations（mock）
-    pub fn submit(&mut self) -> Result<u32, Status> {
-        if !self.initialized {
-            return Err(Status::InvalidArgument);
-        }
-        Ok(0)
-    }
-
-    /// Submit and wait for completions（mock）
-    pub fn submit_and_wait(&mut self, min_complete: u32) -> Result<u32, Status> {
-        if !self.initialized {
-            return Err(Status::InvalidArgument);
-        }
-        let _ = min_complete;
-        Ok(0)
-    }
-
-    /// Wait for completions（mock）
-    pub fn wait_completions(&mut self, min_complete: u32) -> Result<u32, Status> {
-        if !self.initialized {
-            return Err(Status::InvalidArgument);
-        }
-        let _ = min_complete;
-        Ok(0)
-    }
-
-    /// Process completed operations（mock）
-    pub fn process_completions(&mut self) -> u32 {
-        if !self.initialized {
-            return 0;
-        }
         0
     }
 
-    /// Poll for completions without blocking（mock）
+    /// Check if there is space for more submissions (always true for the synchronous fallback).
+    pub fn can_submit(&self) -> bool {
+        self.is_initialized() || self.ensure_initialized_inner().is_ok()
+    }
+
+    /// Submit a batch of operations (no-op for the synchronous fallback).
+    pub fn submit(&mut self) -> Result<u32, Status> {
+        Ok(0)
+    }
+
+    /// Submit and wait for completions (no-op for the synchronous fallback).
+    pub fn submit_and_wait(&mut self, min_complete: u32) -> Result<u32, Status> {
+        let _ = min_complete;
+        Ok(0)
+    }
+
+    /// Wait for completions (no-op for the synchronous fallback).
+    pub fn wait_completions(&mut self, min_complete: u32) -> Result<u32, Status> {
+        let _ = min_complete;
+        Ok(0)
+    }
+
+    /// Process completed operations (always 0 for the synchronous fallback).
+    pub fn process_completions(&mut self) -> u32 {
+        0
+    }
+
+    /// Poll for completions without blocking (always 0 for the synchronous fallback).
     pub fn poll_completions(&mut self) -> u32 {
         self.process_completions()
     }
 
-    /// Check if io_uring is available on this system（mock：默认视为不可用）
+    /// Check if io_uring is available on this system (always false for the fallback).
     pub fn is_available() -> bool {
         false
     }
 
-    /// Get the supported features on this system（mock：全部 false）
+    /// Get the supported features on this system (all false for the fallback).
     pub fn supported_features() -> IoUringFeatures {
         IoUringFeatures::default()
     }
@@ -139,80 +135,55 @@ impl IoUringDevice {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    fn ensure_initialized_inner(&self) -> io::Result<()> {
+        let mut guard = self.state.lock();
+        if guard.is_some() {
+            return Ok(());
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.path)?;
+
+        *guard = Some(FallbackState { file });
+        Ok(())
+    }
+
+    fn with_file<T>(&self, f: impl FnOnce(&std::fs::File) -> io::Result<T>) -> io::Result<T> {
+        self.ensure_initialized_inner()?;
+        let guard = self.state.lock();
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| io::Error::other(IoUringError::NotInitialized))?;
+        f(&state.file)
+    }
 }
 
 impl SyncStorageDevice for IoUringDevice {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        if !self.initialized {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                IoUringError::NotInitialized,
-            ));
-        }
-
-        let _ = (offset, buf);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "io_uring read_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
-        ))
+        let offset = checked_offset(offset)?;
+        self.with_file(|file| file.read_at(buf, offset))
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        if !self.initialized {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                IoUringError::NotInitialized,
-            ));
-        }
-
-        let _ = (offset, buf);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "io_uring write_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
-        ))
+        let offset = checked_offset(offset)?;
+        self.with_file(|file| file.write_at(buf, offset))
     }
 
     fn flush_sync(&self) -> io::Result<()> {
-        if !self.initialized {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                IoUringError::NotInitialized,
-            ));
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "io_uring flush_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
-        ))
+        self.with_file(|file| file.sync_all())
     }
 
     fn truncate_sync(&self, size: u64) -> io::Result<()> {
-        if !self.initialized {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                IoUringError::NotInitialized,
-            ));
-        }
-
-        let _ = size;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "io_uring truncate_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
-        ))
+        self.with_file(|file| file.set_len(size))
     }
 
     fn size_sync(&self) -> io::Result<u64> {
-        if !self.initialized {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                IoUringError::NotInitialized,
-            ));
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "io_uring size_sync not implemented (mock mode). Enable 'io_uring' feature for full implementation.",
-        ))
+        self.with_file(|file| file.metadata().map(|m| m.len()))
     }
 
     fn alignment(&self) -> usize {
@@ -220,10 +191,15 @@ impl SyncStorageDevice for IoUringDevice {
     }
 }
 
+fn map_io_err_to_status(_e: io::Error) -> Status {
+    Status::IoError
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::io_uring_common::IoUringFile;
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_config_default() {
@@ -250,29 +226,53 @@ mod tests {
         let config = IoUringConfig::default();
         let device = IoUringDevice::new("/tmp", config);
 
-        assert!(!device.initialized);
+        assert!(!device.is_initialized());
         assert_eq!(device.stats().reads_submitted, 0);
     }
 
     #[test]
     fn test_device_initialization() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fallback_init.dat");
+
         let config = IoUringConfig::default();
-        let mut device = IoUringDevice::new("/tmp", config);
+        let mut device = IoUringDevice::new(&path, config);
 
         let result = device.initialize();
         assert!(result.is_ok());
-        assert!(device.initialized);
         assert!(device.is_initialized());
     }
 
     #[test]
     fn test_device_can_submit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fallback_submit.dat");
+
         let config = IoUringConfig::default();
-        let mut device = IoUringDevice::new("/tmp", config);
+        let mut device = IoUringDevice::new(&path, config);
         device.initialize().unwrap();
 
         assert!(device.can_submit());
         assert_eq!(device.pending_operations(), 0);
+    }
+
+    #[test]
+    fn test_fallback_write_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fallback_rw.dat");
+
+        let mut dev = IoUringDevice::with_defaults(&path);
+        dev.initialize().unwrap();
+
+        let data = b"hello fallback";
+        let n = dev.write_sync(0, data).unwrap();
+        assert_eq!(n, data.len());
+        dev.flush_sync().unwrap();
+
+        let mut buf = vec![0u8; data.len()];
+        let n = dev.read_sync(0, &mut buf).unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(&buf, data);
     }
 
     #[test]
