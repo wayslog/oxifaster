@@ -3,7 +3,7 @@
 //! This module implements the epoch protection mechanism used by FASTER
 //! to safely reclaim memory in lock-free data structures.
 
-use std::cell::{RefCell, RefMut, UnsafeCell};
+use std::cell::{RefCell, UnsafeCell};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -57,12 +57,12 @@ impl Drop for ThreadIdGuard {
 }
 
 fn try_allocate_thread_id() -> Option<ThreadIdGuard> {
-    let make_guard = |id: usize| ThreadIdGuard {
-        id,
-        generation: thread_id_generations()
+    let make_guard = |id: usize| {
+        let generation = thread_id_generations()
             .get(id)
             .map(|g| g.load(Ordering::Acquire))
-            .unwrap_or(0),
+            .unwrap_or(0);
+        ThreadIdGuard { id, generation }
     };
 
     if let Some(id) = free_thread_ids().lock().pop() {
@@ -114,7 +114,7 @@ pub fn get_thread_id() -> usize {
 #[inline]
 pub fn try_get_thread_id() -> Option<usize> {
     THREAD_ID.with(|slot| {
-        let mut slot: RefMut<'_, Option<ThreadIdGuard>> = slot.borrow_mut();
+        let mut slot = slot.borrow_mut();
         if let Some(guard) = slot.as_ref() {
             return Some(guard.id);
         }
@@ -132,7 +132,7 @@ pub fn try_get_thread_id() -> Option<usize> {
 /// to disambiguate stale events associated with a prior owner of the same slot.
 #[inline]
 pub fn get_thread_tag() -> u64 {
-    THREAD_ID.with(|slot| slot.borrow().as_ref().map(|g| g.generation).unwrap_or(0))
+    THREAD_ID.with(|slot| slot.borrow().as_ref().map_or(0, |g| g.generation))
 }
 
 /// Return the current generation tag for a given `thread_id` slot.
@@ -316,19 +316,19 @@ pub struct LightEpoch {
 impl LightEpoch {
     /// Create a new LightEpoch instance
     pub fn new() -> Self {
-        let mut table = Vec::with_capacity(MAX_THREADS);
-        for _ in 0..MAX_THREADS {
-            table.push(Entry::new());
-        }
+        let table = (0..MAX_THREADS)
+            .map(|_| Entry::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
-        let mut drain_list = Vec::with_capacity(DRAIN_LIST_SIZE);
-        for _ in 0..DRAIN_LIST_SIZE {
-            drain_list.push(EpochAction::new());
-        }
+        let drain_list = (0..DRAIN_LIST_SIZE)
+            .map(|_| EpochAction::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
         Self {
-            table: table.into_boxed_slice(),
-            drain_list: drain_list.into_boxed_slice(),
+            table,
+            drain_list,
             drain_count: AtomicU32::new(0),
             current_epoch: AtomicU64::new(1),
             safe_to_reclaim_epoch: AtomicU64::new(0),
@@ -404,11 +404,12 @@ impl LightEpoch {
         debug_assert!(thread_id < MAX_THREADS);
         let entry = &self.table[thread_id];
 
-        if entry.reentrant.fetch_sub(1, Ordering::AcqRel) == 1 {
-            entry
-                .local_current_epoch
-                .store(UNPROTECTED, Ordering::Release);
+        if entry.reentrant.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
         }
+        entry
+            .local_current_epoch
+            .store(UNPROTECTED, Ordering::Release);
     }
 
     /// Drain pending actions that are now safe to execute
@@ -418,11 +419,14 @@ impl LightEpoch {
 
         for action in self.drain_list.iter() {
             let trigger_epoch = action.epoch.load(Ordering::Acquire);
-            if trigger_epoch <= safe_epoch
-                && trigger_epoch != EpochAction::FREE
-                && trigger_epoch != EpochAction::LOCKED
-                && action.try_pop(trigger_epoch)
-                && self.drain_count.fetch_sub(1, Ordering::AcqRel) == 1
+            if trigger_epoch == EpochAction::FREE
+                || trigger_epoch == EpochAction::LOCKED
+                || trigger_epoch > safe_epoch
+            {
+                continue;
+            }
+
+            if action.try_pop(trigger_epoch) && self.drain_count.fetch_sub(1, Ordering::AcqRel) == 1
             {
                 break;
             }
@@ -443,17 +447,20 @@ impl LightEpoch {
     where
         F: FnOnce() + Send + 'static,
     {
+        const MAX_FULL_SCANS: usize = 500;
+
         let prior_epoch = self.bump_current_epoch() - 1;
 
         let mut callback = Some(callback);
         let mut i = 0;
-        let mut retries = 0;
+        let mut full_scans = 0;
         loop {
-            let trigger_epoch = self.drain_list[i].epoch.load(Ordering::Acquire);
+            let action = &self.drain_list[i];
+            let trigger_epoch = action.epoch.load(Ordering::Acquire);
 
             if trigger_epoch == EpochAction::FREE {
                 if let Some(cb) = callback.take() {
-                    match self.drain_list[i].try_push(prior_epoch, cb) {
+                    match action.try_push(prior_epoch, cb) {
                         Ok(()) => {
                             self.drain_count.fetch_add(1, Ordering::AcqRel);
                             return prior_epoch + 1;
@@ -464,12 +471,12 @@ impl LightEpoch {
                         }
                     }
                 }
-            } else if trigger_epoch <= self.safe_to_reclaim_epoch.load(Ordering::Acquire) {
+            } else if trigger_epoch != EpochAction::LOCKED
+                && trigger_epoch <= self.safe_to_reclaim_epoch.load(Ordering::Acquire)
+            {
                 if let Some(cb) = callback.take() {
-                    match self.drain_list[i].try_swap(trigger_epoch, prior_epoch, cb) {
-                        Ok(()) => {
-                            return prior_epoch + 1;
-                        }
+                    match action.try_swap(trigger_epoch, prior_epoch, cb) {
+                        Ok(()) => return prior_epoch + 1,
                         Err(returned_cb) => {
                             // CAS failed, restore the callback and try another slot
                             callback = Some(returned_cb);
@@ -480,8 +487,8 @@ impl LightEpoch {
 
             i = (i + 1) % DRAIN_LIST_SIZE;
             if i == 0 {
-                retries += 1;
-                if retries >= 500 {
+                full_scans += 1;
+                if full_scans >= MAX_FULL_SCANS {
                     thread::sleep(Duration::from_secs(1));
                     tracing::warn!("Unable to add trigger to epoch after many retries");
                     // Execute the callback directly since we couldn't defer it
@@ -686,9 +693,15 @@ mod tests {
         epoch.reentrant_protect(0);
         assert!(epoch.is_protected(0));
 
-        // Note: The current implementation has specific behavior
-        // where subsequent reentrant_protect calls when already protected
-        // return the current epoch without incrementing the counter
+        // Nested protect keeps the thread protected until the last unprotect.
+        epoch.reentrant_protect(0);
+        assert!(epoch.is_protected(0));
+
+        epoch.reentrant_unprotect(0);
+        assert!(epoch.is_protected(0));
+
+        epoch.reentrant_unprotect(0);
+        assert!(!epoch.is_protected(0));
     }
 
     #[test]

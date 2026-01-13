@@ -5,9 +5,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::device::SyncStorageDevice;
+
+fn lock<'a, T>(mutex: &'a Mutex<T>, message: &'static str) -> io::Result<MutexGuard<'a, T>> {
+    mutex.lock().map_err(|_| io::Error::other(message))
+}
 
 /// File system file wrapper
 ///
@@ -52,48 +56,33 @@ impl FileSystemFile {
 
 impl SyncStorageDevice for FileSystemFile {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock file"))?;
+        let mut file = lock(&self.file, "Failed to lock file")?;
 
         file.seek(SeekFrom::Start(offset))?;
         file.read(buf)
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock file"))?;
+        let mut file = lock(&self.file, "Failed to lock file")?;
 
         file.seek(SeekFrom::Start(offset))?;
         file.write(buf)
     }
 
     fn flush_sync(&self) -> io::Result<()> {
-        let file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock file"))?;
+        let file = lock(&self.file, "Failed to lock file")?;
 
         file.sync_all()
     }
 
     fn truncate_sync(&self, size: u64) -> io::Result<()> {
-        let file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock file"))?;
+        let file = lock(&self.file, "Failed to lock file")?;
 
         file.set_len(size)
     }
 
     fn size_sync(&self) -> io::Result<u64> {
-        let file = self
-            .file
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock file"))?;
+        let file = lock(&self.file, "Failed to lock file")?;
 
         file.metadata().map(|m| m.len())
     }
@@ -133,26 +122,28 @@ impl SegmentedFile {
         self.base_dir.join(format!("{}.{}", self.prefix, segment))
     }
 
-    /// Get or create a segment
-    fn get_segment(&self, segment: u64) -> io::Result<()> {
-        let mut segments = self
-            .segments
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock segments"))?;
+    fn with_segment_file<R>(
+        &self,
+        segment: u64,
+        op: impl FnOnce(&FileSystemFile) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut segments = lock(&self.segments, "Failed to lock segments")?;
+        let idx = segment as usize;
 
-        // Extend vector if needed
-        while segments.len() <= segment as usize {
-            segments.push(None);
+        if segments.len() <= idx {
+            segments.resize_with(idx + 1, || None);
         }
 
-        // Open segment if not already open
-        if segments[segment as usize].is_none() {
+        if segments[idx].is_none() {
             let path = self.segment_path(segment);
-            let file = FileSystemFile::open(path, true)?;
-            segments[segment as usize] = Some(file);
+            segments[idx] = Some(FileSystemFile::open(path, true)?);
         }
 
-        Ok(())
+        let file = segments[idx]
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Segment not found"))?;
+
+        op(file)
     }
 }
 
@@ -161,43 +152,18 @@ impl SyncStorageDevice for SegmentedFile {
         let segment = offset / self.segment_size;
         let segment_offset = offset % self.segment_size;
 
-        self.get_segment(segment)?;
-
-        let segments = self
-            .segments
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock segments"))?;
-
-        if let Some(ref file) = segments[segment as usize] {
-            file.read_sync(segment_offset, buf)
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "Segment not found"))
-        }
+        self.with_segment_file(segment, |file| file.read_sync(segment_offset, buf))
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
         let segment = offset / self.segment_size;
         let segment_offset = offset % self.segment_size;
 
-        self.get_segment(segment)?;
-
-        let segments = self
-            .segments
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock segments"))?;
-
-        if let Some(ref file) = segments[segment as usize] {
-            file.write_sync(segment_offset, buf)
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "Segment not found"))
-        }
+        self.with_segment_file(segment, |file| file.write_sync(segment_offset, buf))
     }
 
     fn flush_sync(&self) -> io::Result<()> {
-        let segments = self
-            .segments
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock segments"))?;
+        let segments = lock(&self.segments, "Failed to lock segments")?;
 
         for segment in segments.iter().flatten() {
             segment.flush_sync()?;
@@ -213,10 +179,7 @@ impl SyncStorageDevice for SegmentedFile {
     }
 
     fn size_sync(&self) -> io::Result<u64> {
-        let segments = self
-            .segments
-            .lock()
-            .map_err(|_| io::Error::other("Failed to lock segments"))?;
+        let segments = lock(&self.segments, "Failed to lock segments")?;
 
         let mut total = 0u64;
         for segment in segments.iter().flatten() {

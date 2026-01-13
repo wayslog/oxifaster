@@ -16,7 +16,7 @@ use super::MemHashIndex;
 struct ChunkMigrationResult {
     /// Number of entries successfully migrated
     migrated: u64,
-    /// Number of overflow buckets encountered（用于统计）
+    /// Number of overflow buckets encountered (for statistics).
     overflow_buckets_seen: u64,
     /// Number of entries that couldn't be rehashed (rehash callback returned None)
     rehash_failures: u64,
@@ -161,7 +161,7 @@ impl MemHashIndex {
             let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
             loop {
-                // SAFETY: bucket_ptr 指向有效 bucket；entries/overflow 均为原子字段。
+                // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow are atomic.
                 let old_bucket = unsafe { &*bucket_ptr };
 
                 for i in 0..HashBucket::NUM_ENTRIES {
@@ -223,7 +223,7 @@ impl MemHashIndex {
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
         loop {
-            // SAFETY: bucket_ptr 指向有效 bucket。
+            // SAFETY: `bucket_ptr` points to a valid bucket.
             let bucket = unsafe { &*bucket_ptr };
 
             for i in 0..HashBucket::NUM_ENTRIES {
@@ -244,7 +244,7 @@ impl MemHashIndex {
 
             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
             if overflow.is_unused() {
-                // 追加 overflow bucket
+                // Append an overflow bucket.
                 let new_addr = self.overflow_pools[new_version as usize].allocate();
                 let new_overflow = HashBucketOverflowEntry::new(new_addr);
                 let expected = HashBucketOverflowEntry::INVALID;

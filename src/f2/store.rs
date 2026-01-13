@@ -67,7 +67,7 @@ where
     num_active_sessions: AtomicU64,
     /// Checkpoint directory for background checkpoint operations
     checkpoint_dir: Option<std::path::PathBuf>,
-    /// Key 访问统计（仅用于按访问率迁移策略）
+    /// Key access statistics (used only for the access-frequency migration strategy).
     key_access: KeyAccessTracker,
     /// Phantom data for type parameters
     _marker: std::marker::PhantomData<(K, V)>,
@@ -86,16 +86,18 @@ where
     pub fn new(config: F2Config, hot_device: D, cold_device: D) -> Result<Self, String> {
         config.validate()?;
 
-        // 安全约束：F2 当前仅支持 POD（Plain Old Data）类型的 key/value。
+        // Safety constraint: F2 currently supports only POD (Plain Old Data) keys/values.
         //
-        // 原因：
-        // - 日志内记录通过 `ptr::write` 直接写入 `K/V` 到 log 内存；若 `K/V` 含指针（如 String/Vec），
-        //   会产生不可回收的堆内存泄漏，且任何“持久化/恢复/跨进程”都会造成悬垂指针。
-        // - 目前 F2 未实现通用的序列化/反序列化记录格式，因此必须拒绝非 POD 类型以避免数据损坏。
+        // Rationale:
+        // - Records are written into the log memory via `ptr::write` directly as `K/V`. If `K/V`
+        //   contains heap pointers (e.g., `String`/`Vec`), it would leak heap memory and any form
+        //   of persistence/recovery would result in dangling pointers.
+        // - F2 does not yet define a general serialization format for records, so we must reject
+        //   non-POD types to avoid data corruption.
         if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
             return Err(
-                "F2 目前仅支持 POD 类型的 key/value（例如 u64、i64、[u8; N]）。\
-                 非 POD 类型（如 String、Vec、SpanByte）需要序列化支持，暂不支持。"
+                "F2 currently supports only POD (Plain Old Data) keys/values (e.g. u64, i64, [u8; N]). \
+                 Non-POD types (e.g. String, Vec, SpanByte) require serialization support and are not supported yet."
                     .to_string(),
             );
         }
@@ -463,7 +465,7 @@ where
             Ok(())
         })();
 
-        // 同步路径：保存完成后，必须将状态切回 REST，否则后续 session 启动或再次 checkpoint 会被阻塞。
+        // Synchronous path: after saving finishes, the checkpoint state must return to REST.
         if result.is_ok() {
             self.checkpoint
                 .hot_store_status
@@ -526,26 +528,26 @@ where
 
     /// Start the background worker thread
     pub fn start_background_worker(self: &Arc<Self>) {
-        let mut handle = self.background_worker_handle.lock();
-        if handle.as_ref().is_some_and(|h| h.is_finished()) {
-            if let Some(handle) = handle.take() {
-                let _ = handle.join();
+        let mut handle_guard = self.background_worker_handle.lock();
+
+        if let Some(handle) = handle_guard.as_ref() {
+            if !handle.is_finished() {
+                return;
             }
         }
-        if handle.is_some() {
+
+        if let Some(handle) = handle_guard.take() {
+            self.background_worker_active
+                .store(false, Ordering::Release);
+            let _ = handle.join();
+        }
+
+        if self.background_worker_active.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        if self
-            .background_worker_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return; // Already running
-        }
-
         let weak = Arc::downgrade(self);
-        *handle = Some(thread::spawn(move || loop {
+        *handle_guard = Some(thread::spawn(move || loop {
             let Some(f2) = weak.upgrade() else {
                 break;
             };
@@ -555,9 +557,7 @@ where
             }
 
             f2.background_worker_tick();
-
-            let interval = f2.config.compaction.check_interval;
-            thread::park_timeout(interval);
+            thread::park_timeout(f2.config.compaction.check_interval);
         }));
     }
 

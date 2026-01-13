@@ -216,7 +216,7 @@ impl MemHashIndex {
             let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
             loop {
-                // SAFETY: bucket_ptr 指向有效 bucket。
+                // SAFETY: `bucket_ptr` points to a valid bucket.
                 let bucket = unsafe { &*bucket_ptr };
 
                 for i in 0..HashBucket::NUM_ENTRIES {

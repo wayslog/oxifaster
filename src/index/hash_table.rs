@@ -175,100 +175,104 @@ impl InternalHashTable {
             .unwrap_or(std::ptr::null_mut())
     }
 
-    /// Start a checkpoint operation
-    pub fn start_checkpoint(&self) -> Result<(), Status> {
-        if self.checkpoint_pending.load(Ordering::Acquire) {
+    fn start_io_operation(
+        &self,
+        pending: &AtomicBool,
+        failed: &AtomicBool,
+        pending_io: &AtomicU64,
+    ) -> Result<(), Status> {
+        if pending.load(Ordering::Acquire) {
             return Err(Status::Aborted);
         }
 
-        debug_assert_eq!(self.pending_checkpoint_writes.load(Ordering::Relaxed), 0);
+        debug_assert_eq!(pending_io.load(Ordering::Relaxed), 0);
 
-        self.checkpoint_failed.store(false, Ordering::Release);
-        self.checkpoint_pending.store(true, Ordering::Release);
-        self.pending_checkpoint_writes
-            .store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
-
+        failed.store(false, Ordering::Release);
+        pending.store(true, Ordering::Release);
+        pending_io.store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
         Ok(())
+    }
+
+    fn complete_io_operation(
+        &self,
+        pending: &AtomicBool,
+        failed: &AtomicBool,
+        pending_io: &AtomicU64,
+        success: bool,
+    ) {
+        if !success {
+            failed.store(true, Ordering::Release);
+        }
+
+        if pending_io.fetch_sub(1, Ordering::AcqRel) == 1 {
+            pending.store(false, Ordering::Release);
+        }
+    }
+
+    fn io_operation_status(&self, pending: &AtomicBool, failed: &AtomicBool, wait: bool) -> Status {
+        if wait {
+            while pending.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+
+        if pending.load(Ordering::Acquire) {
+            return Status::Pending;
+        }
+
+        if failed.load(Ordering::Acquire) {
+            Status::IoError
+        } else {
+            Status::Ok
+        }
+    }
+
+    /// Start a checkpoint operation
+    pub fn start_checkpoint(&self) -> Result<(), Status> {
+        self.start_io_operation(
+            &self.checkpoint_pending,
+            &self.checkpoint_failed,
+            &self.pending_checkpoint_writes,
+        )
     }
 
     /// Complete a checkpoint write
     pub fn complete_checkpoint_write(&self, success: bool) {
-        if !success {
-            self.checkpoint_failed.store(true, Ordering::Release);
-        }
-
-        if self
-            .pending_checkpoint_writes
-            .fetch_sub(1, Ordering::AcqRel)
-            == 1
-        {
-            self.checkpoint_pending.store(false, Ordering::Release);
-        }
+        self.complete_io_operation(
+            &self.checkpoint_pending,
+            &self.checkpoint_failed,
+            &self.pending_checkpoint_writes,
+            success,
+        );
     }
 
     /// Check if checkpoint is complete
     pub fn checkpoint_complete(&self, wait: bool) -> Status {
-        if wait {
-            while self.checkpoint_pending.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-        }
-
-        if !self.checkpoint_pending.load(Ordering::Acquire) {
-            if self.checkpoint_failed.load(Ordering::Acquire) {
-                Status::IoError
-            } else {
-                Status::Ok
-            }
-        } else {
-            Status::Pending
-        }
+        self.io_operation_status(&self.checkpoint_pending, &self.checkpoint_failed, wait)
     }
 
     /// Start a recovery operation
     pub fn start_recovery(&self) -> Result<(), Status> {
-        if self.recover_pending.load(Ordering::Acquire) {
-            return Err(Status::Aborted);
-        }
-
-        debug_assert_eq!(self.pending_recover_reads.load(Ordering::Relaxed), 0);
-
-        self.recover_failed.store(false, Ordering::Release);
-        self.recover_pending.store(true, Ordering::Release);
-        self.pending_recover_reads
-            .store(NUM_MERGE_CHUNKS as u64, Ordering::Release);
-
-        Ok(())
+        self.start_io_operation(
+            &self.recover_pending,
+            &self.recover_failed,
+            &self.pending_recover_reads,
+        )
     }
 
     /// Complete a recovery read
     pub fn complete_recovery_read(&self, success: bool) {
-        if !success {
-            self.recover_failed.store(true, Ordering::Release);
-        }
-
-        if self.pending_recover_reads.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.recover_pending.store(false, Ordering::Release);
-        }
+        self.complete_io_operation(
+            &self.recover_pending,
+            &self.recover_failed,
+            &self.pending_recover_reads,
+            success,
+        );
     }
 
     /// Check if recovery is complete
     pub fn recovery_complete(&self, wait: bool) -> Status {
-        if wait {
-            while self.recover_pending.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-        }
-
-        if !self.recover_pending.load(Ordering::Acquire) {
-            if self.recover_failed.load(Ordering::Acquire) {
-                Status::IoError
-            } else {
-                Status::Ok
-            }
-        } else {
-            Status::Pending
-        }
+        self.io_operation_status(&self.recover_pending, &self.recover_failed, wait)
     }
 
     /// Get checkpoint chunk size

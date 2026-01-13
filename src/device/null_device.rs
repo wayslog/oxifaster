@@ -47,21 +47,8 @@ impl SyncStorageDevice for NullDisk {
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        // Update size if needed
         let new_end = offset + buf.len() as u64;
-        loop {
-            let current = self.size.load(Ordering::Acquire);
-            if new_end <= current {
-                break;
-            }
-            if self
-                .size
-                .compare_exchange(current, new_end, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
-        }
+        self.size.fetch_max(new_end, Ordering::AcqRel);
 
         // Discard the data
         Ok(buf.len())

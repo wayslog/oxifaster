@@ -144,20 +144,20 @@ impl MemHashIndex {
         loop {
             let bucket = self.tables[version].bucket(hash);
 
-            // 先在整个 bucket 链中查找（包括 overflow 链）
+            // Search the entire bucket chain first (including the overflow chain).
             if let Some(found) = self.find_existing_in_bucket_chain(version, bucket, tag) {
                 return found;
             }
 
-            // 查找可用的空位（包括 overflow 链）
+            // Find a free slot (including the overflow chain).
             let mut free_entry = self.find_free_entry_in_bucket_chain(version, bucket);
 
-            // 如果整个链都满了，则追加一个新的 overflow bucket，并使用它的第一个 entry。
+            // If the whole chain is full, append a new overflow bucket and use its first entry.
             if free_entry.is_none() {
                 free_entry = self.append_overflow_bucket_and_get_free_entry(version, bucket);
             }
 
-            // 尝试安装 tentative entry
+            // Try to install a tentative entry.
             if let Some(atomic_entry) = free_entry {
                 let tentative_entry = IndexHashBucketEntry::new(Address::INVALID, tag, true);
                 let expected = HashBucketEntry::INVALID;
@@ -247,7 +247,8 @@ impl MemHashIndex {
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
         loop {
-            // SAFETY: bucket_ptr 指向 valid HashBucket，且 HashBucket 内部字段都是原子类型，可并发只读/写。
+            // SAFETY: `bucket_ptr` points to a valid `HashBucket`; its fields are atomic and can
+            // be read/written concurrently.
             let bucket = unsafe { &*bucket_ptr };
             for i in 0..HashBucket::NUM_ENTRIES {
                 let entry_ptr = &bucket.entries[i] as *const _;
@@ -282,7 +283,7 @@ impl MemHashIndex {
     ) -> FindResult {
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
         loop {
-            // SAFETY: bucket_ptr 指向有效 bucket；entries/overflow_entry 都是原子字段，读是安全的。
+            // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow_entry are atomic.
             let bucket = unsafe { &*bucket_ptr };
 
             for i in 0..HashBucket::NUM_ENTRIES {
@@ -332,7 +333,7 @@ impl MemHashIndex {
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
         loop {
-            // SAFETY: 同 find_entry_in_bucket_chain
+            // SAFETY: Same rationale as `find_entry_in_bucket_chain`.
             let bucket = unsafe { &*bucket_ptr };
 
             for i in 0..HashBucket::NUM_ENTRIES {
@@ -359,16 +360,17 @@ impl MemHashIndex {
         version: usize,
         base_bucket: &HashBucket,
     ) -> Option<*const AtomicHashBucketEntry> {
-        // 找到链尾（overflow_entry 未使用的 bucket）并追加一个新的 overflow bucket。
+        // Find the chain tail (a bucket with an unused overflow entry) and append a new overflow
+        // bucket.
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
         loop {
-            // SAFETY: 同上
+            // SAFETY: Same rationale as above.
             let bucket = unsafe { &*bucket_ptr };
             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
 
             if overflow.is_unused() {
-                // 分配新 bucket，并 CAS 安装到 overflow_entry。
+                // Allocate a new bucket and CAS it into the overflow entry.
                 let new_addr = self.overflow_pools[version].allocate();
                 let new_overflow = HashBucketOverflowEntry::new(new_addr);
                 let expected = HashBucketOverflowEntry::INVALID;
@@ -381,15 +383,16 @@ impl MemHashIndex {
                 ) {
                     Ok(_) => {
                         let new_ptr = self.overflow_pools[version].bucket_ptr(new_addr)?;
-                        // SAFETY: 新 bucket 刚创建，entries 均为 INVALID
+                        // SAFETY: The bucket was just created; entries are initialized to INVALID.
                         let new_bucket = unsafe { &*new_ptr };
                         return Some(&new_bucket.entries[0] as *const _);
                     }
                     Err(actual) => {
-                        // CAS 失败：说明有其他线程先一步安装了 overflow；归还本次新分配的 bucket 以便复用。
+                        // CAS failed: another thread installed an overflow bucket first. Return
+                        // the newly allocated bucket to the pool for reuse.
                         self.overflow_pools[version].deallocate(new_addr);
 
-                        // 有其他线程抢先安装了 overflow，继续沿链前进。
+                        // Another thread installed an overflow bucket; keep traversing.
                         if actual.is_unused() {
                             continue;
                         }
@@ -401,7 +404,7 @@ impl MemHashIndex {
                     }
                 }
             } else {
-                // 继续遍历
+                // Keep traversing.
                 let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address());
                 match next_ptr {
                     Some(p) => bucket_ptr = p,
@@ -463,7 +466,7 @@ impl MemHashIndex {
             let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
             loop {
-                // SAFETY: bucket_ptr 指向有效 bucket，且 entries/overflow 都是原子字段。
+                // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow are atomic.
                 let bucket = unsafe { &*bucket_ptr };
 
                 for i in 0..HashBucket::NUM_ENTRIES {
@@ -515,7 +518,7 @@ impl MemHashIndex {
             let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
             loop {
-                // SAFETY: bucket_ptr 指向有效 bucket。
+                // SAFETY: `bucket_ptr` points to a valid bucket.
                 let bucket = unsafe { &*bucket_ptr };
 
                 for i in 0..HashBucket::NUM_ENTRIES {
@@ -553,7 +556,7 @@ impl MemHashIndex {
             let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
 
             loop {
-                // SAFETY: bucket_ptr 指向有效 bucket。
+                // SAFETY: `bucket_ptr` points to a valid bucket.
                 let bucket = unsafe { &*bucket_ptr };
                 let mut bucket_used = 0u64;
 

@@ -8,7 +8,7 @@
 //! which returns an [`AutoCompactionHandle`]. Dropping the handle stops the worker and
 //! joins its thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -119,7 +119,7 @@ impl<T> AutoCompactionHandle<T> {
         T: AutoCompactionTarget,
     {
         let mut worker = AutoCompactionWorker::new(target, config);
-        let _ = worker.start();
+        worker.start();
         Self { worker }
     }
 
@@ -229,13 +229,8 @@ impl AutoCompactionStats {
             .fetch_add(stats.records_compacted, Ordering::Relaxed);
         self.last_compaction_duration_ms
             .store(stats.duration_ms, Ordering::Relaxed);
-        self.last_compaction_time.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            Ordering::Relaxed,
-        );
+        self.last_compaction_time
+            .store(Self::unix_secs_now(), Ordering::Relaxed);
     }
 
     /// Record a failed compaction.
@@ -263,10 +258,18 @@ impl AutoCompactionStats {
         self.last_compaction_time.store(0, Ordering::Relaxed);
         self.last_compaction_duration_ms.store(0, Ordering::Relaxed);
     }
+
+    fn unix_secs_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
 }
 
 /// State of the auto compaction worker
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum AutoCompactionState {
     /// Worker is stopped
     Stopped,
@@ -276,6 +279,22 @@ pub enum AutoCompactionState {
     Compacting,
     /// Worker is paused
     Paused,
+}
+
+impl AutoCompactionState {
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            x if x == (AutoCompactionState::Stopped as u8) => AutoCompactionState::Stopped,
+            x if x == (AutoCompactionState::Idle as u8) => AutoCompactionState::Idle,
+            x if x == (AutoCompactionState::Compacting as u8) => AutoCompactionState::Compacting,
+            x if x == (AutoCompactionState::Paused as u8) => AutoCompactionState::Paused,
+            _ => AutoCompactionState::Stopped,
+        }
+    }
+
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
 }
 
 /// Auto compaction worker
@@ -296,7 +315,7 @@ pub(crate) struct AutoCompactionWorker<T> {
     /// Worker thread handle
     handle: Option<JoinHandle<()>>,
     /// Current state
-    state: Arc<std::sync::atomic::AtomicU8>,
+    state: Arc<AtomicU8>,
 }
 
 impl<T> AutoCompactionWorker<T> {
@@ -309,21 +328,13 @@ impl<T> AutoCompactionWorker<T> {
             paused: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(AutoCompactionStats::new()),
             handle: None,
-            state: Arc::new(std::sync::atomic::AtomicU8::new(
-                AutoCompactionState::Stopped as u8,
-            )),
+            state: Arc::new(AtomicU8::new(AutoCompactionState::Stopped.as_u8())),
         }
     }
 
     /// Get the current state
     pub fn state(&self) -> AutoCompactionState {
-        match self.state.load(Ordering::Acquire) {
-            0 => AutoCompactionState::Stopped,
-            1 => AutoCompactionState::Idle,
-            2 => AutoCompactionState::Compacting,
-            3 => AutoCompactionState::Paused,
-            _ => AutoCompactionState::Stopped,
-        }
+        AutoCompactionState::from_u8(self.state.load(Ordering::Acquire))
     }
 
     /// Check if the worker is running
@@ -353,18 +364,19 @@ impl<T> AutoCompactionWorker<T> {
         self.running.store(false, Ordering::Release);
 
         if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
             let _ = handle.join();
         }
 
         self.state
-            .store(AutoCompactionState::Stopped as u8, Ordering::Release);
+            .store(AutoCompactionState::Stopped.as_u8(), Ordering::Release);
     }
 
     /// Pause the auto compaction worker
     pub fn pause(&self) {
         self.paused.store(true, Ordering::Release);
         self.state
-            .store(AutoCompactionState::Paused as u8, Ordering::Release);
+            .store(AutoCompactionState::Paused.as_u8(), Ordering::Release);
     }
 
     /// Resume the auto compaction worker
@@ -372,7 +384,7 @@ impl<T> AutoCompactionWorker<T> {
         self.paused.store(false, Ordering::Release);
         if self.running.load(Ordering::Acquire) {
             self.state
-                .store(AutoCompactionState::Idle as u8, Ordering::Release);
+                .store(AutoCompactionState::Idle.as_u8(), Ordering::Release);
         }
     }
 }
@@ -406,93 +418,96 @@ impl<T: AutoCompactionTarget> AutoCompactionWorker<T> {
         running: Arc<AtomicBool>,
         paused: Arc<AtomicBool>,
         stats: Arc<AutoCompactionStats>,
-        state: Arc<std::sync::atomic::AtomicU8>,
+        state: Arc<AtomicU8>,
         target: Weak<T>,
         config: AutoCompactionConfig,
     ) {
+        enum TickResult {
+            Slept,
+            Compacted {
+                begin_address: Address,
+                result: CompactionResult,
+            },
+        }
+
+        let check_interval = config.check_interval;
         let mut last_compaction = Instant::now();
         let mut compactions_this_hour = 0u32;
         let mut hour_start = Instant::now();
 
-        state.store(AutoCompactionState::Idle as u8, Ordering::Release);
+        state.store(AutoCompactionState::Idle.as_u8(), Ordering::Release);
 
         while running.load(Ordering::Acquire) {
-            // Try to get the target early so we can stop promptly when the store is dropped.
-            let store = match target.upgrade() {
-                Some(s) => s,
+            let tick_result = match target.upgrade() {
+                Some(store) => {
+                    if paused.load(Ordering::Acquire) {
+                        TickResult::Slept
+                    } else {
+                        if hour_start.elapsed() >= Duration::from_secs(3600) {
+                            hour_start = Instant::now();
+                            compactions_this_hour = 0;
+                        }
+
+                        let rate_limited = config.max_compactions_per_hour > 0
+                            && compactions_this_hour >= config.max_compactions_per_hour;
+                        let in_quiet_period = last_compaction.elapsed() < config.quiet_period;
+
+                        if rate_limited || in_quiet_period {
+                            TickResult::Slept
+                        } else {
+                            let utilization = store.log_utilization();
+                            let log_size = store.log_size_bytes();
+                            let should_compact = utilization < config.target_utilization
+                                && log_size >= config.min_log_size;
+
+                            if !should_compact {
+                                TickResult::Slept
+                            } else {
+                                state.store(
+                                    AutoCompactionState::Compacting.as_u8(),
+                                    Ordering::Release,
+                                );
+
+                                let begin_address = store.begin_address();
+                                let safe_head = store.safe_head_address();
+                                let result = store.compact_until(safe_head);
+
+                                state.store(AutoCompactionState::Idle.as_u8(), Ordering::Release);
+                                TickResult::Compacted {
+                                    begin_address,
+                                    result,
+                                }
+                            }
+                        }
+                    }
+                }
                 None => {
-                    // Target has been dropped, clear running flag and stop the worker.
-                    // This ensures is_running() returns false and start() can restart.
                     running.store(false, Ordering::Release);
                     break;
                 }
             };
 
-            // Check if paused
-            if paused.load(Ordering::Acquire) {
-                drop(store);
-                thread::sleep(config.check_interval);
-                continue;
-            }
-
-            // Check rate limiting
-            if hour_start.elapsed() >= Duration::from_secs(3600) {
-                hour_start = Instant::now();
-                compactions_this_hour = 0;
-            }
-
-            if config.max_compactions_per_hour > 0
-                && compactions_this_hour >= config.max_compactions_per_hour
+            if let TickResult::Compacted {
+                begin_address,
+                result,
+            } = tick_result
             {
-                drop(store);
-                thread::sleep(config.check_interval);
-                continue;
+                if result.status == Status::Aborted {
+                    // Another compaction is in progress; do not count as failure.
+                } else if result.status.is_ok() && result.new_begin_address > begin_address {
+                    stats.record_success(&result.stats);
+                    compactions_this_hour += 1;
+                } else {
+                    stats.record_failure();
+                }
+
+                last_compaction = Instant::now();
             }
 
-            // Check quiet period
-            if last_compaction.elapsed() < config.quiet_period {
-                drop(store);
-                thread::sleep(config.check_interval);
-                continue;
-            }
-
-            let utilization = store.log_utilization();
-            let log_size = store.log_size_bytes();
-            let should_compact = utilization < config.target_utilization;
-
-            if !should_compact || log_size < config.min_log_size {
-                drop(store);
-                thread::sleep(config.check_interval);
-                continue;
-            }
-
-            // Perform compaction
-            state.store(AutoCompactionState::Compacting as u8, Ordering::Release);
-
-            let begin_address = store.begin_address();
-            let safe_head = store.safe_head_address();
-
-            // Calculate target address (compact up to safe head)
-            let result = store.compact_until(safe_head);
-            drop(store);
-
-            if result.status == Status::Aborted {
-                // Another compaction is in progress; do not count as failure.
-            } else if result.status.is_ok() && result.new_begin_address > begin_address {
-                stats.record_success(&result.stats);
-                compactions_this_hour += 1;
-            } else {
-                stats.record_failure();
-            }
-
-            last_compaction = Instant::now();
-            state.store(AutoCompactionState::Idle as u8, Ordering::Release);
-
-            // Sleep before next check
-            thread::sleep(config.check_interval);
+            thread::park_timeout(check_interval);
         }
 
-        state.store(AutoCompactionState::Stopped as u8, Ordering::Release);
+        state.store(AutoCompactionState::Stopped.as_u8(), Ordering::Release);
     }
 }
 
@@ -631,6 +646,30 @@ mod tests {
 
         worker.stop();
         assert!(!worker.is_running());
+        assert_eq!(worker.state(), AutoCompactionState::Stopped);
+    }
+
+    #[test]
+    fn test_auto_compaction_worker_stop_wakes_sleep() {
+        let target = Arc::new(MockTarget::new());
+        let config = AutoCompactionConfig::new()
+            .with_check_interval(Duration::from_secs(2))
+            .with_min_log_size(0)
+            .with_target_utilization(0.0);
+
+        let mut worker = AutoCompactionWorker::new(Arc::downgrade(&target), config);
+        assert!(worker.start());
+
+        thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        worker.stop();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "stop() should wake the worker promptly, took {elapsed:?}"
+        );
         assert_eq!(worker.state(), AutoCompactionState::Stopped);
     }
 

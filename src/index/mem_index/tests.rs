@@ -490,7 +490,7 @@ fn test_grow_in_progress_prevention() {
 #[test]
 fn test_overflow_buckets_insert_and_find() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1); // 所有 hash 都落在同一个 bucket
+    let config = MemHashIndexConfig::new(1); // All hashes map to a single bucket.
     index.initialize(&config);
 
     let num = 32u64;

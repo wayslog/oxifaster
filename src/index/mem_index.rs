@@ -1,7 +1,7 @@
 //! In-memory hash index implementation for FASTER
 //!
-//! 说明：该文件作为 `mem_index` 模块入口，仅保留类型定义与模块组织；
-//! 具体实现拆分在 `src/index/mem_index/*.rs` 中，以满足“单文件不超过 1000 行”的约束。
+//! Note: This file is the `mem_index` module entrypoint and only contains type definitions and
+//! module wiring. The implementation lives in `src/index/mem_index/*.rs` to keep this file small.
 
 use std::sync::atomic::{AtomicBool, AtomicU8};
 
@@ -63,7 +63,7 @@ impl Default for MemHashIndexConfig {
 pub struct MemHashIndex {
     /// Hash tables (two versions for growth)
     tables: [InternalHashTable; 2],
-    /// overflow bucket 池（两个版本分别维护，随表一起切换/恢复）
+    /// Overflow bucket pool (one per table version, switched together with the table).
     overflow_pools: [OverflowBucketPool; 2],
     /// Current version (0 or 1)
     version: AtomicU8,

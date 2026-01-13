@@ -36,7 +36,7 @@
 //!
 //! // Or use the RAII guard
 //! {
-//!     let _guard = epoch.protect_guard(tid);
+//!     let _guard = EpochGuard::new(&epoch, tid);
 //!     // ... automatically unprotects when dropped ...
 //! }
 //! ```

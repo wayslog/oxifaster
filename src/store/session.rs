@@ -108,6 +108,14 @@ where
     V: Value,
     D: StorageDevice,
 {
+    fn bump_serial_on_ok(&mut self, status: Status) -> Status {
+        if status == Status::Ok {
+            self.ctx.increment_serial();
+            self.store.update_session(&self.to_session_state());
+        }
+        status
+    }
+
     /// Create a new session with a fresh GUID
     pub(crate) fn new(store: Arc<FasterKv<K, V, D>>, thread_id: usize) -> Self {
         Self {
@@ -226,27 +234,17 @@ where
     /// don't modify state or write to the log. The CPR serial number only tracks
     /// operations that are persisted and need to be recovered.
     pub fn read(&mut self, key: &K) -> Result<Option<V>, Status> {
-        if !self.active {
-            self.start();
-        }
+        self.start();
 
         self.store.read_sync(&mut self.ctx, key)
     }
 
     /// Upsert a key-value pair
     pub fn upsert(&mut self, key: K, value: V) -> Status {
-        if !self.active {
-            self.start();
-        }
+        self.start();
 
         let status = self.store.upsert_sync(&mut self.ctx, key, value);
-        // Increment serial number on successful upsert and update registry
-        // This ensures checkpoint captures the correct serial number for CPR
-        if status == Status::Ok {
-            self.ctx.increment_serial();
-            self.store.update_session(&self.to_session_state());
-        }
-        status
+        self.bump_serial_on_ok(status)
     }
 
     /// Delete a key
@@ -255,18 +253,10 @@ where
     /// (i.e., when the key exists and is deleted). Deleting a non-existent key
     /// doesn't write to the log and shouldn't affect CPR recovery.
     pub fn delete(&mut self, key: &K) -> Status {
-        if !self.active {
-            self.start();
-        }
+        self.start();
 
         let status = self.store.delete_sync(&mut self.ctx, key);
-        // Only increment serial number on actual deletion (Status::Ok)
-        // NotFound means no state change, so no serial number increment
-        if status == Status::Ok {
-            self.ctx.increment_serial();
-            self.store.update_session(&self.to_session_state());
-        }
-        status
+        self.bump_serial_on_ok(status)
     }
 
     /// Perform a read-modify-write operation
@@ -274,18 +264,10 @@ where
     where
         F: FnMut(&mut V) -> bool,
     {
-        if !self.active {
-            self.start();
-        }
+        self.start();
 
         let status = self.store.rmw_sync(&mut self.ctx, key, modifier);
-        // Increment serial number on successful RMW and update registry
-        // This ensures checkpoint captures the correct serial number for CPR
-        if status == Status::Ok {
-            self.ctx.increment_serial();
-            self.store.update_session(&self.to_session_state());
-        }
-        status
+        self.bump_serial_on_ok(status)
     }
 
     /// Complete all pending operations
@@ -317,7 +299,6 @@ where
     ///
     /// Returns `true` if all pending operations have completed, `false` if timeout or still pending.
     pub fn complete_pending_with_timeout(&mut self, wait: bool, timeout: Duration) -> bool {
-        // 即使 session 未 active，也允许驱动全局 I/O 完成事件，避免"只有发起者能推动完成"造成停滞。
         let start = Instant::now();
 
         loop {
@@ -332,12 +313,12 @@ where
                 break;
             }
 
-            // 超时保护：防止 I/O worker 线程崩溃导致无限阻塞
+            // Timeout guard: prevent infinite blocking if the I/O worker thread fails.
             if start.elapsed() >= timeout {
                 break;
             }
 
-            // wait=true：阻塞等待，期间刷新 epoch 并让出时间片
+            // wait=true: yield the thread while keeping epoch protection fresh.
             if self.active {
                 self.refresh();
             }

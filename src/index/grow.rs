@@ -272,49 +272,7 @@ pub struct GrowResult {
 }
 
 impl GrowResult {
-    /// Create a successful result
-    pub fn success(old_size: u64, new_size: u64, entries_migrated: u64, duration_ms: u64) -> Self {
-        Self {
-            success: true,
-            new_size,
-            old_size,
-            entries_migrated,
-            duration_ms,
-            status: None,
-            overflow_buckets_skipped: 0,
-            rehash_failures: 0,
-        }
-    }
-
-    /// Create a successful result with overflow bucket tracking
-    pub fn success_with_overflow(
-        old_size: u64,
-        new_size: u64,
-        entries_migrated: u64,
-        duration_ms: u64,
-        overflow_buckets_skipped: u64,
-    ) -> Self {
-        Self {
-            success: overflow_buckets_skipped == 0, // Not fully successful if we skipped overflow entries
-            new_size,
-            old_size,
-            entries_migrated,
-            duration_ms,
-            status: if overflow_buckets_skipped > 0 {
-                Some(crate::status::Status::OverflowBucketsSkipped)
-            } else {
-                None
-            },
-            overflow_buckets_skipped,
-            rehash_failures: 0,
-        }
-    }
-
-    /// Create a result with both overflow and rehash failure tracking
-    ///
-    /// Success is false if either overflow buckets were skipped or rehash failures occurred,
-    /// as both indicate potential data loss.
-    pub fn with_data_loss_tracking(
+    fn new_with_warnings(
         old_size: u64,
         new_size: u64,
         entries_migrated: u64,
@@ -329,14 +287,55 @@ impl GrowResult {
             old_size,
             entries_migrated,
             duration_ms,
-            status: if has_data_loss {
-                Some(crate::status::Status::OverflowBucketsSkipped)
-            } else {
-                None
-            },
+            status: has_data_loss.then_some(crate::status::Status::OverflowBucketsSkipped),
             overflow_buckets_skipped,
             rehash_failures,
         }
+    }
+
+    /// Create a successful result
+    pub fn success(old_size: u64, new_size: u64, entries_migrated: u64, duration_ms: u64) -> Self {
+        Self::new_with_warnings(old_size, new_size, entries_migrated, duration_ms, 0, 0)
+    }
+
+    /// Create a successful result with overflow bucket tracking
+    pub fn success_with_overflow(
+        old_size: u64,
+        new_size: u64,
+        entries_migrated: u64,
+        duration_ms: u64,
+        overflow_buckets_skipped: u64,
+    ) -> Self {
+        Self::new_with_warnings(
+            old_size,
+            new_size,
+            entries_migrated,
+            duration_ms,
+            overflow_buckets_skipped,
+            0,
+        )
+    }
+
+    /// Create a result with both overflow and rehash failure tracking
+    ///
+    /// Success is false if either overflow buckets were skipped or rehash failures occurred,
+    /// as both indicate potential data loss.
+    pub fn with_data_loss_tracking(
+        old_size: u64,
+        new_size: u64,
+        entries_migrated: u64,
+        duration_ms: u64,
+        overflow_buckets_skipped: u64,
+        rehash_failures: u64,
+    ) -> Self {
+        Self::new_with_warnings(
+            old_size,
+            new_size,
+            entries_migrated,
+            duration_ms,
+            overflow_buckets_skipped,
+            rehash_failures,
+        )
     }
 
     /// Create a failure result

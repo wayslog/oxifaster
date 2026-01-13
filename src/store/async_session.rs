@@ -82,6 +82,12 @@ where
     V: Value,
     D: StorageDevice,
 {
+    async fn drive_pending_once(&mut self) {
+        self.inner.complete_pending(false);
+        tokio_yield().await;
+        self.refresh();
+    }
+
     /// Create a new async session wrapping a synchronous session
     pub(crate) fn new(inner: Session<K, V, D>) -> Self {
         Self { inner }
@@ -180,11 +186,7 @@ where
                         // Exhausted retries - data is likely on disk without async I/O support
                         return Err(Status::Pending);
                     }
-                    // Try to complete any pending operations
-                    self.inner.complete_pending(false);
-                    // Yield to allow other tasks to run and I/O to potentially complete
-                    tokio_yield().await;
-                    self.refresh();
+                    self.drive_pending_once().await;
                 }
                 Err(status) => return Err(status),
             }
@@ -204,18 +206,14 @@ where
         let mut retries = 0u32;
         loop {
             let status = self.inner.upsert(key.clone(), value.clone());
-            match status {
-                Status::Pending => {
-                    retries += 1;
-                    if retries > MAX_PENDING_RETRIES {
-                        return Status::Pending;
-                    }
-                    self.inner.complete_pending(false);
-                    tokio_yield().await;
-                    self.refresh();
-                }
-                _ => return status,
+            if status != Status::Pending {
+                return status;
             }
+            retries += 1;
+            if retries > MAX_PENDING_RETRIES {
+                return Status::Pending;
+            }
+            self.drive_pending_once().await;
         }
     }
 
@@ -232,18 +230,14 @@ where
         let mut retries = 0u32;
         loop {
             let status = self.inner.delete(key);
-            match status {
-                Status::Pending => {
-                    retries += 1;
-                    if retries > MAX_PENDING_RETRIES {
-                        return Status::Pending;
-                    }
-                    self.inner.complete_pending(false);
-                    tokio_yield().await;
-                    self.refresh();
-                }
-                _ => return status,
+            if status != Status::Pending {
+                return status;
             }
+            retries += 1;
+            if retries > MAX_PENDING_RETRIES {
+                return Status::Pending;
+            }
+            self.drive_pending_once().await;
         }
     }
 
@@ -264,18 +258,14 @@ where
         let mut retries = 0u32;
         loop {
             let status = self.inner.rmw(key.clone(), modifier.clone());
-            match status {
-                Status::Pending => {
-                    retries += 1;
-                    if retries > MAX_PENDING_RETRIES {
-                        return Status::Pending;
-                    }
-                    self.inner.complete_pending(false);
-                    tokio_yield().await;
-                    self.refresh();
-                }
-                _ => return status,
+            if status != Status::Pending {
+                return status;
             }
+            retries += 1;
+            if retries > MAX_PENDING_RETRIES {
+                return Status::Pending;
+            }
+            self.drive_pending_once().await;
         }
     }
 
@@ -294,8 +284,7 @@ where
             if retries > MAX_PENDING_RETRIES {
                 return false;
             }
-            tokio_yield().await;
-            self.refresh();
+            self.drive_pending_once().await;
         }
     }
 

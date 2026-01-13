@@ -147,13 +147,17 @@ pub struct IoUringStats {
 }
 
 impl IoUringStats {
+    fn avg_latency_us(total_latency_ns: u64, completed: u64) -> u64 {
+        (total_latency_ns / completed.max(1)) / 1000
+    }
+
     /// Record a successful read completion
     pub fn record_read_complete(&mut self, bytes: u64, latency_ns: u64) {
         self.reads_completed += 1;
         self.bytes_read += bytes;
         self.total_read_latency_ns += latency_ns;
         self.avg_read_latency_us =
-            (self.total_read_latency_ns / self.reads_completed.max(1)) / 1000;
+            Self::avg_latency_us(self.total_read_latency_ns, self.reads_completed);
     }
 
     /// Record a successful write completion
@@ -162,7 +166,7 @@ impl IoUringStats {
         self.bytes_written += bytes;
         self.total_write_latency_ns += latency_ns;
         self.avg_write_latency_us =
-            (self.total_write_latency_ns / self.writes_completed.max(1)) / 1000;
+            Self::avg_latency_us(self.total_write_latency_ns, self.writes_completed);
     }
 
     /// Record a read error
