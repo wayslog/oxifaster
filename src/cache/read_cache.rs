@@ -15,6 +15,8 @@ use crate::status::Status;
 
 /// Page size for read cache (32 MB)
 const PAGE_SIZE: u64 = 1 << 25;
+const START_ADDRESS: u64 = 64;
+const WORD_BYTES: usize = std::mem::size_of::<u64>();
 
 /// Read cache for storing hot records in memory
 pub struct ReadCache<K, V>
@@ -25,7 +27,10 @@ where
     /// Configuration
     config: ReadCacheConfig,
     /// Memory buffer for cached records
-    buffer: RwLock<Vec<u8>>,
+    ///
+    /// The buffer is stored as `u64` words to guarantee at least 8-byte alignment for record
+    /// headers (and typical key/value types). All offsets into the buffer are in bytes.
+    buffer: RwLock<Vec<u64>>,
     /// Current tail address (where new records are allocated)
     tail_address: AtomicU64,
     /// Safe head address (below which eviction has completed)
@@ -49,23 +54,98 @@ where
 {
     /// Create a new read cache with the given configuration
     pub fn new(config: ReadCacheConfig) -> Self {
-        let mem_size = config.mem_size as usize;
+        let mem_size = usize::try_from(config.mem_size).unwrap_or(usize::MAX);
+        let word_capacity = mem_size.saturating_add(WORD_BYTES - 1) / WORD_BYTES;
         let buffer = if config.pre_allocate {
-            vec![0u8; mem_size]
+            vec![0u64; word_capacity]
         } else {
-            Vec::with_capacity(mem_size)
+            Vec::with_capacity(word_capacity)
         };
 
         Self {
             config,
             buffer: RwLock::new(buffer),
-            tail_address: AtomicU64::new(64), // Start after cache line
-            safe_head_address: AtomicU64::new(64),
-            head_address: AtomicU64::new(64),
+            tail_address: AtomicU64::new(START_ADDRESS), // Start after cache line
+            safe_head_address: AtomicU64::new(START_ADDRESS),
+            head_address: AtomicU64::new(START_ADDRESS),
             read_only_address: AtomicU64::new(0),
             eviction_in_progress: AtomicBool::new(false),
             stats: ReadCacheStats::new(),
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    fn buffer_bytes_len(buffer: &[u64]) -> usize {
+        buffer.len().saturating_mul(WORD_BYTES)
+    }
+
+    #[inline]
+    fn buffer_as_ptr(buffer: &[u64]) -> *const u8 {
+        buffer.as_ptr().cast::<u8>()
+    }
+
+    #[inline]
+    fn buffer_as_mut_ptr(buffer: &mut [u64]) -> *mut u8 {
+        buffer.as_mut_ptr().cast::<u8>()
+    }
+
+    #[inline]
+    fn miss<T>(&self) -> Option<T> {
+        self.stats.record_miss();
+        None
+    }
+
+    fn offset_in_cache(&self, control: u64) -> Option<usize> {
+        let mem_size = usize::try_from(self.config.mem_size).ok()?;
+        if mem_size == 0 {
+            return None;
+        }
+
+        let alignment = std::mem::align_of::<RecordInfo>();
+        debug_assert!(alignment.is_power_of_two());
+
+        let mut offset = (control as usize) % mem_size;
+        offset &= !(alignment - 1);
+        Some(offset)
+    }
+
+    fn record_offset(&self, control: u64, buffer_bytes_len: usize) -> Option<usize> {
+        if buffer_bytes_len == 0 {
+            return None;
+        }
+
+        let offset = self.offset_in_cache(control)?;
+        let record_size = Record::<K, V>::size();
+        if offset.checked_add(record_size)? > buffer_bytes_len {
+            return None;
+        }
+
+        Some(offset)
+    }
+
+    fn record_at<'a>(&self, buffer: &'a [u64], address: Address) -> Option<&'a Record<K, V>> {
+        let buffer_bytes_len = Self::buffer_bytes_len(buffer);
+        let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        let ptr = unsafe { Self::buffer_as_ptr(buffer).add(offset) }.cast::<Record<K, V>>();
+        Some(unsafe { &*ptr })
+    }
+
+    fn record_at_mut<'a>(
+        &self,
+        buffer: &'a mut [u64],
+        address: Address,
+    ) -> Option<&'a mut Record<K, V>> {
+        let buffer_bytes_len = Self::buffer_bytes_len(buffer);
+        let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        let ptr = unsafe { Self::buffer_as_mut_ptr(buffer).add(offset) }.cast::<Record<K, V>>();
+        Some(unsafe { &mut *ptr })
+    }
+
+    fn ensure_buffer_bytes_len(buffer: &mut Vec<u64>, required_bytes_len: usize) {
+        let required_words = required_bytes_len.saturating_add(WORD_BYTES - 1) / WORD_BYTES;
+        if required_words > buffer.len() {
+            buffer.resize(required_words, 0);
         }
     }
 
@@ -108,8 +188,7 @@ where
 
         // Must be a read cache address
         if !cache_address.in_readcache() {
-            self.stats.record_miss();
-            return None;
+            return self.miss();
         }
 
         let rc_address = cache_address.readcache_address();
@@ -117,40 +196,29 @@ where
 
         // Check if address is still valid (not evicted)
         if rc_address.control() < safe_head {
-            self.stats.record_miss();
-            return None;
+            return self.miss();
         }
 
         // Get the record
         let buffer = self.buffer.read().ok()?;
-        let offset = (rc_address.control() as usize) % buffer.len();
-
-        if offset + Record::<K, V>::size() > buffer.len() {
-            self.stats.record_miss();
-            return None;
-        }
-
-        let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
+        let record = self.record_at(&buffer, rc_address)?;
 
         // Create record info
         let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
 
         // Check if record is valid
         if rc_info.is_invalid() {
-            self.stats.record_miss();
-            return None;
+            return self.miss();
         }
 
         // Check if key matches
         if unsafe { record.key() } != key {
-            self.stats.record_miss();
-            return None;
+            return self.miss();
         }
 
         // Read cache doesn't store tombstones
         if rc_info.is_tombstone() {
-            self.stats.record_miss();
-            return None;
+            return self.miss();
         }
 
         self.stats.record_hit();
@@ -185,15 +253,16 @@ where
         // Get the buffer for writing
         let mut buffer = self.buffer.write().map_err(|_| Status::Aborted)?;
 
+        let offset = self
+            .offset_in_cache(new_address.control())
+            .ok_or(Status::Aborted)?;
+
         // Ensure buffer is large enough
-        let offset = (new_address.control() as usize) % self.config.mem_size as usize;
-        if offset + record_size > buffer.len() {
-            // Extend buffer if needed
-            buffer.resize(offset + record_size, 0);
-        }
+        Self::ensure_buffer_bytes_len(&mut buffer, offset.saturating_add(record_size));
 
         // Create the record
-        let record_ptr = buffer[offset..].as_mut_ptr() as *mut Record<K, V>;
+        let record_ptr =
+            unsafe { Self::buffer_as_mut_ptr(&mut buffer).add(offset) } as *mut Record<K, V>;
         unsafe {
             // Initialize record info with previous address pointing to HybridLog
             let record_info = RecordInfo::new(
@@ -324,17 +393,14 @@ where
         let mut current = from_address;
 
         while current < to_address {
-            let offset = (current.control() as usize) % buffer.len();
-
-            if offset + Record::<K, V>::size() > buffer.len() {
-                break;
-            }
-
-            let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
+            let record = match self.record_at(&buffer, current) {
+                Some(record) => record,
+                None => break,
+            };
 
             let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
 
-            if rc_info.is_null() {
+            if record.header.is_null() {
                 break;
             }
 
@@ -361,14 +427,10 @@ where
             Ok(b) => b,
             Err(_) => return Address::INVALID,
         };
-
-        let offset = (rc_address.control() as usize) % buffer.len();
-
-        if offset + Record::<K, V>::size() > buffer.len() {
-            return Address::INVALID;
-        }
-
-        let record = unsafe { &*(buffer[offset..].as_ptr() as *const Record<K, V>) };
+        let record = match self.record_at(&buffer, rc_address) {
+            Some(record) => record,
+            None => return Address::INVALID,
+        };
 
         let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
         rc_info.get_previous_address()
@@ -381,18 +443,14 @@ where
         }
 
         let rc_address = address.readcache_address();
-        let buffer = match self.buffer.write() {
+        let mut buffer = match self.buffer.write() {
             Ok(b) => b,
             Err(_) => return Address::INVALID,
         };
-
-        let offset = (rc_address.control() as usize) % buffer.len();
-
-        if offset + Record::<K, V>::size() > buffer.len() {
-            return Address::INVALID;
-        }
-
-        let record = unsafe { &mut *(buffer[offset..].as_ptr() as *mut Record<K, V>) };
+        let record = match self.record_at_mut(&mut buffer, rc_address) {
+            Some(record) => record,
+            None => return Address::INVALID,
+        };
 
         // Check if key matches
         if unsafe { record.key() } == key {
@@ -409,9 +467,10 @@ where
             buffer.clear();
         }
 
-        self.tail_address.store(64, Ordering::Release);
-        self.safe_head_address.store(64, Ordering::Release);
-        self.head_address.store(64, Ordering::Release);
+        self.tail_address.store(START_ADDRESS, Ordering::Release);
+        self.safe_head_address
+            .store(START_ADDRESS, Ordering::Release);
+        self.head_address.store(START_ADDRESS, Ordering::Release);
         self.read_only_address.store(0, Ordering::Release);
         self.stats.reset();
     }

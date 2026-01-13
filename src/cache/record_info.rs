@@ -46,7 +46,7 @@ impl ReadCacheRecordInfo {
     /// Create from a base RecordInfo
     pub fn from_record_info(info: &RecordInfo, in_cold_hlog: bool) -> Self {
         Self {
-            version: 0,
+            version: info.checkpoint_version(),
             in_cold_hlog,
             invalid: info.is_invalid(),
             tombstone: info.is_tombstone(),

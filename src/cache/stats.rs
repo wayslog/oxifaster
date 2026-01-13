@@ -42,6 +42,15 @@ impl ReadCacheStats {
         }
     }
 
+    #[inline]
+    fn ratio(numerator: u64, denominator: u64) -> f64 {
+        if denominator == 0 {
+            0.0
+        } else {
+            numerator as f64 / denominator as f64
+        }
+    }
+
     /// Record a read call
     pub fn record_read(&self) {
         self.read_calls.fetch_add(1, Ordering::Relaxed);
@@ -101,11 +110,8 @@ impl ReadCacheStats {
 
     /// Get the hit rate (0.0 to 1.0)
     pub fn hit_rate(&self) -> f64 {
-        let calls = self.read_calls.load(Ordering::Relaxed);
-        if calls == 0 {
-            return 0.0;
-        }
-        self.read_hits.load(Ordering::Relaxed) as f64 / calls as f64
+        let calls = self.read_calls();
+        Self::ratio(self.read_hits(), calls)
     }
 
     /// Get the number of copy-to-tail calls
@@ -115,11 +121,9 @@ impl ReadCacheStats {
 
     /// Get the copy-to-tail success rate
     pub fn copy_to_tail_rate(&self) -> f64 {
-        let calls = self.copy_to_tail_calls.load(Ordering::Relaxed);
-        if calls == 0 {
-            return 0.0;
-        }
-        self.copy_to_tail_success.load(Ordering::Relaxed) as f64 / calls as f64
+        let calls = self.copy_to_tail_calls();
+        let success = self.copy_to_tail_success.load(Ordering::Relaxed);
+        Self::ratio(success, calls)
     }
 
     /// Get the number of insert calls
@@ -129,11 +133,9 @@ impl ReadCacheStats {
 
     /// Get the insert success rate
     pub fn insert_rate(&self) -> f64 {
-        let calls = self.insert_calls.load(Ordering::Relaxed);
-        if calls == 0 {
-            return 0.0;
-        }
-        self.insert_success.load(Ordering::Relaxed) as f64 / calls as f64
+        let calls = self.insert_calls();
+        let success = self.insert_success.load(Ordering::Relaxed);
+        Self::ratio(success, calls)
     }
 
     /// Get the number of evicted records
@@ -143,11 +145,9 @@ impl ReadCacheStats {
 
     /// Get the invalid record rate during eviction
     pub fn eviction_invalid_rate(&self) -> f64 {
-        let evicted = self.evicted_records.load(Ordering::Relaxed);
-        if evicted == 0 {
-            return 0.0;
-        }
-        self.evicted_invalid.load(Ordering::Relaxed) as f64 / evicted as f64
+        let evicted = self.evicted_records();
+        let invalid = self.evicted_invalid.load(Ordering::Relaxed);
+        Self::ratio(invalid, evicted)
     }
 
     /// Reset all statistics

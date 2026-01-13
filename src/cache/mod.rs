@@ -46,8 +46,9 @@
 //!
 //! // Cache statistics
 //! if let Some(stats) = store.read_cache_stats() {
-//!     println!("Cache hits: {}", stats.hits());
-//!     println!("Cache misses: {}", stats.misses());
+//!     println!("Cache hits: {}", stats.read_hits());
+//!     println!("Cache misses: {}", stats.read_misses());
+//!     println!("Cache hit rate: {:.2}%", stats.hit_rate() * 100.0);
 //! }
 //! ```
 
