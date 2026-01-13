@@ -4,13 +4,31 @@
 //! metadata structures, enabling persistence to disk.
 
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::address::Address;
 use crate::checkpoint::CheckpointToken;
+
+fn invalid_data(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value).map_err(invalid_data)?;
+    writer.flush()
+}
+
+fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    serde_json::from_reader(reader).map_err(invalid_data)
+}
 
 /// Serializable version of IndexMetadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,44 +269,39 @@ impl super::IndexMetadata {
     /// Serialize to JSON bytes
     pub fn serialize_json(&self) -> io::Result<Vec<u8>> {
         let serializable = SerializableIndexMetadata::from_metadata(self);
-        serde_json::to_vec_pretty(&serializable)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::to_vec_pretty(&serializable).map_err(invalid_data)
     }
 
     /// Deserialize from JSON bytes
     pub fn deserialize_json(data: &[u8]) -> io::Result<Self> {
-        let serializable: SerializableIndexMetadata = serde_json::from_slice(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let serializable: SerializableIndexMetadata =
+            serde_json::from_slice(data).map_err(invalid_data)?;
         serializable.to_metadata()
     }
 
     /// Serialize to binary format (bincode)
     pub fn serialize_binary(&self) -> io::Result<Vec<u8>> {
         let serializable = SerializableIndexMetadata::from_metadata(self);
-        bincode::serialize(&serializable).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        bincode::serialize(&serializable).map_err(invalid_data)
     }
 
     /// Deserialize from binary format
     pub fn deserialize_binary(data: &[u8]) -> io::Result<Self> {
-        let serializable: SerializableIndexMetadata = bincode::deserialize(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let serializable: SerializableIndexMetadata =
+            bincode::deserialize(data).map_err(invalid_data)?;
         serializable.to_metadata()
     }
 
     /// Write to file (JSON format)
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let data = self.serialize_json()?;
-        let mut file = BufWriter::new(File::create(path)?);
-        file.write_all(&data)?;
-        file.flush()
+        let serializable = SerializableIndexMetadata::from_metadata(self);
+        write_json_pretty_to_file(&serializable, path)
     }
 
     /// Read from file (JSON format)
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
-        let mut file = BufReader::new(File::open(path)?);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Self::deserialize_json(&data)
+        let serializable: SerializableIndexMetadata = read_json_from_file(path)?;
+        serializable.to_metadata()
     }
 }
 
@@ -298,44 +311,39 @@ impl super::LogMetadata {
     /// Serialize to JSON bytes
     pub fn serialize_json(&self) -> io::Result<Vec<u8>> {
         let serializable = SerializableLogMetadata::from_metadata(self);
-        serde_json::to_vec_pretty(&serializable)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::to_vec_pretty(&serializable).map_err(invalid_data)
     }
 
     /// Deserialize from JSON bytes
     pub fn deserialize_json(data: &[u8]) -> io::Result<Self> {
-        let serializable: SerializableLogMetadata = serde_json::from_slice(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let serializable: SerializableLogMetadata =
+            serde_json::from_slice(data).map_err(invalid_data)?;
         serializable.to_metadata()
     }
 
     /// Serialize to binary format (bincode)
     pub fn serialize_binary(&self) -> io::Result<Vec<u8>> {
         let serializable = SerializableLogMetadata::from_metadata(self);
-        bincode::serialize(&serializable).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        bincode::serialize(&serializable).map_err(invalid_data)
     }
 
     /// Deserialize from binary format
     pub fn deserialize_binary(data: &[u8]) -> io::Result<Self> {
-        let serializable: SerializableLogMetadata = bincode::deserialize(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let serializable: SerializableLogMetadata =
+            bincode::deserialize(data).map_err(invalid_data)?;
         serializable.to_metadata()
     }
 
     /// Write to file (JSON format)
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let data = self.serialize_json()?;
-        let mut file = BufWriter::new(File::create(path)?);
-        file.write_all(&data)?;
-        file.flush()
+        let serializable = SerializableLogMetadata::from_metadata(self);
+        write_json_pretty_to_file(&serializable, path)
     }
 
     /// Read from file (JSON format)
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
-        let mut file = BufReader::new(File::open(path)?);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Self::deserialize_json(&data)
+        let serializable: SerializableLogMetadata = read_json_from_file(path)?;
+        serializable.to_metadata()
     }
 }
 
@@ -425,28 +433,22 @@ impl DeltaLogMetadata {
 
     /// Serialize to JSON bytes
     pub fn serialize_json(&self) -> io::Result<Vec<u8>> {
-        serde_json::to_vec_pretty(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::to_vec_pretty(self).map_err(invalid_data)
     }
 
     /// Deserialize from JSON bytes
     pub fn deserialize_json(data: &[u8]) -> io::Result<Self> {
-        serde_json::from_slice(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_slice(data).map_err(invalid_data)
     }
 
     /// Write to file (JSON format)
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let data = self.serialize_json()?;
-        let mut file = BufWriter::new(File::create(path)?);
-        file.write_all(&data)?;
-        file.flush()
+        write_json_pretty_to_file(self, path)
     }
 
     /// Read from file (JSON format)
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
-        let mut file = BufReader::new(File::open(path)?);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Self::deserialize_json(&data)
+        read_json_from_file(path)
     }
 
     /// Get the token as UUID
@@ -523,28 +525,22 @@ impl IncrementalCheckpointChain {
 
     /// Serialize to JSON bytes
     pub fn serialize_json(&self) -> io::Result<Vec<u8>> {
-        serde_json::to_vec_pretty(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::to_vec_pretty(self).map_err(invalid_data)
     }
 
     /// Deserialize from JSON bytes
     pub fn deserialize_json(data: &[u8]) -> io::Result<Self> {
-        serde_json::from_slice(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_slice(data).map_err(invalid_data)
     }
 
     /// Write to file (JSON format)
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        let data = self.serialize_json()?;
-        let mut file = BufWriter::new(File::create(path)?);
-        file.write_all(&data)?;
-        file.flush()
+        write_json_pretty_to_file(self, path)
     }
 
     /// Read from file (JSON format)
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
-        let mut file = BufReader::new(File::open(path)?);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Self::deserialize_json(&data)
+        read_json_from_file(path)
     }
 }
 

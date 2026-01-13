@@ -124,11 +124,9 @@ impl CheckpointInfo {
 
     /// Check if this is an incremental checkpoint
     pub fn is_incremental(&self) -> bool {
-        if let Some(ref log_meta) = self.log_metadata {
-            log_meta.is_incremental
-        } else {
-            false
-        }
+        self.log_metadata
+            .as_ref()
+            .is_some_and(|log_meta| log_meta.is_incremental)
     }
 
     /// Get the base snapshot token for incremental checkpoints
@@ -160,10 +158,10 @@ impl CheckpointInfo {
 
     /// Get session states from the checkpoint
     pub fn session_states(&self) -> &[SessionState] {
-        self.log_metadata
-            .as_ref()
-            .map(|m| m.session_states.as_slice())
-            .unwrap_or(&[])
+        match self.log_metadata.as_ref() {
+            Some(log_meta) => log_meta.session_states.as_slice(),
+            None => &[],
+        }
     }
 
     /// Resolve the base checkpoint directory for incremental checkpoints
@@ -368,13 +366,7 @@ impl Default for RecoveryState {
 /// Scans the base directory for valid checkpoint subdirectories
 /// and returns the one with the highest version number.
 pub fn find_latest_checkpoint(base_dir: &Path) -> Option<CheckpointInfo> {
-    let checkpoints = list_checkpoints(base_dir);
-
-    // Find checkpoint with highest version
-    checkpoints
-        .into_iter()
-        .filter(|c| c.is_valid())
-        .max_by_key(|c| c.version().unwrap_or(0))
+    list_checkpoints(base_dir).into_iter().next()
 }
 
 /// List all checkpoints in a directory
@@ -383,8 +375,7 @@ pub fn find_latest_checkpoint(base_dir: &Path) -> Option<CheckpointInfo> {
 /// (those with UUID names that contain valid checkpoint files).
 pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
     let mut checkpoints = Vec::new();
-
-    if !base_dir.exists() {
+    if !base_dir.is_dir() {
         return checkpoints;
     }
 
@@ -419,11 +410,8 @@ pub fn list_checkpoints(base_dir: &Path) -> Vec<CheckpointInfo> {
     checkpoints
 }
 
-/// Validate that a checkpoint directory contains all required files
-pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
-    let required_files = ["index.meta", "index.dat", "log.meta", "log.snapshot"];
-
-    for file in &required_files {
+fn validate_required_files(checkpoint_dir: &Path, required_files: &[&str]) -> io::Result<()> {
+    for file in required_files {
         let path = checkpoint_dir.join(file);
         if !path.exists() {
             return Err(io::Error::new(
@@ -436,19 +424,17 @@ pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Validate that a checkpoint directory contains all required files
+pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
+    validate_required_files(
+        checkpoint_dir,
+        &["index.meta", "index.dat", "log.meta", "log.snapshot"],
+    )
+}
+
 /// Validate that a checkpoint directory contains all required files for an incremental checkpoint
 pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
-    let required_files = ["index.meta", "index.dat", "log.meta"];
-
-    for file in &required_files {
-        let path = checkpoint_dir.join(file);
-        if !path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Missing checkpoint file: {file}"),
-            ));
-        }
-    }
+    validate_required_files(checkpoint_dir, &["index.meta", "index.dat", "log.meta"])?;
 
     // Check for delta log
     let delta_path = delta_log_path(checkpoint_dir, 0);

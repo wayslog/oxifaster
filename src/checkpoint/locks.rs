@@ -17,12 +17,10 @@
 //!
 //! This mutual exclusion prevents data races during the checkpoint process.
 
+use std::iter;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::index::KeyHash;
-
-/// Cache line size for alignment
-const CACHE_LINE_BYTES: usize = 64;
 
 /// A checkpoint lock that tracks old and new version lock counts.
 ///
@@ -262,16 +260,10 @@ impl CheckpointLocks {
 
         self.size = size;
 
-        if size > 0 {
-            // Allocate cache-line aligned locks
-            let mut locks = Vec::with_capacity(size as usize);
-            for _ in 0..size {
-                locks.push(AtomicCheckpointLock::new());
-            }
-            self.locks = locks;
-        } else {
-            self.locks = Vec::new();
-        }
+        let size_usize = size as usize;
+        self.locks = iter::repeat_with(AtomicCheckpointLock::new)
+            .take(size_usize)
+            .collect();
     }
 
     /// Create and initialize a checkpoint locks table with the given size.
@@ -364,14 +356,8 @@ impl<'a> CheckpointLockGuard<'a> {
     /// The guard does not acquire any locks upon creation - you must
     /// call `try_lock_old()` or `try_lock_new()` to acquire locks.
     pub fn new(locks: &'a CheckpointLocks, hash: KeyHash) -> Self {
-        let lock = if locks.size() > 0 {
-            Some(locks.get_lock(hash))
-        } else {
-            None
-        };
-
         Self {
-            lock,
+            lock: (!locks.is_empty()).then(|| locks.get_lock(hash)),
             locked_old: false,
             locked_new: false,
         }
@@ -449,8 +435,8 @@ impl<'a> CheckpointLockGuard<'a> {
         if self.locked_old {
             if let Some(lock) = self.lock {
                 lock.unlock_old();
-                self.locked_old = false;
             }
+            self.locked_old = false;
         }
     }
 
@@ -459,8 +445,8 @@ impl<'a> CheckpointLockGuard<'a> {
         if self.locked_new {
             if let Some(lock) = self.lock {
                 lock.unlock_new();
-                self.locked_new = false;
             }
+            self.locked_new = false;
         }
     }
 }

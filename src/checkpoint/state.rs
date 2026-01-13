@@ -37,23 +37,7 @@ pub struct IndexMetadata {
 }
 
 impl IndexMetadata {
-    /// Create a new index metadata
-    pub fn new() -> Self {
-        Self {
-            token: Uuid::new_v4(),
-            version: 0,
-            table_size: 0,
-            num_ht_bytes: 0,
-            num_ofb_bytes: 0,
-            num_buckets: 0,
-            num_entries: 0,
-            log_begin_address: Address::INVALID,
-            checkpoint_start_address: Address::INVALID,
-        }
-    }
-
-    /// Initialize with a specific token
-    pub fn with_token(token: CheckpointToken) -> Self {
+    fn with_token_and_defaults(token: CheckpointToken) -> Self {
         Self {
             token,
             version: 0,
@@ -65,6 +49,16 @@ impl IndexMetadata {
             log_begin_address: Address::INVALID,
             checkpoint_start_address: Address::INVALID,
         }
+    }
+
+    /// Create a new index metadata
+    pub fn new() -> Self {
+        Self::with_token_and_defaults(Uuid::new_v4())
+    }
+
+    /// Initialize with a specific token
+    pub fn with_token(token: CheckpointToken) -> Self {
+        Self::with_token_and_defaults(token)
     }
 
     /// Initialize the metadata with checkpoint parameters
@@ -159,32 +153,7 @@ pub struct LogMetadata {
 }
 
 impl LogMetadata {
-    /// Create a new log metadata
-    pub fn new() -> Self {
-        Self {
-            token: Uuid::new_v4(),
-            use_snapshot_file: false,
-            version: 0,
-            num_threads: 0,
-            begin_address: Address::INVALID,
-            final_address: Address::INVALID,
-            flushed_until_address: Address::INVALID,
-            use_object_log: false,
-            session_states: Vec::new(),
-            // Incremental checkpoint fields
-            delta_tail_address: -1,
-            prev_snapshot_token: None,
-            is_incremental: false,
-            snapshot_final_address: Address::INVALID,
-            start_logical_address: Address::INVALID,
-            head_address: Address::INVALID,
-            next_version: 0,
-            snapshot_start_flushed_address: Address::INVALID,
-        }
-    }
-
-    /// Initialize with a specific token
-    pub fn with_token(token: CheckpointToken) -> Self {
+    fn with_token_and_defaults(token: CheckpointToken) -> Self {
         Self {
             token,
             use_snapshot_file: false,
@@ -205,6 +174,16 @@ impl LogMetadata {
             next_version: 0,
             snapshot_start_flushed_address: Address::INVALID,
         }
+    }
+
+    /// Create a new log metadata
+    pub fn new() -> Self {
+        Self::with_token_and_defaults(Uuid::new_v4())
+    }
+
+    /// Initialize with a specific token
+    pub fn with_token(token: CheckpointToken) -> Self {
+        Self::with_token_and_defaults(token)
     }
 
     /// Initialize the metadata with checkpoint parameters
