@@ -176,10 +176,12 @@ pub mod address;
 pub mod allocator;
 pub mod cache;
 pub mod checkpoint;
+pub mod codec;
 pub mod compaction;
 pub mod delta_log;
 pub mod device;
 pub mod epoch;
+#[cfg(feature = "f2")]
 pub mod f2;
 pub mod index;
 pub mod log;
@@ -193,7 +195,7 @@ pub mod varlen;
 
 // Re-exports for convenience
 pub use address::{Address, AtomicAddress};
-pub use record::{Record, RecordInfo};
+pub use record::RecordInfo;
 pub use status::{OperationStatus, Status};
 
 /// Constants used throughout the library
@@ -224,7 +226,7 @@ pub mod size {
 /// Prelude module for common imports
 pub mod prelude {
     pub use crate::address::{Address, AtomicAddress};
-    pub use crate::record::{Record, RecordInfo};
+    pub use crate::record::RecordInfo;
     pub use crate::status::{OperationStatus, Status};
     pub use crate::store::FasterKv;
 }

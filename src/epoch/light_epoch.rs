@@ -5,6 +5,7 @@
 
 use std::cell::{RefCell, UnsafeCell};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -359,10 +360,23 @@ impl LightEpoch {
         epoch
     }
 
+    /// Reentrant protection with draining - supports nested protection calls.
+    #[inline]
+    pub fn reentrant_protect_and_drain(&self, thread_id: usize) -> u64 {
+        let epoch = self.reentrant_protect(thread_id);
+        if self.drain_count.load(Ordering::Acquire) > 0 {
+            self.drain(epoch);
+        }
+        epoch
+    }
+
     /// Reentrant protection - supports nested protection calls
     #[inline]
     pub fn reentrant_protect(&self, thread_id: usize) -> u64 {
         debug_assert!(thread_id < MAX_THREADS);
+        // SAFETY: `thread_id` is owned by the calling thread (assigned via the thread-local ID
+        // allocator). Only the owning thread mutates its `Entry`'s reentrancy counter and local
+        // epoch, while other threads may read the published epoch concurrently.
         let entry = &self.table[thread_id];
 
         // Always increment the reentrant counter to track nesting depth
@@ -580,15 +594,15 @@ unsafe impl Send for LightEpoch {}
 unsafe impl Sync for LightEpoch {}
 
 /// RAII guard for epoch protection
-pub struct EpochGuard<'a> {
-    epoch: &'a LightEpoch,
+pub struct EpochGuard {
+    epoch: Arc<LightEpoch>,
     thread_id: usize,
 }
 
-impl<'a> EpochGuard<'a> {
+impl EpochGuard {
     /// Create a new epoch guard
-    pub fn new(epoch: &'a LightEpoch, thread_id: usize) -> Self {
-        epoch.protect(thread_id);
+    pub fn new(epoch: Arc<LightEpoch>, thread_id: usize) -> Self {
+        epoch.reentrant_protect(thread_id);
         Self { epoch, thread_id }
     }
 
@@ -598,9 +612,9 @@ impl<'a> EpochGuard<'a> {
     }
 }
 
-impl<'a> Drop for EpochGuard<'a> {
+impl Drop for EpochGuard {
     fn drop(&mut self) {
-        self.epoch.unprotect(self.thread_id);
+        self.epoch.reentrant_unprotect(self.thread_id);
     }
 }
 
@@ -675,10 +689,10 @@ mod tests {
 
     #[test]
     fn test_epoch_guard() {
-        let epoch = LightEpoch::new();
+        let epoch = Arc::new(LightEpoch::new());
 
         {
-            let _guard = EpochGuard::new(&epoch, 0);
+            let _guard = EpochGuard::new(epoch.clone(), 0);
             assert!(epoch.is_protected(0));
         }
 

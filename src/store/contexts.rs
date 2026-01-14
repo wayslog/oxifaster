@@ -3,11 +3,11 @@
 //! This module defines the context traits and types for FASTER operations.
 
 use crate::address::Address;
-use crate::record::{Key, Value};
+use crate::codec::{PersistKey, PersistValue};
 use crate::status::{OperationStatus, OperationType};
 
 /// Context trait for Read operations
-pub trait ReadContext<K: Key, V: Value>: Send + Sync {
+pub trait ReadContext<K: PersistKey, V: PersistValue>: Send + Sync {
     /// Get the key to read
     fn key(&self) -> &K;
 
@@ -21,7 +21,7 @@ pub trait ReadContext<K: Key, V: Value>: Send + Sync {
 }
 
 /// Context trait for Upsert operations
-pub trait UpsertContext<K: Key, V: Value>: Send + Sync {
+pub trait UpsertContext<K: PersistKey, V: PersistValue>: Send + Sync {
     /// Get the key to upsert
     fn key(&self) -> &K;
 
@@ -35,7 +35,7 @@ pub trait UpsertContext<K: Key, V: Value>: Send + Sync {
 }
 
 /// Context trait for RMW (Read-Modify-Write) operations
-pub trait RmwContext<K: Key, V: Value>: Send + Sync {
+pub trait RmwContext<K: PersistKey, V: PersistValue>: Send + Sync {
     /// Get the key
     fn key(&self) -> &K;
 
@@ -64,7 +64,7 @@ pub trait RmwContext<K: Key, V: Value>: Send + Sync {
 }
 
 /// Context trait for Delete operations
-pub trait DeleteContext<K: Key, V: Value>: Send + Sync {
+pub trait DeleteContext<K: PersistKey, V: PersistValue>: Send + Sync {
     /// Get the key to delete
     fn key(&self) -> &K;
 
@@ -109,14 +109,14 @@ impl Default for PendingContext {
 }
 
 /// Simple read context implementation
-pub struct SimpleReadContext<K: Key, V: Value> {
+pub struct SimpleReadContext<K: PersistKey, V: PersistValue> {
     /// The key to read
     pub key: K,
     /// The value found (if any)
     pub value: Option<V>,
 }
 
-impl<K: Key, V: Value> SimpleReadContext<K, V> {
+impl<K: PersistKey, V: PersistValue> SimpleReadContext<K, V> {
     /// Create a new simple read context
     pub fn new(key: K) -> Self {
         Self { key, value: None }
@@ -128,7 +128,7 @@ impl<K: Key, V: Value> SimpleReadContext<K, V> {
     }
 }
 
-impl<K: Key, V: Value> ReadContext<K, V> for SimpleReadContext<K, V> {
+impl<K: PersistKey, V: PersistValue> ReadContext<K, V> for SimpleReadContext<K, V> {
     fn key(&self) -> &K {
         &self.key
     }
@@ -139,21 +139,21 @@ impl<K: Key, V: Value> ReadContext<K, V> for SimpleReadContext<K, V> {
 }
 
 /// Simple upsert context implementation
-pub struct SimpleUpsertContext<K: Key, V: Value> {
+pub struct SimpleUpsertContext<K: PersistKey, V: PersistValue> {
     /// The key to upsert
     pub key: K,
     /// The value to upsert
     pub value: V,
 }
 
-impl<K: Key, V: Value> SimpleUpsertContext<K, V> {
+impl<K: PersistKey, V: PersistValue> SimpleUpsertContext<K, V> {
     /// Create a new simple upsert context
     pub fn new(key: K, value: V) -> Self {
         Self { key, value }
     }
 }
 
-impl<K: Key, V: Value> UpsertContext<K, V> for SimpleUpsertContext<K, V> {
+impl<K: PersistKey, V: PersistValue> UpsertContext<K, V> for SimpleUpsertContext<K, V> {
     fn key(&self) -> &K {
         &self.key
     }
@@ -164,40 +164,40 @@ impl<K: Key, V: Value> UpsertContext<K, V> for SimpleUpsertContext<K, V> {
 }
 
 /// Simple delete context implementation
-pub struct SimpleDeleteContext<K: Key> {
+pub struct SimpleDeleteContext<K: PersistKey> {
     /// The key to delete
     pub key: K,
 }
 
-impl<K: Key> SimpleDeleteContext<K> {
+impl<K: PersistKey> SimpleDeleteContext<K> {
     /// Create a new simple delete context
     pub fn new(key: K) -> Self {
         Self { key }
     }
 }
 
-impl<K: Key, V: Value> DeleteContext<K, V> for SimpleDeleteContext<K> {
+impl<K: PersistKey, V: PersistValue> DeleteContext<K, V> for SimpleDeleteContext<K> {
     fn key(&self) -> &K {
         &self.key
     }
 }
 
 /// RMW context for incrementing numeric values
-pub struct IncrementContext<K: Key> {
+pub struct IncrementContext<K: PersistKey> {
     /// The key
     pub key: K,
     /// Amount to increment by
     pub delta: i64,
 }
 
-impl<K: Key> IncrementContext<K> {
+impl<K: PersistKey> IncrementContext<K> {
     /// Create a new increment context
     pub fn new(key: K, delta: i64) -> Self {
         Self { key, delta }
     }
 }
 
-impl<K: Key> RmwContext<K, i64> for IncrementContext<K> {
+impl<K: PersistKey> RmwContext<K, i64> for IncrementContext<K> {
     fn key(&self) -> &K {
         &self.key
     }

@@ -20,6 +20,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
+use crate::status::Status;
+
 /// Bit mask for unserialized flag (bit 31)
 const UNSERIALIZED_BIT_MASK: u32 = 1 << 31;
 
@@ -37,6 +39,124 @@ pub const SPAN_BYTE_HEADER_SIZE: usize = 4;
 
 /// SpanByte metadata size
 pub const SPAN_BYTE_METADATA_SIZE: usize = 8;
+
+/// Zero-copy view of a serialized SpanByte buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpanByteView<'a> {
+    header: u32,
+    metadata: Option<u64>,
+    payload: &'a [u8],
+}
+
+impl<'a> SpanByteView<'a> {
+    /// Compute the total serialized size (header + metadata + payload).
+    #[inline]
+    pub const fn total_size(payload_len: usize, has_metadata: bool) -> usize {
+        SPAN_BYTE_HEADER_SIZE
+            + if has_metadata {
+                SPAN_BYTE_METADATA_SIZE
+            } else {
+                0
+            }
+            + payload_len
+    }
+
+    /// Parse a serialized SpanByte buffer.
+    ///
+    /// Returns `None` if the buffer is too small or malformed.
+    pub fn parse(buffer: &'a [u8]) -> Option<Self> {
+        if buffer.len() < SPAN_BYTE_HEADER_SIZE {
+            return None;
+        }
+
+        let header = u32::from_le_bytes(buffer[0..4].try_into().ok()?);
+        // Reject "unserialized" SpanBytes for persistence: they would point outside the log.
+        if (header & UNSERIALIZED_BIT_MASK) != 0 {
+            return None;
+        }
+
+        let payload_len = (header & !HEADER_MASK) as usize;
+        let has_metadata = (header & EXTRA_METADATA_BIT_MASK) != 0;
+        let metadata_size = if has_metadata {
+            SPAN_BYTE_METADATA_SIZE
+        } else {
+            0
+        };
+        let total = SPAN_BYTE_HEADER_SIZE + metadata_size + payload_len;
+        if buffer.len() < total {
+            return None;
+        }
+
+        let mut offset = SPAN_BYTE_HEADER_SIZE;
+        let metadata = if has_metadata {
+            let meta = u64::from_le_bytes(buffer[offset..offset + 8].try_into().ok()?);
+            offset += SPAN_BYTE_METADATA_SIZE;
+            Some(meta)
+        } else {
+            None
+        };
+
+        let payload = &buffer[offset..offset + payload_len];
+        Some(Self {
+            header,
+            metadata,
+            payload,
+        })
+    }
+
+    /// Return the serialized header (including flags).
+    #[inline]
+    pub fn header(&self) -> u32 {
+        self.header
+    }
+
+    /// Return the optional metadata, if present.
+    #[inline]
+    pub fn metadata(&self) -> Option<u64> {
+        self.metadata
+    }
+
+    /// Return the payload bytes (no header, no metadata).
+    #[inline]
+    pub fn payload(&self) -> &'a [u8] {
+        self.payload
+    }
+
+    /// Write a serialized SpanByte header (and optional metadata) into `dst`.
+    ///
+    /// Returns a mutable slice pointing to where the payload should be written.
+    pub fn write_header(
+        dst: &mut [u8],
+        payload_len: usize,
+        metadata: Option<u64>,
+    ) -> Result<(&mut [u8], usize), Status> {
+        if payload_len > MAX_SPAN_BYTE_LENGTH as usize {
+            return Err(Status::ResourceExhausted);
+        }
+
+        let has_metadata = metadata.is_some();
+        let total = Self::total_size(payload_len, has_metadata);
+        if dst.len() != total {
+            return Err(Status::InvalidArgument);
+        }
+
+        let mut header = payload_len as u32;
+        if has_metadata {
+            header |= EXTRA_METADATA_BIT_MASK;
+        }
+        // Ensure "serialized" (UNSERIALIZED bit cleared).
+        header &= !UNSERIALIZED_BIT_MASK;
+
+        dst[0..4].copy_from_slice(&header.to_le_bytes());
+        let mut offset = SPAN_BYTE_HEADER_SIZE;
+        if let Some(meta) = metadata {
+            dst[offset..offset + 8].copy_from_slice(&meta.to_le_bytes());
+            offset += SPAN_BYTE_METADATA_SIZE;
+        }
+
+        Ok((&mut dst[offset..offset + payload_len], total))
+    }
+}
 
 /// A variable-length byte array for use as key or value in FASTER.
 ///

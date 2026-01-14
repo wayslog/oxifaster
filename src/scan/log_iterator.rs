@@ -8,12 +8,14 @@
 //! - Concurrent: Multiple threads can scan different pages simultaneously
 
 use std::io;
-use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::address::Address;
+use crate::codec::{PersistKey, PersistValue};
 use crate::device::SyncStorageDevice;
-use crate::record::{Key, Record, Value};
+use crate::record::RecordInfo;
+use crate::store::record_format;
+use crate::store::RecordView;
 use crate::utility::AlignedBuffer;
 
 /// Status of a log page buffer
@@ -138,11 +140,14 @@ impl LogPage {
 
     /// Get the next record from this page
     ///
-    /// Returns the record and its address, or None if no more records.
-    pub fn get_next<K, V>(&mut self) -> Option<(Address, NonNull<Record<K, V>>)>
+    /// Returns a zero-copy record view and its address, or None if no more records.
+    ///
+    /// The returned `RecordView` borrows from the page buffer; it is only valid until the next
+    /// `get_next_view` call or until the page buffer is reused.
+    pub fn get_next_view<'a, K, V>(&'a mut self) -> Option<(Address, RecordView<'a>)>
     where
-        K: Key,
-        V: Value,
+        K: PersistKey,
+        V: PersistValue,
     {
         if self.status != LogPageStatus::Ready {
             return None;
@@ -159,27 +164,97 @@ impl LogPage {
             return None;
         }
 
-        // Get record at current offset
-        let ptr = unsafe { slice.as_ptr().add(self.current_offset as usize) };
-        let record_ptr = ptr as *const Record<K, V>;
-        let record = unsafe { &*record_ptr };
+        const U32_BYTES: usize = std::mem::size_of::<u32>();
+        const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
+        let record_info_size = std::mem::size_of::<RecordInfo>();
+        let varlen_header_size = record_info_size + VARLEN_LENGTHS_SIZE;
 
-        // Check for null/invalid record (indicates end of valid data)
-        if record.header.is_null() {
-            self.current_offset = self.until_offset; // Mark as exhausted
-            return None;
+        while self.current_offset < self.until_offset {
+            // Get record at current offset.
+            let offset = self.current_offset as usize;
+            let remaining = (self.until_offset as usize).saturating_sub(offset);
+            if remaining < record_info_size {
+                self.current_offset = self.until_offset;
+                return None;
+            }
+
+            let control = u64::from_le_bytes(
+                slice
+                    .get(offset..offset + record_info_size)?
+                    .try_into()
+                    .ok()?,
+            );
+
+            // Check for null record (indicates end of valid data).
+            if control == 0 {
+                self.current_offset = self.until_offset; // Mark as exhausted
+                return None;
+            }
+
+            // Calculate record address.
+            let record_addr = Address::new(self.page_address.page(), self.current_offset);
+
+            let info = unsafe { record_format::record_info_at(slice.as_ptr().add(offset)) };
+            if info.is_invalid() {
+                // Invalid records indicate an in-progress append. Skip them without decoding
+                // varlen payloads. For varlen records we only skip if the length header is
+                // well-formed and fits within this page buffer; otherwise treat as end-of-data.
+                let alloc_len = if record_format::is_fixed_record::<K, V>() {
+                    record_format::fixed_alloc_len::<K, V>()
+                } else {
+                    if remaining < varlen_header_size {
+                        self.current_offset = self.until_offset;
+                        return None;
+                    }
+
+                    let len_bytes =
+                        slice.get(offset + record_info_size..offset + varlen_header_size)?;
+                    let key_len =
+                        u32::from_le_bytes(len_bytes[0..U32_BYTES].try_into().ok()?) as usize;
+                    let value_len = u32::from_le_bytes(
+                        len_bytes[U32_BYTES..VARLEN_LENGTHS_SIZE].try_into().ok()?,
+                    ) as usize;
+
+                    let total_disk_len = record_format::varlen_disk_len(key_len, value_len);
+                    if total_disk_len > remaining {
+                        self.current_offset = self.until_offset;
+                        return None;
+                    }
+
+                    record_format::varlen_alloc_len(key_len, value_len)
+                };
+
+                self.current_offset = self.current_offset.saturating_add(alloc_len as u32);
+                continue;
+            }
+
+            let view = match unsafe {
+                record_format::record_view_from_memory::<K, V>(
+                    record_addr,
+                    slice.as_ptr().add(offset),
+                    remaining,
+                )
+            } {
+                Ok(v) => v,
+                Err(_) => {
+                    // Treat corruption as end-of-data for this page to avoid spinning.
+                    self.current_offset = self.until_offset;
+                    return None;
+                }
+            };
+
+            // Advance to next record.
+            let record_alloc_len = if record_format::is_fixed_record::<K, V>() {
+                record_format::fixed_alloc_len::<K, V>()
+            } else {
+                record_format::varlen_alloc_len(view.key_bytes().len(), view.value_len())
+            };
+            self.current_offset = self.current_offset.saturating_add(record_alloc_len as u32);
+
+            return Some((record_addr, view));
         }
 
-        // Calculate record address
-        let record_addr = Address::new(self.page_address.page(), self.current_offset);
-
-        // Advance to next record
-        let record_size = Record::<K, V>::size();
-        self.current_offset += record_size as u32;
-
-        Some((record_addr, unsafe {
-            NonNull::new_unchecked(ptr as *mut _)
-        }))
+        None
     }
 
     /// Check if there are more records to read
@@ -245,8 +320,8 @@ impl LogPageIterator {
 /// in a range of the log. It handles page boundaries automatically.
 pub struct LogScanIterator<K, V, D = ()>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Page iterator
     page_iter: LogPageIterator,
@@ -266,8 +341,8 @@ where
 
 impl<K, V> LogScanIterator<K, V, ()>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Create a new log scan iterator without a device (memory-only mode)
     pub fn new(range: ScanRange, page_size: usize) -> Self {
@@ -312,8 +387,8 @@ where
     }
 
     /// Get the next record from the current page
-    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
-        let result = self.current_page.get_next::<K, V>();
+    pub fn next_record(&mut self) -> Option<(Address, RecordView<'_>)> {
+        let result = self.current_page.get_next_view::<K, V>();
         if result.is_some() {
             self.records_scanned += 1;
         }
@@ -343,8 +418,8 @@ where
 
 impl<K, V, D> LogScanIterator<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: SyncStorageDevice,
 {
     /// Create a new log scan iterator with a device for disk I/O
@@ -390,8 +465,8 @@ where
     }
 
     /// Get the next record from the current page
-    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
-        let result = self.current_page.get_next::<K, V>();
+    pub fn next_record(&mut self) -> Option<(Address, RecordView<'_>)> {
+        let result = self.current_page.get_next_view::<K, V>();
         if result.is_some() {
             self.records_scanned += 1;
         }
@@ -475,7 +550,7 @@ where
     /// * `Err(io::Error)` - If an I/O error occurred
     pub fn scan_all<F>(&mut self, mut callback: F) -> io::Result<u64>
     where
-        F: FnMut(Address, &Record<K, V>) -> bool,
+        F: FnMut(Address, RecordView<'_>) -> bool,
     {
         let mut processed = 0u64;
 
@@ -492,8 +567,7 @@ where
             self.load_page_from_device(page_addr.page(), start_addr, until)?;
 
             // Process all records in the page
-            while let Some((addr, record_ptr)) = self.next_record() {
-                let record = unsafe { record_ptr.as_ref() };
+            while let Some((addr, record)) = self.next_record() {
                 processed += 1;
 
                 // Call the user callback
@@ -522,8 +596,8 @@ where
 /// into the other buffer.
 pub struct DoubleBufferedLogIterator<K, V, D = ()>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Two page buffers for double buffering
     pages: [LogPage; 2],
@@ -547,8 +621,8 @@ where
 
 impl<K, V> DoubleBufferedLogIterator<K, V, ()>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Create a new double-buffered log iterator without a device
     pub fn new(range: ScanRange, page_size: usize) -> Self {
@@ -606,8 +680,8 @@ where
     }
 
     /// Get the next record from the current page
-    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
-        let result = self.pages[self.current_idx].get_next::<K, V>();
+    pub fn next_record(&mut self) -> Option<(Address, RecordView<'_>)> {
+        let result = self.pages[self.current_idx].get_next_view::<K, V>();
         if result.is_some() {
             self.records_scanned += 1;
         }
@@ -629,8 +703,8 @@ where
 
 impl<K, V, D> DoubleBufferedLogIterator<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: SyncStorageDevice,
 {
     /// Create a new double-buffered log iterator with a device
@@ -689,8 +763,8 @@ where
     }
 
     /// Get the next record from the current page
-    pub fn next_record(&mut self) -> Option<(Address, NonNull<Record<K, V>>)> {
-        let result = self.pages[self.current_idx].get_next::<K, V>();
+    pub fn next_record(&mut self) -> Option<(Address, RecordView<'_>)> {
+        let result = self.pages[self.current_idx].get_next_view::<K, V>();
         if result.is_some() {
             self.records_scanned += 1;
         }
@@ -817,7 +891,7 @@ where
     /// * `Err(io::Error)` - If an I/O error occurred
     pub fn scan_all<F>(&mut self, mut callback: F) -> io::Result<u64>
     where
-        F: FnMut(Address, &Record<K, V>) -> bool,
+        F: FnMut(Address, RecordView<'_>) -> bool,
     {
         let mut processed = 0u64;
 
@@ -841,8 +915,7 @@ where
 
         loop {
             // Process all records in the current page
-            while let Some((addr, record_ptr)) = self.next_record() {
-                let record = unsafe { record_ptr.as_ref() };
+            while let Some((addr, record)) = self.next_record() {
                 processed += 1;
 
                 if !callback(addr, record) {

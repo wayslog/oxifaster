@@ -20,18 +20,23 @@ use uuid::Uuid;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
+use crate::cache::ReadCacheRecordInfo;
 use crate::cache::{ReadCache, ReadCacheConfig};
 use crate::checkpoint::{CheckpointState, SessionState};
+use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::compaction::{CompactionConfig, Compactor};
 use crate::device::StorageDevice;
+use crate::epoch::EpochGuard;
 use crate::epoch::{get_thread_tag, try_get_thread_id, LightEpoch};
 use crate::index::{GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::RecordInfo;
 use crate::stats::StatsCollector;
 use crate::status::Status;
 use crate::store::pending_io::PendingIoManager;
 use crate::store::state_transitions::{AtomicSystemState, SystemState};
-use crate::store::{AsyncSession, Session, ThreadContext};
+use crate::store::{AsyncSession, RecordView, Session, ThreadContext};
+
+use super::record_format;
 
 /// Configuration for FasterKV
 #[derive(Debug, Clone)]
@@ -71,8 +76,10 @@ impl Default for FasterKvConfig {
 
 #[derive(Clone)]
 struct DiskReadResult<K, V> {
-    key: K,
+    /// Decoded key for the record. `None` means the record was marked invalid and should be skipped.
+    key: Option<K>,
     value: Option<V>,
+    previous_address: Address,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,6 +87,8 @@ struct PendingIoKey {
     thread_id: usize,
     thread_tag: u64,
 }
+
+type DiskReadCache<K, V> = HashMap<u64, Result<DiskReadResult<K, V>, Status>>;
 
 /// FasterKV - High-performance concurrent key-value store
 ///
@@ -94,8 +103,8 @@ struct PendingIoKey {
 /// - Session persistence for checkpoint/recovery
 pub struct FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Epoch protection
@@ -109,7 +118,7 @@ where
     /// the internal synchronization mechanisms of PersistentMemoryMalloc
     hlog: UnsafeCell<PersistentMemoryMalloc<D>>,
     /// Read cache for hot data
-    read_cache: Option<ReadCache<K, V>>,
+    read_cache: Option<Arc<dyn ReadCacheOps<K, V>>>,
     /// Storage device
     device: Arc<D>,
     /// Pending I/O manager (background I/O for the `Pending + complete_pending` read-back path).
@@ -119,7 +128,7 @@ where
     /// Convention: `read()` returns `Pending` when it hits a disk address. Once the background
     /// read completes, the parsed result is stored here; the caller calls `complete_pending()`
     /// and then retries `read()` to hit the cache.
-    disk_read_results: Mutex<HashMap<u64, DiskReadResult<K, V>>>,
+    disk_read_results: Mutex<DiskReadCache<K, V>>,
     /// Background I/O completion counter (aggregated by `thread_id` and consumed by sessions in
     /// `complete_pending()`).
     pending_io_completed: Mutex<HashMap<PendingIoKey, u32>>,
@@ -141,28 +150,84 @@ where
     _marker: PhantomData<(K, V)>,
 }
 
+trait ReadCacheOps<K, V>: Send + Sync {
+    fn read(&self, cache_address: Address, key: &K) -> Option<(V, ReadCacheRecordInfo)>;
+    fn try_insert(
+        &self,
+        key: &K,
+        value: &V,
+        previous_address: Address,
+        is_cold_log_record: bool,
+    ) -> Result<Address, Status>;
+    fn skip(&self, address: Address) -> Address;
+    fn invalidate(&self, address: Address, key: &K) -> Address;
+    fn stats(&self) -> &crate::cache::ReadCacheStats;
+    fn config(&self) -> &ReadCacheConfig;
+    fn clear(&self);
+}
+
+impl<K, V> ReadCacheOps<K, V> for ReadCache<K, V>
+where
+    K: PersistKey,
+    V: PersistValue,
+{
+    fn read(&self, cache_address: Address, key: &K) -> Option<(V, ReadCacheRecordInfo)> {
+        ReadCache::read(self, cache_address, key)
+    }
+
+    fn try_insert(
+        &self,
+        key: &K,
+        value: &V,
+        previous_address: Address,
+        is_cold_log_record: bool,
+    ) -> Result<Address, Status> {
+        ReadCache::try_insert(self, key, value, previous_address, is_cold_log_record)
+    }
+
+    fn skip(&self, address: Address) -> Address {
+        ReadCache::skip(self, address)
+    }
+
+    fn invalidate(&self, address: Address, key: &K) -> Address {
+        ReadCache::invalidate(self, address, key)
+    }
+
+    fn stats(&self) -> &crate::cache::ReadCacheStats {
+        ReadCache::stats(self)
+    }
+
+    fn config(&self) -> &ReadCacheConfig {
+        ReadCache::config(self)
+    }
+
+    fn clear(&self) {
+        ReadCache::clear(self)
+    }
+}
+
 // SAFETY: FasterKv uses epoch protection and internal synchronization
 // to ensure safe concurrent access to hlog
 unsafe impl<K, V, D> Send for FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice + Send + Sync,
 {
 }
 
 unsafe impl<K, V, D> Sync for FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice + Send + Sync,
 {
 }
 
 impl<K, V, D> FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Create a new FasterKV store
@@ -176,7 +241,7 @@ where
         device: D,
         compaction_config: CompactionConfig,
     ) -> Self {
-        Self::with_full_config(config, device, compaction_config, None)
+        Self::with_full_config_impl(config, device, compaction_config, None)
     }
 
     /// Create a new FasterKV store with read cache
@@ -185,20 +250,21 @@ where
         device: D,
         cache_config: ReadCacheConfig,
     ) -> Self {
-        Self::with_full_config(
+        let read_cache: Arc<dyn ReadCacheOps<K, V>> =
+            Arc::new(ReadCache::<K, V>::new(cache_config));
+        Self::with_full_config_impl(
             config,
             device,
             CompactionConfig::default(),
-            Some(cache_config),
+            Some(read_cache),
         )
     }
 
-    /// Create a new FasterKV store with full configuration
-    pub fn with_full_config(
+    fn with_full_config_impl(
         config: FasterKvConfig,
         device: D,
         compaction_config: CompactionConfig,
-        cache_config: Option<ReadCacheConfig>,
+        read_cache: Option<Arc<dyn ReadCacheOps<K, V>>>,
     ) -> Self {
         let device = Arc::new(device);
 
@@ -217,11 +283,8 @@ where
         // Initialize compactor
         let compactor = Compactor::with_config(compaction_config);
 
-        // Initialize read cache if configured
-        let read_cache = cache_config.map(ReadCache::new);
-
         // Pending I/O manager (dedicated thread, does not depend on an external Tokio runtime).
-        let pending_io = PendingIoManager::new(device.clone());
+        let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         Self {
             epoch,
@@ -246,6 +309,11 @@ where
     /// Get a reference to the epoch
     pub fn epoch(&self) -> &LightEpoch {
         &self.epoch
+    }
+
+    /// Get an `Arc` handle to the epoch (for constructing guards that outlive a store borrow).
+    pub fn epoch_arc(&self) -> Arc<LightEpoch> {
+        self.epoch.clone()
     }
 
     /// Get the current system state
@@ -459,7 +527,7 @@ where
     /// Synchronous read operation
     pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
         let start = Instant::now();
-        let hash = KeyHash::new(key.get_hash());
+        let hash = KeyHash::new(<K as PersistKey>::Codec::hash(key)?);
 
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
@@ -530,19 +598,26 @@ where
             if address < head_address {
                 // Prefer hitting the "disk read result cache" to avoid duplicate I/O submissions.
                 if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
-                    if result.key == *key {
-                        // The cache stores tombstone(None) or value(Some) after a read completes.
-                        if self.stats_collector.is_enabled() {
-                            self.stats_collector
-                                .store_stats
-                                .operations
-                                .record_read(result.value.is_some());
-                            self.stats_collector
-                                .store_stats
-                                .operations
-                                .record_latency(start.elapsed());
+                    match result {
+                        Ok(parsed) => {
+                            if parsed.key.as_ref() == Some(key) {
+                                // The cache stores tombstone(None) or value(Some) after a read completes.
+                                if self.stats_collector.is_enabled() {
+                                    self.stats_collector
+                                        .store_stats
+                                        .operations
+                                        .record_read(parsed.value.is_some());
+                                    self.stats_collector
+                                        .store_stats
+                                        .operations
+                                        .record_latency(start.elapsed());
+                                }
+                                return Ok(parsed.value);
+                            }
+                            address = parsed.previous_address;
+                            continue;
                         }
-                        return Ok(result.value);
+                        Err(status) => return Err(status),
                     }
                 }
 
@@ -551,13 +626,22 @@ where
                     self.stats_collector.store_stats.operations.record_pending();
                 }
                 // Record is on disk: submit an async read request and return Pending.
-                let record_len = Record::<K, V>::disk_size() as usize;
-                if self.pending_io.submit_read_bytes(
-                    ctx.thread_id,
-                    get_thread_tag(),
-                    address,
-                    record_len,
-                ) {
+                let submitted = if record_format::is_fixed_record::<K, V>() {
+                    self.pending_io.submit_read_bytes(
+                        ctx.thread_id,
+                        get_thread_tag(),
+                        address,
+                        record_format::fixed_disk_len::<K, V>(),
+                    )
+                } else {
+                    self.pending_io.submit_read_varlen_record(
+                        ctx.thread_id,
+                        get_thread_tag(),
+                        address,
+                    )
+                };
+
+                if submitted {
                     ctx.pending_count = ctx.pending_count.saturating_add(1);
                 }
                 return Err(Status::Pending);
@@ -568,13 +652,21 @@ where
             let record_ptr = unsafe { self.hlog().get(address) };
 
             if let Some(ptr) = record_ptr {
-                let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
+                let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+                if info.is_invalid() {
+                    address = info.previous_address();
+                    continue;
+                }
+                let page_size = unsafe { self.hlog().page_size() };
+                let limit = page_size.saturating_sub(address.offset() as usize);
+                let view: RecordView<'_> = unsafe {
+                    record_format::record_view_from_memory::<K, V>(address, ptr.as_ptr(), limit)?
+                };
 
                 // Check if this is our key
-                let record_key = unsafe { record.key() };
-                if record_key == key {
+                if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
                     // Check for tombstone
-                    if record.header.is_tombstone() {
+                    if view.is_tombstone() {
                         // Record miss (tombstone found)
                         if self.stats_collector.is_enabled() {
                             self.stats_collector
@@ -590,14 +682,15 @@ where
                     }
 
                     // Return value
-                    let value = unsafe { record.value() };
+                    let value_bytes = view.value_bytes().ok_or(Status::Corruption)?;
+                    let value = <V as PersistValue>::Codec::decode(value_bytes)?;
 
                     // If address is in read-only region, consider inserting into cache
                     // for future reads (only for cold data from read-only region)
                     let safe_read_only = unsafe { self.hlog().get_safe_read_only_address() };
                     if address < safe_read_only && self.read_cache.is_some() {
                         // Insert into read cache for future reads
-                        let _ = self.try_insert_into_cache(key, value, address);
+                        let _ = self.try_insert_into_cache(key, &value, address);
                     }
 
                     // Record hit statistics
@@ -612,11 +705,11 @@ where
                             .record_latency(start.elapsed());
                     }
 
-                    return Ok(Some(value.clone()));
+                    return Ok(Some(value));
                 }
 
                 // Follow chain
-                address = record.header.previous_address();
+                address = info.previous_address();
             } else {
                 break;
             }
@@ -636,12 +729,67 @@ where
         Ok(None)
     }
 
+    /// Zero-copy read that returns a `RecordView` into the hybrid log.
+    ///
+    /// The returned view is only valid while `guard` is held.
+    pub(crate) fn read_view_sync<'g>(
+        &'g self,
+        _ctx: &mut ThreadContext,
+        _guard: &'g EpochGuard,
+        key: &K,
+    ) -> Result<Option<RecordView<'g>>, Status> {
+        let hash = KeyHash::new(<K as PersistKey>::Codec::hash(key)?);
+
+        let result = self.hash_index.find_entry(hash);
+        if !result.found() {
+            return Ok(None);
+        }
+
+        let mut address = result.entry.address();
+        address = self.skip_read_cache(address);
+
+        while address.is_valid() {
+            address = self.skip_read_cache(address);
+
+            // SAFETY: read-only access to hybrid log metadata.
+            let head_address = unsafe { self.hlog().get_head_address() };
+            if address < head_address {
+                // `RecordView` borrows from the in-memory hybrid log. It cannot be backed by
+                // disk-resident records without changing the API to return owned bytes.
+                return Err(Status::NotSupported);
+            }
+
+            let record_ptr = unsafe { self.hlog().get(address) };
+            let Some(ptr) = record_ptr else { break };
+
+            let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+            if info.is_invalid() {
+                address = info.previous_address();
+                continue;
+            }
+            let page_size = unsafe { self.hlog().page_size() };
+            let limit = page_size.saturating_sub(address.offset() as usize);
+            let view: RecordView<'g> = unsafe {
+                record_format::record_view_from_memory::<K, V>(address, ptr.as_ptr(), limit)?
+            };
+            if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
+                return Ok(Some(view));
+            }
+            address = info.previous_address();
+        }
+
+        Ok(None)
+    }
+
     /// Internal upsert implementation without statistics recording.
     ///
     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
     /// operation statistics when RMW creates a new record via upsert.
     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
-        let hash = KeyHash::new(key.get_hash());
+        let hash = match <K as PersistKey>::Codec::hash(&key) {
+            Ok(h) => KeyHash::new(h),
+            Err(s) => return (s, 0),
+        };
 
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
@@ -657,12 +805,15 @@ where
             self.invalidate_cache_entry(old_address, &key);
         }
 
-        // Calculate record size
-        let record_size = Record::<K, V>::size();
+        let (disk_len, alloc_len, key_len, value_len) =
+            match record_format::layout_for_ops::<K, V>(&key, Some(&value)) {
+                Ok(v) => v,
+                Err(s) => return (s, 0),
+            };
 
         // Allocate space in the log
         // SAFETY: Allocation is protected by epoch and internal synchronization
-        let address = match unsafe { self.hlog_mut().allocate(record_size as u32) } {
+        let address = match unsafe { self.hlog_mut().allocate(alloc_len as u32) } {
             Ok(addr) => addr,
             Err(status) => return (status, 0),
         };
@@ -674,21 +825,62 @@ where
         if let Some(ptr) = record_ptr {
             // Initialize the record
             unsafe {
-                let record = ptr.as_ptr() as *mut Record<K, V>;
+                const U32_BYTES: usize = std::mem::size_of::<u32>();
+                const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
+                let record_info_size = std::mem::size_of::<RecordInfo>();
+                let varlen_header_size = record_info_size + VARLEN_LENGTHS_SIZE;
 
                 // Initialize header - use the underlying HybridLog address, not cache address
                 let hlog_old_address = self.skip_read_cache(old_address);
                 let header =
-                    RecordInfo::new(hlog_old_address, ctx.version as u16, false, false, false);
-                ptr::write(&mut (*record).header, header);
+                    RecordInfo::new(hlog_old_address, ctx.version as u16, true, false, false);
+                ptr::write(ptr.as_ptr().cast::<RecordInfo>(), header);
 
-                // Write key
-                let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
-                ptr::write(key_ptr, key);
+                if record_format::is_fixed_record::<K, V>() {
+                    let key_bytes =
+                        std::slice::from_raw_parts_mut(ptr.as_ptr().add(record_info_size), key_len);
+                    if let Err(s) = <K as PersistKey>::Codec::encode_into(&key, key_bytes) {
+                        return (s, 0);
+                    }
 
-                // Write value
-                let value_ptr = ptr.as_ptr().add(Record::<K, V>::value_offset()) as *mut V;
-                ptr::write(value_ptr, value);
+                    let val_bytes = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(record_info_size + key_len),
+                        value_len,
+                    );
+                    if let Err(s) = <V as PersistValue>::Codec::encode_into(&value, val_bytes) {
+                        return (s, 0);
+                    }
+                } else {
+                    // Write lengths (little-endian) then payload bytes.
+                    let len_ptr = ptr.as_ptr().add(record_info_size);
+                    let key_len_le = (key_len as u32).to_le_bytes();
+                    std::ptr::copy_nonoverlapping(key_len_le.as_ptr(), len_ptr, U32_BYTES);
+                    let val_len_le = (value_len as u32).to_le_bytes();
+                    std::ptr::copy_nonoverlapping(
+                        val_len_le.as_ptr(),
+                        len_ptr.add(U32_BYTES),
+                        U32_BYTES,
+                    );
+
+                    let key_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(varlen_header_size),
+                        key_len,
+                    );
+                    if let Err(s) = <K as PersistKey>::Codec::encode_into(&key, key_dst) {
+                        return (s, 0);
+                    }
+
+                    let val_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(varlen_header_size + key_len),
+                        value_len,
+                    );
+                    if let Err(s) = <V as PersistValue>::Codec::encode_into(&value, val_dst) {
+                        return (s, 0);
+                    }
+                }
+
+                // The record is now fully initialized and can be scanned safely.
+                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
             }
 
             // Update hash index
@@ -708,7 +900,7 @@ where
                 }
             }
 
-            (Status::Ok, record_size)
+            (Status::Ok, disk_len)
         } else {
             (Status::OutOfMemory, 0)
         }
@@ -743,7 +935,10 @@ where
     /// Synchronous delete operation
     pub(crate) fn delete_sync(&self, ctx: &mut ThreadContext, key: &K) -> Status {
         let start = Instant::now();
-        let hash = KeyHash::new(key.get_hash());
+        let hash = match <K as PersistKey>::Codec::hash(key) {
+            Ok(h) => KeyHash::new(h),
+            Err(s) => return s,
+        };
 
         // Find entry in hash index
         let result = self.hash_index.find_entry(hash);
@@ -759,12 +954,15 @@ where
             self.invalidate_cache_entry(old_address, key);
         }
 
-        // Calculate record size (tombstone record)
-        let record_size = Record::<K, V>::size();
+        let (disk_len, alloc_len, key_len, _) =
+            match record_format::layout_for_ops::<K, V>(key, None) {
+                Ok(v) => v,
+                Err(s) => return s,
+            };
 
         // Allocate space in the log
         // SAFETY: Allocation is protected by epoch and internal synchronization
-        let address = match unsafe { self.hlog_mut().allocate(record_size as u32) } {
+        let address = match unsafe { self.hlog_mut().allocate(alloc_len as u32) } {
             Ok(addr) => addr,
             Err(status) => return status,
         };
@@ -775,17 +973,51 @@ where
 
         if let Some(ptr) = record_ptr {
             unsafe {
-                let record = ptr.as_ptr() as *mut Record<K, V>;
+                const U32_BYTES: usize = std::mem::size_of::<u32>();
+                const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
+                let record_info_size = std::mem::size_of::<RecordInfo>();
+                let varlen_header_size = record_info_size + VARLEN_LENGTHS_SIZE;
 
                 // Initialize header with tombstone flag - use underlying HybridLog address
                 let hlog_old_address = self.skip_read_cache(old_address);
                 let header =
-                    RecordInfo::new(hlog_old_address, ctx.version as u16, false, true, false);
-                ptr::write(&mut (*record).header, header);
+                    RecordInfo::new(hlog_old_address, ctx.version as u16, true, true, false);
+                ptr::write(ptr.as_ptr().cast::<RecordInfo>(), header);
 
-                // Write key
-                let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
-                ptr::write(key_ptr, key.clone());
+                if record_format::is_fixed_record::<K, V>() {
+                    let key_bytes =
+                        std::slice::from_raw_parts_mut(ptr.as_ptr().add(record_info_size), key_len);
+                    if let Err(s) = <K as PersistKey>::Codec::encode_into(key, key_bytes) {
+                        return s;
+                    }
+                    // Zero the value bytes to avoid persisting uninitialized padding.
+                    let val_bytes = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(record_info_size + key_len),
+                        <V as PersistValue>::Codec::FIXED_LEN,
+                    );
+                    val_bytes.fill(0);
+                } else {
+                    let len_ptr = ptr.as_ptr().add(record_info_size);
+                    let key_len_le = (key_len as u32).to_le_bytes();
+                    std::ptr::copy_nonoverlapping(key_len_le.as_ptr(), len_ptr, U32_BYTES);
+                    let val_len_le = 0u32.to_le_bytes();
+                    std::ptr::copy_nonoverlapping(
+                        val_len_le.as_ptr(),
+                        len_ptr.add(U32_BYTES),
+                        U32_BYTES,
+                    );
+
+                    let key_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(varlen_header_size),
+                        key_len,
+                    );
+                    if let Err(s) = <K as PersistKey>::Codec::encode_into(key, key_dst) {
+                        return s;
+                    }
+                }
+
+                // The tombstone is now fully initialized and can be scanned safely.
+                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
             }
 
             // Update hash index
@@ -807,7 +1039,7 @@ where
                 self.stats_collector
                     .store_stats
                     .hybrid_log
-                    .record_allocation(record_size as u64);
+                    .record_allocation(disk_len as u64);
             }
 
             Status::Ok
@@ -822,7 +1054,10 @@ where
         F: FnMut(&mut V) -> bool,
     {
         let start = Instant::now();
-        let hash = KeyHash::new(key.get_hash());
+        let hash = match <K as PersistKey>::Codec::hash(&key) {
+            Ok(h) => KeyHash::new(h),
+            Err(s) => return s,
+        };
 
         // Find or create entry in hash index
         let result = self.hash_index.find_or_create_entry(hash);
@@ -833,33 +1068,65 @@ where
         };
         let old_address = result.entry.address();
 
-        // Try to find existing record for in-place update
-        // SAFETY: Read-only access to log metadata
-        if old_address.is_valid() && old_address >= unsafe { self.hlog().get_read_only_address() } {
-            // Record is in mutable region - can try in-place update
-            // SAFETY: Address is in mutable region, access is protected by epoch
+        // Try to find existing record for in-place update (fixed format only).
+        if record_format::is_fixed_record::<K, V>()
+            && old_address.is_valid()
+            && old_address >= unsafe { self.hlog().get_read_only_address() }
+        {
+            // SAFETY: Address is in mutable region, access is protected by epoch.
             let record_ptr = unsafe { self.hlog_mut().get_mut(old_address) };
-
             if let Some(ptr) = record_ptr {
                 unsafe {
-                    let record = ptr.as_ptr() as *mut Record<K, V>;
-                    let record_key = (*record).key();
+                    let info = record_format::record_info_at(ptr.as_ptr());
+                    if !info.is_invalid() {
+                        let page_size = self.hlog().page_size();
+                        let limit = page_size.saturating_sub(old_address.offset() as usize);
+                        let view = match record_format::record_view_from_memory::<K, V>(
+                            old_address,
+                            ptr.as_ptr(),
+                            limit,
+                        ) {
+                            Ok(v) => v,
+                            Err(s) => return s,
+                        };
+                        let key_matches = match <K as PersistKey>::Codec::equals_encoded(
+                            view.key_bytes(),
+                            &key,
+                        ) {
+                            Ok(b) => b,
+                            Err(s) => return s,
+                        };
+                        if key_matches && !view.is_tombstone() {
+                            let value_bytes = match view.value_bytes() {
+                                Some(b) => b,
+                                None => return Status::Corruption,
+                            };
+                            let mut current = match <V as PersistValue>::Codec::decode(value_bytes)
+                            {
+                                Ok(v) => v,
+                                Err(s) => return s,
+                            };
+                            if modifier(&mut current) {
+                                let val_dst = std::slice::from_raw_parts_mut(
+                                    ptr.as_ptr().add(8 + <K as PersistKey>::Codec::FIXED_LEN),
+                                    <V as PersistValue>::Codec::FIXED_LEN,
+                                );
+                                if let Err(s) =
+                                    <V as PersistValue>::Codec::encode_into(&current, val_dst)
+                                {
+                                    return s;
+                                }
 
-                    if record_key == &key && !(*record).header.is_tombstone() {
-                        // Try in-place update
-                        let value = (*record).value_mut();
-                        if modifier(value) {
-                            // Record RMW statistics (in-place update)
-                            if self.stats_collector.is_enabled() {
-                                self.stats_collector.store_stats.operations.record_rmw();
-                                self.stats_collector
-                                    .store_stats
-                                    .operations
-                                    .record_latency(start.elapsed());
+                                if self.stats_collector.is_enabled() {
+                                    self.stats_collector.store_stats.operations.record_rmw();
+                                    self.stats_collector
+                                        .store_stats
+                                        .operations
+                                        .record_latency(start.elapsed());
+                                }
+                                return Status::Ok;
                             }
-                            return Status::Ok;
                         }
-                        // modifier returned false, indicating abort - fall through to create new record
                     }
                 }
             }

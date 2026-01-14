@@ -49,8 +49,8 @@ use std::task::{Context, Poll};
 use uuid::Uuid;
 
 use crate::checkpoint::SessionState;
+use crate::codec::{PersistKey, PersistValue};
 use crate::device::StorageDevice;
-use crate::record::{Key, Value};
 use crate::status::Status;
 use crate::store::{FasterKv, Session, ThreadContext};
 
@@ -68,8 +68,8 @@ const MAX_PENDING_RETRIES: u32 = 10;
 /// non-blocking versions of operations that may require I/O.
 pub struct AsyncSession<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Inner synchronous session
@@ -78,8 +78,8 @@ where
 
 impl<K, V, D> AsyncSession<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     async fn drive_pending_once(&mut self) {
@@ -356,8 +356,8 @@ impl Future for YieldOnce {
 /// Async session builder
 pub struct AsyncSessionBuilder<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     store: Arc<FasterKv<K, V, D>>,
@@ -367,8 +367,8 @@ where
 
 impl<K, V, D> AsyncSessionBuilder<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Create a new async session builder

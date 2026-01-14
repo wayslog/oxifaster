@@ -15,22 +15,22 @@ use crate::checkpoint::{
     CheckpointToken, CheckpointType, DeltaLogMetadata, IndexMetadata, LogMetadata, RecoveryState,
     SessionState,
 };
+use crate::codec::{PersistKey, PersistValue};
 use crate::compaction::{CompactionConfig, Compactor};
 use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
 use crate::epoch::LightEpoch;
 use crate::index::{MemHashIndex, MemHashIndexConfig};
-use crate::record::{Key, Value};
 use crate::stats::StatsCollector;
 use crate::store::pending_io::PendingIoManager;
 use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 
-use super::{CheckpointKind, FasterKv, FasterKvConfig};
+use super::{CheckpointKind, FasterKv, FasterKvConfig, ReadCacheOps};
 
 impl<K, V, D> FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Create a full checkpoint (index + log) in `checkpoint_dir`.
@@ -516,8 +516,9 @@ where
 
         let compactor = Compactor::with_config(compaction_config);
 
-        let read_cache = cache_config.map(ReadCache::new);
-        let pending_io = PendingIoManager::new(device.clone());
+        let read_cache: Option<Arc<dyn ReadCacheOps<K, V>>> = cache_config
+            .map(|cfg| Arc::new(ReadCache::<K, V>::new(cfg)) as Arc<dyn ReadCacheOps<K, V>>);
+        let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         let mut session_registry = HashMap::new();
         for session_state in &log_meta.session_states {
@@ -648,7 +649,7 @@ where
         let system_state = AtomicSystemState::new(SystemState::rest(index_meta.version));
 
         let compactor = Compactor::with_config(CompactionConfig::default());
-        let pending_io = PendingIoManager::new(device.clone());
+        let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         Ok(Self {
             epoch,
@@ -703,7 +704,7 @@ where
         let system_state = AtomicSystemState::new(SystemState::rest(log_meta.version));
 
         let compactor = Compactor::with_config(CompactionConfig::default());
-        let pending_io = PendingIoManager::new(device.clone());
+        let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         let mut session_registry = HashMap::new();
         for session_state in &log_meta.session_states {

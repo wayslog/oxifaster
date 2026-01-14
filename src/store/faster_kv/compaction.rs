@@ -3,21 +3,25 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::address::Address;
+use crate::codec::KeyCodec;
+use crate::codec::PersistKey;
+use crate::codec::PersistValue;
 use crate::compaction::{
     AutoCompactionConfig, AutoCompactionHandle, AutoCompactionTarget, CompactionConfig,
     CompactionResult, CompactionStats,
 };
 use crate::device::StorageDevice;
 use crate::index::KeyHash;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::RecordInfo;
 use crate::status::Status;
+use crate::store::record_format;
 
 use super::FasterKv;
 
 impl<K, V, D> FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Simple compaction: shift log begin address and garbage collect index
@@ -130,22 +134,45 @@ where
             let record_ptr = unsafe { self.hlog().get(current_address) };
 
             if let Some(ptr) = record_ptr {
-                let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
-                let record_size = Record::<K, V>::size() as u64;
+                let view = match unsafe {
+                    let page_size = self.hlog().page_size();
+                    let limit = page_size.saturating_sub(current_address.offset() as usize);
+                    record_format::record_view_from_memory::<K, V>(
+                        current_address,
+                        ptr.as_ptr(),
+                        limit,
+                    )
+                } {
+                    Ok(v) => v,
+                    Err(status) => {
+                        self.compactor.complete();
+                        return CompactionResult::failure(status);
+                    }
+                };
+
+                let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+                let record_alloc_len = if record_format::is_fixed_record::<K, V>() {
+                    record_format::fixed_alloc_len::<K, V>()
+                } else {
+                    record_format::varlen_alloc_len(view.key_bytes().len(), view.value_len())
+                } as u64;
+
+                if info.is_invalid() {
+                    current_address += record_alloc_len;
+                    continue;
+                }
 
                 stats.records_scanned += 1;
-                stats.bytes_scanned += record_size;
+                stats.bytes_scanned += record_alloc_len;
 
                 // Check if this is a tombstone
-                let is_tombstone = record.header.is_tombstone();
+                let is_tombstone = view.is_tombstone();
                 if is_tombstone {
                     stats.tombstones_found += 1;
                 }
 
                 // Get the key and check if this record is the latest version
-                let key = unsafe { record.key() };
-                let value = unsafe { record.value() };
-                let hash = KeyHash::new(key.get_hash());
+                let hash = KeyHash::new(<K as PersistKey>::Codec::hash_encoded(view.key_bytes()));
                 let index_result = self.hash_index.find_entry(hash);
 
                 if index_result.found() {
@@ -160,7 +187,14 @@ where
                         // This record is still live - MUST copy to tail before reclaiming
                         if !is_tombstone {
                             // Copy live record to the tail of the log
-                            match self.copy_record_to_tail(key, value, hash) {
+                            let value_bytes = match view.value_bytes() {
+                                Some(b) => b,
+                                None => {
+                                    self.compactor.complete();
+                                    return CompactionResult::failure(Status::Corruption);
+                                }
+                            };
+                            match self.copy_record_to_tail(view.key_bytes(), value_bytes, hash) {
                                 Ok(new_addr) => {
                                     // Successfully copied - update index to point to new location
                                     // Use CAS to atomically update the index entry
@@ -173,7 +207,7 @@ where
                                     if update_result == Status::Ok {
                                         // Index successfully updated to point to new location
                                         stats.records_compacted += 1;
-                                        stats.bytes_compacted += record_size;
+                                        stats.bytes_compacted += record_alloc_len;
                                     } else {
                                         // CAS failed - index was modified concurrently
                                         // CRITICAL: We copied the record but couldn't update the index.
@@ -218,21 +252,22 @@ where
                             // Tombstone that is still the latest - can be reclaimed
                             // (tombstones don't need to be preserved during compaction)
                             stats.tombstones_found += 1;
-                            stats.bytes_reclaimed += record_size;
+                            stats.bytes_reclaimed += record_alloc_len;
                         }
                     } else {
                         // Record is obsolete (superseded by newer version) - can be reclaimed
                         stats.records_skipped += 1;
-                        stats.bytes_reclaimed += record_size;
+                        stats.bytes_reclaimed += record_alloc_len;
                     }
                 } else {
                     // Key not in index - record can be reclaimed
                     stats.records_skipped += 1;
-                    stats.bytes_reclaimed += record_size;
+                    stats.bytes_reclaimed += record_alloc_len;
                 }
 
                 // Move to next record
-                current_address = Address::from_control(current_address.control() + record_size);
+                current_address =
+                    Address::from_control(current_address.control() + record_alloc_len);
             } else {
                 // No more records in this page, move to next page
                 let page_size = unsafe { self.hlog().page_size() } as u64;
@@ -257,18 +292,33 @@ where
     /// Copy a record to the tail of the log during compaction
     ///
     /// # Arguments
-    /// * `key` - The key to copy
-    /// * `value` - The value to copy
+    /// * `key_bytes` - Encoded key bytes from the source record
+    /// * `value_bytes` - Encoded value bytes from the source record
     /// * `_hash` - Pre-computed hash of the key (unused but kept for future use)
     ///
     /// # Returns
     /// The new address of the copied record, or an error
-    fn copy_record_to_tail(&self, key: &K, value: &V, _hash: KeyHash) -> Result<Address, Status> {
-        let record_size = Record::<K, V>::size();
+    fn copy_record_to_tail(
+        &self,
+        key_bytes: &[u8],
+        value_bytes: &[u8],
+        _hash: KeyHash,
+    ) -> Result<Address, Status> {
+        let (disk_len, alloc_len) = if record_format::is_fixed_record::<K, V>() {
+            (
+                record_format::fixed_disk_len::<K, V>(),
+                record_format::fixed_alloc_len::<K, V>(),
+            )
+        } else {
+            (
+                record_format::varlen_disk_len(key_bytes.len(), value_bytes.len()),
+                record_format::varlen_alloc_len(key_bytes.len(), value_bytes.len()),
+            )
+        };
 
         // Allocate space at tail
         // SAFETY: Allocation is protected by epoch
-        let new_address = unsafe { self.hlog_mut().allocate(record_size as u32)? };
+        let new_address = unsafe { self.hlog_mut().allocate(alloc_len as u32)? };
 
         if new_address == Address::INVALID {
             return Err(Status::OutOfMemory);
@@ -279,24 +329,56 @@ where
         let new_ptr = unsafe { self.hlog().get(new_address) };
 
         if let Some(ptr) = new_ptr {
-            // Initialize the new record
-            let new_record: &mut Record<K, V> = unsafe { &mut *(ptr.as_ptr() as *mut _) };
-
-            // Copy key and value using ptr::write to avoid dropping uninitialized memory
             unsafe {
-                ptr::write(new_record.key_mut(), key.clone());
-                ptr::write(new_record.value_mut(), value.clone());
-            }
+                const U32_BYTES: usize = std::mem::size_of::<u32>();
+                const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
+                let record_info_size = std::mem::size_of::<RecordInfo>();
+                let varlen_header_size = record_info_size + VARLEN_LENGTHS_SIZE;
 
-            // Initialize header (not a tombstone, valid record)
-            new_record.header = RecordInfo::default();
+                // Initialize header (not a tombstone, valid record)
+                ptr::write(ptr.as_ptr().cast::<RecordInfo>(), RecordInfo::default());
+
+                if record_format::is_fixed_record::<K, V>() {
+                    let key_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(record_info_size),
+                        key_bytes.len(),
+                    );
+                    key_dst.copy_from_slice(key_bytes);
+                    let val_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(record_info_size + key_bytes.len()),
+                        value_bytes.len(),
+                    );
+                    val_dst.copy_from_slice(value_bytes);
+                } else {
+                    let len_ptr = ptr.as_ptr().add(record_info_size);
+                    let key_len_le = (key_bytes.len() as u32).to_le_bytes();
+                    std::ptr::copy_nonoverlapping(key_len_le.as_ptr(), len_ptr, U32_BYTES);
+                    let val_len_le = (value_bytes.len() as u32).to_le_bytes();
+                    std::ptr::copy_nonoverlapping(
+                        val_len_le.as_ptr(),
+                        len_ptr.add(U32_BYTES),
+                        U32_BYTES,
+                    );
+
+                    let key_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(varlen_header_size),
+                        key_bytes.len(),
+                    );
+                    key_dst.copy_from_slice(key_bytes);
+                    let val_dst = std::slice::from_raw_parts_mut(
+                        ptr.as_ptr().add(varlen_header_size + key_bytes.len()),
+                        value_bytes.len(),
+                    );
+                    val_dst.copy_from_slice(value_bytes);
+                }
+            }
 
             // Record stats
             if self.stats_collector.is_enabled() {
                 self.stats_collector
                     .store_stats
                     .hybrid_log
-                    .record_allocation(record_size as u64);
+                    .record_allocation(disk_len as u64);
             }
 
             Ok(new_address)
@@ -415,8 +497,8 @@ where
 
 impl<K, V, D> AutoCompactionTarget for FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     fn begin_address(&self) -> Address {

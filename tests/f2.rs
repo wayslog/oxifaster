@@ -1,3 +1,5 @@
+#![cfg(feature = "f2")]
+
 //! F2 Architecture 集成测试
 //!
 //! 测试 F2 热冷分离架构的各项功能。

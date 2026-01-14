@@ -61,7 +61,7 @@ fn main() {
         let thread_id = 1;
 
         {
-            let _guard = EpochGuard::new(&epoch, thread_id);
+            let _guard = EpochGuard::new(epoch.clone(), thread_id);
             println!("  线程 {thread_id} 通过 Guard 进入保护");
             println!(
                 "  线程 {} 是否受保护: {}",

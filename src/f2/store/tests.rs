@@ -9,30 +9,15 @@ use crate::index::ColdIndexConfig;
 use crate::index::KeyHash;
 use crate::status::Status;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+use bytemuck::{Pod, Zeroable};
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
 struct TestKey(u64);
 
-impl Key for TestKey {
-    fn size(&self) -> u32 {
-        std::mem::size_of::<Self>() as u32
-    }
-
-    fn get_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Default, Pod, Zeroable)]
 struct TestValue(u64);
-
-impl Value for TestValue {
-    fn size(&self) -> u32 {
-        std::mem::size_of::<Self>() as u32
-    }
-}
 
 #[test]
 fn test_create_f2() {
@@ -219,14 +204,14 @@ fn test_f2_hot_compaction_access_frequency_keeps_hot() {
     let result = f2.compact_hot_log(hot_tail).unwrap();
     assert_eq!(result.status, Status::Ok);
 
-    let hash1 = KeyHash::new(1u64.get_hash());
-    let hash2 = KeyHash::new(2u64.get_hash());
+    let hash1 = KeyHash::new(crate::codec::hash64(bytemuck::bytes_of(&1u64)));
+    let hash2 = KeyHash::new(crate::codec::hash64(bytemuck::bytes_of(&2u64)));
 
-    // key1 保留在 hot（hot index 仍可命中）
+    // key1 stays in hot (hot index hits, cold index misses).
     assert!(f2.hot_store.hash_index.find_entry(hash1).found());
     assert!(!f2.cold_store.hash_index.find_entry(hash1).found());
 
-    // key2 迁移到 cold（hot index 清空，cold index 命中）
+    // key2 migrates to cold (hot index cleared, cold index hits).
     assert!(!f2.hot_store.hash_index.find_entry(hash2).found());
     assert!(f2.cold_store.hash_index.find_entry(hash2).found());
     assert_eq!(f2.read(&2u64).unwrap(), Some(20u64));
@@ -244,20 +229,6 @@ fn test_f2_compaction_check() {
     // Should not need compaction with empty stores
     assert!(f2.should_compact_hot_log().is_none());
     assert!(f2.should_compact_cold_log().is_none());
-}
-
-#[test]
-fn test_f2_rejects_non_pod_types() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-
-    // 非 POD 类型（包含堆指针，需要 drop）目前不支持。
-    let err = match F2Kv::<String, String, NullDisk>::new(config, hot_device, cold_device) {
-        Ok(_) => panic!("预期创建失败，但实际成功"),
-        Err(e) => e,
-    };
-    assert!(err.contains("POD"));
 }
 
 #[test]

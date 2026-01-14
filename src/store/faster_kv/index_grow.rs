@@ -1,14 +1,14 @@
+use crate::codec::{PersistKey, PersistValue};
 use crate::device::StorageDevice;
 use crate::index::{GrowResult, GrowState};
-use crate::record::{Key, Value};
 use crate::status::Status;
 
 use super::FasterKv;
 
 impl<K, V, D> FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     // ============ Index Growth API ============
