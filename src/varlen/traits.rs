@@ -3,8 +3,6 @@
 //! This module defines traits for working with variable-length data structures
 //! in FASTER.
 
-use crate::record::{Key, Value};
-
 /// Trait for variable-length structs
 ///
 /// This trait provides methods for working with variable-length data
@@ -26,8 +24,8 @@ pub trait VarLenStruct: Clone + Send + Sync + 'static {
 
 /// Trait for variable-length keys
 ///
-/// Extends the Key trait with variable-length support.
-pub trait VarLenKey: Key + VarLenStruct {
+/// Extends the basic varlen struct with key semantics.
+pub trait VarLenKey: VarLenStruct {
     /// Get the initial length for serialization
     fn initial_length(&self) -> usize {
         self.serialized_size()
@@ -36,8 +34,8 @@ pub trait VarLenKey: Key + VarLenStruct {
 
 /// Trait for variable-length values
 ///
-/// Extends the Value trait with variable-length support.
-pub trait VarLenValue: Value + VarLenStruct {
+/// Extends the basic varlen struct with value semantics.
+pub trait VarLenValue: VarLenStruct {
     /// Get the initial length for serialization
     fn initial_length(&self) -> usize {
         self.serialized_size()
@@ -62,24 +60,6 @@ impl VarLenStruct for super::SpanByte {
 
     fn deserialize(buffer: &[u8]) -> Option<Self> {
         Self::deserialize_from(buffer)
-    }
-}
-
-/// Implement Key for SpanByte
-impl Key for super::SpanByte {
-    fn size(&self) -> u32 {
-        self.total_size() as u32
-    }
-
-    fn get_hash(&self) -> u64 {
-        super::SpanByte::get_hash(self)
-    }
-}
-
-/// Implement Value for SpanByte
-impl Value for super::SpanByte {
-    fn size(&self) -> u32 {
-        self.total_size() as u32
     }
 }
 
@@ -122,24 +102,6 @@ impl VarLenValue for super::SpanByte {
 mod tests {
     use super::*;
     use crate::varlen::SpanByte;
-
-    #[test]
-    fn test_span_byte_as_key() {
-        let span = SpanByte::from_slice(b"key data");
-
-        // Test Key trait
-        assert_eq!(Key::size(&span), span.total_size() as u32);
-        let hash = Key::get_hash(&span);
-        assert_ne!(hash, 0);
-    }
-
-    #[test]
-    fn test_span_byte_as_value() {
-        let span = SpanByte::from_slice(b"value data");
-
-        // Test Value trait
-        assert_eq!(Value::size(&span), span.total_size() as u32);
-    }
 
     #[test]
     fn test_var_len_struct() {

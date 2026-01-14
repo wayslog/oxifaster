@@ -1,17 +1,22 @@
-use std::ptr;
-
+use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::device::StorageDevice;
 use crate::epoch::current_thread_tag_for;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::RecordInfo;
+use crate::status::Status;
 
+use super::record_format;
 use super::{DiskReadResult, FasterKv, PendingIoKey};
 
 impl<K, V, D> FasterKv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
+    const RECORD_INFO_SIZE: usize = std::mem::size_of::<RecordInfo>();
+    const VARLEN_LENGTHS_SIZE: usize = 2 * std::mem::size_of::<u32>();
+    const VARLEN_HEADER_SIZE: usize = Self::RECORD_INFO_SIZE + Self::VARLEN_LENGTHS_SIZE;
+
     /// Drive and process background I/O completions (global).
     fn process_pending_io_completions(&self) {
         let completions = self.pending_io.drain_completions();
@@ -29,13 +34,13 @@ where
                     address,
                     result,
                 } => {
-                    if let Ok(bytes) = result {
-                        if let Some(parsed) = self.parse_disk_record(&bytes) {
-                            self.disk_read_results
-                                .lock()
-                                .insert(address.control(), parsed);
-                        }
-                    }
+                    let parsed = match result {
+                        Ok(bytes) => self.parse_disk_record(&bytes),
+                        Err(_) => Err(Status::IoError),
+                    };
+                    self.disk_read_results
+                        .lock()
+                        .insert(address.control(), parsed);
 
                     if current_thread_tag_for(thread_id) != thread_tag {
                         continue;
@@ -65,54 +70,89 @@ where
     }
 
     /// Parse key/value from disk-read record bytes (producing an owned result).
-    ///
-    /// # Safety Note
-    ///
-    /// This method is only safe for POD (Plain Old Data) types. For types that contain pointers
-    /// (e.g. `String`, `Vec`), bytes read from disk would contain invalid pointers, and
-    /// interpreting them directly would be undefined behavior.
-    ///
-    /// Therefore, this method checks at runtime whether `K` and `V` require drop:
-    /// - If they do, it returns `None` and disables disk parsing for this store.
-    /// - Only POD types (e.g. `u64`, `i64`, `[u8; N]`) are actually parsed.
-    fn parse_disk_record(&self, bytes: &[u8]) -> Option<DiskReadResult<K, V>> {
-        // Safety check: only POD types can be safely reconstructed from raw bytes.
-        if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
-            // Non-POD types are not supported; the caller will keep returning `Pending`
-            // because the cache will never be filled (expected behavior).
-            return None;
+    fn parse_disk_record(&self, bytes: &[u8]) -> Result<DiskReadResult<K, V>, Status> {
+        if bytes.len() < Self::RECORD_INFO_SIZE {
+            return Err(Status::Corruption);
         }
 
-        let min_len = Record::<K, V>::disk_size() as usize;
-        if bytes.len() < min_len {
-            return None;
-        }
-
-        let header_control = u64::from_le_bytes(bytes.get(0..8)?.try_into().ok()?);
+        let header_control =
+            u64::from_le_bytes(bytes[0..Self::RECORD_INFO_SIZE].try_into().unwrap());
         let header = RecordInfo::from_control(header_control);
+        let previous_address = header.previous_address();
 
-        let key_offset = Record::<K, V>::key_offset();
-        let value_offset = Record::<K, V>::value_offset();
+        // Skip invalid records to avoid returning partially written/corrupt data.
+        if header.is_invalid() {
+            return Ok(DiskReadResult {
+                key: None,
+                value: None,
+                previous_address,
+            });
+        }
 
-        // SAFETY:
-        // 1. `needs_drop` checks ensure K and V are POD (no internal pointers)
-        // 2. bytes come from a read of `Record::<K,V>::disk_size()` and the length is checked
-        // 3. offsets are derived from `Record` layout
-        unsafe {
-            let key_ptr = bytes.as_ptr().add(key_offset) as *const K;
-            let value_ptr = bytes.as_ptr().add(value_offset) as *const V;
+        if record_format::is_fixed_record::<K, V>() {
+            let disk_len = record_format::fixed_disk_len::<K, V>();
+            if bytes.len() < disk_len {
+                return Err(Status::Corruption);
+            }
 
-            // For POD types, a bitwise copy is sufficient.
-            let key: K = ptr::read_unaligned(key_ptr);
+            let key_len = <K as PersistKey>::Codec::FIXED_LEN;
+            let value_len = <V as PersistValue>::Codec::FIXED_LEN;
+
+            let key_bytes = &bytes[Self::RECORD_INFO_SIZE..Self::RECORD_INFO_SIZE + key_len];
+            let key = <K as PersistKey>::Codec::decode(key_bytes)?;
 
             let value = if header.is_tombstone() {
                 None
             } else {
-                let value: V = ptr::read_unaligned(value_ptr);
-                Some(value)
+                let value_start = Self::RECORD_INFO_SIZE + key_len;
+                let value_bytes = &bytes[value_start..value_start + value_len];
+                Some(<V as PersistValue>::Codec::decode(value_bytes)?)
             };
 
-            Some(DiskReadResult { key, value })
+            Ok(DiskReadResult {
+                key: Some(key),
+                value,
+                previous_address,
+            })
+        } else {
+            if bytes.len() < Self::VARLEN_HEADER_SIZE {
+                return Err(Status::Corruption);
+            }
+            let key_len = u32::from_le_bytes(
+                bytes[Self::RECORD_INFO_SIZE..Self::RECORD_INFO_SIZE + std::mem::size_of::<u32>()]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let value_len = u32::from_le_bytes(
+                bytes
+                    [Self::RECORD_INFO_SIZE + std::mem::size_of::<u32>()..Self::VARLEN_HEADER_SIZE]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let total = Self::VARLEN_HEADER_SIZE
+                .checked_add(key_len)
+                .and_then(|n| n.checked_add(value_len))
+                .ok_or(Status::ResourceExhausted)?;
+            if bytes.len() < total {
+                return Err(Status::Corruption);
+            }
+
+            let key_bytes = &bytes[Self::VARLEN_HEADER_SIZE..Self::VARLEN_HEADER_SIZE + key_len];
+            let key = <K as PersistKey>::Codec::decode(key_bytes)?;
+
+            let value = if header.is_tombstone() {
+                None
+            } else {
+                let value_start = Self::VARLEN_HEADER_SIZE + key_len;
+                let value_bytes = &bytes[value_start..value_start + value_len];
+                Some(<V as PersistValue>::Codec::decode(value_bytes)?)
+            };
+
+            Ok(DiskReadResult {
+                key: Some(key),
+                value,
+                previous_address,
+            })
         }
     }
 }

@@ -1,5 +1,8 @@
 use super::*;
+use crate::codec::Utf8;
 use crate::device::NullDisk;
+use crate::record::RecordInfo;
+use std::ptr;
 
 #[test]
 fn test_scan_range() {
@@ -20,6 +23,75 @@ fn test_log_page() {
     let page = LogPage::new(4096, 4096);
     assert_eq!(page.status(), LogPageStatus::Uninitialized);
     assert!(page.buffer().is_some());
+}
+
+#[test]
+fn test_log_page_get_next_view_bounds_check() {
+    let page_size = 64usize;
+    let mut page = LogPage::new(page_size, 4096);
+    page.update(
+        Address::new(0, 0),
+        Address::new(0, 0),
+        Address::new(0, page_size as u32),
+    );
+    page.set_status(LogPageStatus::Ready);
+
+    let buf = page.buffer_mut().unwrap();
+    unsafe {
+        ptr::write(
+            buf.as_mut_ptr().cast::<RecordInfo>(),
+            RecordInfo::new(Address::INVALID, 0, false, false, false),
+        );
+    }
+    buf[8..12].copy_from_slice(&(1000u32.to_le_bytes()));
+    buf[12..16].copy_from_slice(&(0u32.to_le_bytes()));
+
+    assert!(page.get_next_view::<Utf8, Utf8>().is_none());
+    assert!(!page.has_more());
+}
+
+#[test]
+fn test_log_page_get_next_view_skips_invalid_record() {
+    let page_size = 128usize;
+    let mut page = LogPage::new(page_size, 4096);
+    page.update(
+        Address::new(0, 0),
+        Address::new(0, 0),
+        Address::new(0, page_size as u32),
+    );
+    page.set_status(LogPageStatus::Ready);
+
+    let buf = page.buffer_mut().unwrap();
+
+    // Record #1: invalid varlen record (key_len=1, value_len=1).
+    unsafe {
+        ptr::write(
+            buf.as_mut_ptr().cast::<RecordInfo>(),
+            RecordInfo::new(Address::INVALID, 0, true, false, false),
+        );
+    }
+    buf[8..12].copy_from_slice(&(1u32.to_le_bytes()));
+    buf[12..16].copy_from_slice(&(1u32.to_le_bytes()));
+    buf[16] = b'a';
+    buf[17] = b'b';
+
+    // Record #2 starts at the next 8-byte aligned offset.
+    let off2 = 24usize;
+    unsafe {
+        ptr::write(
+            buf.as_mut_ptr().add(off2).cast::<RecordInfo>(),
+            RecordInfo::new(Address::INVALID, 0, false, false, false),
+        );
+    }
+    buf[off2 + 8..off2 + 12].copy_from_slice(&(1u32.to_le_bytes()));
+    buf[off2 + 12..off2 + 16].copy_from_slice(&(1u32.to_le_bytes()));
+    buf[off2 + 16] = b'k';
+    buf[off2 + 17] = b'v';
+
+    let (addr, view) = page.get_next_view::<Utf8, Utf8>().unwrap();
+    assert_eq!(addr.offset(), off2 as u32);
+    assert_eq!(view.key_bytes(), b"k");
+    assert_eq!(view.value_bytes().unwrap(), b"v");
 }
 
 #[test]

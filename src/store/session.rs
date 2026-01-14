@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::checkpoint::SessionState;
+use crate::codec::{PersistKey, PersistValue};
 use crate::device::StorageDevice;
-use crate::epoch::get_thread_tag;
-use crate::record::{Key, Value};
+use crate::epoch::{get_thread_tag, EpochGuard};
 use crate::status::Status;
-use crate::store::FasterKv;
+use crate::store::{FasterKv, RecordView};
 
 /// Thread context for FASTER operations
 ///
@@ -88,8 +88,8 @@ impl ThreadContext {
 /// and `continue_from_state()` to restore after recovery.
 pub struct Session<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Reference to the store
@@ -104,8 +104,8 @@ where
 
 impl<K, V, D> Session<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     fn bump_serial_on_ok(&mut self, status: Status) -> Status {
@@ -190,7 +190,7 @@ where
     /// Start the session
     pub fn start(&mut self) {
         if !self.active {
-            self.store.epoch().protect(self.ctx.thread_id);
+            self.store.epoch().reentrant_protect(self.ctx.thread_id);
             self.active = true;
             // Register session when starting
             self.store.register_session(&self.to_session_state());
@@ -202,7 +202,7 @@ where
         if self.active {
             // Update final session state before unregistering
             self.store.update_session(&self.to_session_state());
-            self.store.epoch().unprotect(self.ctx.thread_id);
+            self.store.epoch().reentrant_unprotect(self.ctx.thread_id);
             self.active = false;
             // Note: We don't unregister on end() to allow checkpoint to capture
             // sessions that have ended but whose operations should be persisted.
@@ -222,7 +222,9 @@ where
     /// checkpoint information current.
     pub fn refresh(&mut self) {
         if self.active {
-            self.store.epoch().protect_and_drain(self.ctx.thread_id);
+            self.store
+                .epoch()
+                .reentrant_protect_and_drain(self.ctx.thread_id);
             // Periodically update session state in registry
             self.store.update_session(&self.to_session_state());
         }
@@ -237,6 +239,30 @@ where
         self.start();
 
         self.store.read_sync(&mut self.ctx, key)
+    }
+
+    /// Read a record as a zero-copy view.
+    ///
+    /// The returned `RecordView` borrows from the hybrid log; the caller must hold `guard`
+    /// for the entire duration of view usage.
+    ///
+    /// Note: This API only supports records that are still resident in the in-memory portion of
+    /// the hybrid log. If the latest record for `key` is on disk, this returns `Status::NotSupported`.
+    pub fn read_view<'g>(
+        &'g mut self,
+        guard: &'g EpochGuard,
+        key: &K,
+    ) -> Result<Option<RecordView<'g>>, Status> {
+        self.start();
+        if guard.thread_id() != self.ctx.thread_id {
+            return Err(Status::InvalidArgument);
+        }
+        self.store.read_view_sync(&mut self.ctx, guard, key)
+    }
+
+    /// Convenience helper to create an epoch guard for this session's thread.
+    pub fn pin(&self) -> EpochGuard {
+        EpochGuard::new(self.store.epoch_arc(), self.ctx.thread_id)
     }
 
     /// Upsert a key-value pair
@@ -341,8 +367,8 @@ where
 
 impl<K, V, D> Drop for Session<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     fn drop(&mut self) {
@@ -355,8 +381,8 @@ where
 /// Session builder for configuring session options
 pub struct SessionBuilder<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     store: Arc<FasterKv<K, V, D>>,
@@ -366,8 +392,8 @@ where
 
 impl<K, V, D> SessionBuilder<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
     D: StorageDevice,
 {
     /// Create a new session builder

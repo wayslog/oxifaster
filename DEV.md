@@ -74,18 +74,24 @@ Legend:
 
 This is the short list of issues that must be resolved before treating the system as production-grade.
 
-### 1) Persistence Type Model Is Not Explicit (and Not Safe by Default)
+### 1) Persistence Type Model Must Be Explicit (Workstream A)
 
-Today, the storage format is effectively “blittable-only”:
+Status: Implemented.
 
-- Records are written by moving `K`/`V` into raw log memory (via `ptr::write`), and log pages are persisted as raw bytes.
-- Disk readback parsing explicitly refuses types that `needs_drop()` (e.g. `String`, `Vec`, `SpanByte`), so reads from disk will stay `Pending` forever for non-POD types.
-- Variable-length utilities (`SpanByte`, varlen traits) exist but are not integrated into the core log allocator/store record format; using them with persistence is not meaningful yet.
+The persistence boundary is now explicit and safe-by-default:
 
-Production implications:
+- The store is parameterized by `K: PersistKey` and `V: PersistValue`, which bind each type to a `KeyCodec`/`ValueCodec`.
+- Default mode is “POD-bytes” via `bytemuck::Pod` (`BlittableCodec<T>`).
+- VarLen mode is supported via opt-in wrappers:
+  - `RawBytes`: raw bytes (no SpanByte envelope)
+  - `Utf8`: UTF-8 bytes (no SpanByte envelope)
+  - `Bincode<T>`: serde+bincode payload stored in a SpanByte envelope (FASTER-style)
+- Stable key hashing is xxHash-based (xxh3 default; xxh64 optional via feature).
 
-- Without a defined serialization strategy, any non-POD key/value type cannot be safely persisted or recovered.
-- Even for in-memory usage, non-POD types stored in raw log memory require a clear destruction/reclamation strategy; otherwise the system accumulates leaked heap allocations over time.
+Operational changes enabled by this model:
+
+- Disk readback supports both fixed and variable-length records; non-POD types must opt into a codec (no “Pending forever” failure mode).
+- A bytes-view read API exists: `Session::read_view(&EpochGuard, &K) -> RecordView`, returning borrowed encoded bytes.
 
 ### 2) CPR Is Not Integrated into the Operational Fast Path
 
@@ -178,6 +184,19 @@ This plan is organized into workstreams with clear deliverables and acceptance c
 ### Workstream A: Define and Enforce a Safe Persistence Type Model
 
 Goal: make persistence semantics correct and explicit before expanding features.
+
+Status: Implemented (type model + record formats + tests + CI gates).
+
+Implementation notes (current codebase):
+
+- Codecs and constraints live under `src/codec/` (`PersistKey`/`PersistValue`, `KeyCodec`/`ValueCodec`).
+- Record layouts are unified in `src/store/record_format.rs` (fixed + varlen records, `RecordView<'a>`).
+- Stable hashing uses xxHash (`hash-xxh3` default; `hash-xxh64` optional feature).
+- Zero-copy bytes-view read: `Session::read_view(&EpochGuard, &K) -> Result<Option<RecordView>, Status>`.
+- Coverage:
+  - `tests/read_view.rs` (fixed + varlen view semantics)
+  - `tests/hash.rs` (hash determinism smoke test)
+  - `tests/varlen.rs` (varlen integration via `Utf8` / `RawBytes`)
 
 Deliverables:
 

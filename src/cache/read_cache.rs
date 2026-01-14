@@ -10,19 +10,24 @@ use crate::address::Address;
 use crate::cache::config::ReadCacheConfig;
 use crate::cache::record_info::ReadCacheRecordInfo;
 use crate::cache::stats::ReadCacheStats;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
+use crate::record::RecordInfo;
 use crate::status::Status;
+use crate::store::record_format;
 
 /// Page size for read cache (32 MB)
 const PAGE_SIZE: u64 = 1 << 25;
 const START_ADDRESS: u64 = 64;
 const WORD_BYTES: usize = std::mem::size_of::<u64>();
+const RECORD_INFO_SIZE: usize = std::mem::size_of::<RecordInfo>();
+const VARLEN_LENGTHS_SIZE: usize = 2 * std::mem::size_of::<u32>();
+const VARLEN_HEADER_SIZE: usize = RECORD_INFO_SIZE + VARLEN_LENGTHS_SIZE;
 
 /// Read cache for storing hot records in memory
 pub struct ReadCache<K, V>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Configuration
     config: ReadCacheConfig,
@@ -47,10 +52,27 @@ where
     _marker: std::marker::PhantomData<(K, V)>,
 }
 
+// SAFETY: `ReadCache` stores only bytes and synchronization primitives. It does not store any
+// instances of `K` or `V`, so it is safe to treat it as `Send`/`Sync` regardless of `K`/`V`.
+unsafe impl<K, V> Send for ReadCache<K, V>
+where
+    K: PersistKey,
+    V: PersistValue,
+{
+}
+
+// SAFETY: Same rationale as `Send` above.
+unsafe impl<K, V> Sync for ReadCache<K, V>
+where
+    K: PersistKey,
+    V: PersistValue,
+{
+}
+
 impl<K, V> ReadCache<K, V>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Create a new read cache with the given configuration
     pub fn new(config: ReadCacheConfig) -> Self {
@@ -116,30 +138,23 @@ where
         }
 
         let offset = self.offset_in_cache(control)?;
-        let record_size = Record::<K, V>::size();
-        if offset.checked_add(record_size)? > buffer_bytes_len {
+        if offset.checked_add(RECORD_INFO_SIZE)? > buffer_bytes_len {
             return None;
         }
 
         Some(offset)
     }
 
-    fn record_at<'a>(&self, buffer: &'a [u64], address: Address) -> Option<&'a Record<K, V>> {
+    fn record_at(&self, buffer: &[u64], address: Address) -> Option<*const u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
-        let ptr = unsafe { Self::buffer_as_ptr(buffer).add(offset) }.cast::<Record<K, V>>();
-        Some(unsafe { &*ptr })
+        Some(unsafe { Self::buffer_as_ptr(buffer).add(offset) })
     }
 
-    fn record_at_mut<'a>(
-        &self,
-        buffer: &'a mut [u64],
-        address: Address,
-    ) -> Option<&'a mut Record<K, V>> {
+    fn record_at_mut(&self, buffer: &mut [u64], address: Address) -> Option<*mut u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
-        let ptr = unsafe { Self::buffer_as_mut_ptr(buffer).add(offset) }.cast::<Record<K, V>>();
-        Some(unsafe { &mut *ptr })
+        Some(unsafe { Self::buffer_as_mut_ptr(buffer).add(offset) })
     }
 
     fn ensure_buffer_bytes_len(buffer: &mut Vec<u64>, required_bytes_len: usize) {
@@ -201,28 +216,42 @@ where
 
         // Get the record
         let buffer = self.buffer.read().ok()?;
-        let record = self.record_at(&buffer, rc_address)?;
+        let buffer_bytes_len = Self::buffer_bytes_len(&buffer);
+        let record_ptr = self.record_at(&buffer, rc_address)?;
+        let offset = self.record_offset(rc_address.control(), buffer_bytes_len)?;
+        let limit = buffer_bytes_len.saturating_sub(offset);
 
         // Create record info
-        let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
+        let header = unsafe { record_format::record_info_at(record_ptr) };
+        let rc_info = ReadCacheRecordInfo::from_record_info(header, false);
 
         // Check if record is valid
         if rc_info.is_invalid() {
             return self.miss();
         }
 
+        let view = match unsafe {
+            record_format::record_view_from_memory::<K, V>(rc_address, record_ptr, limit)
+        } {
+            Ok(view) => view,
+            Err(_) => return self.miss(),
+        };
+
         // Check if key matches
-        if unsafe { record.key() } != key {
+        let key_matches = <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key).ok()?;
+        if !key_matches {
             return self.miss();
         }
 
-        // Read cache doesn't store tombstones
-        if rc_info.is_tombstone() {
+        // Read cache doesn't store tombstones.
+        if view.is_tombstone() || rc_info.is_tombstone() {
             return self.miss();
         }
 
         self.stats.record_hit();
-        Some((unsafe { record.value().clone() }, rc_info))
+        let value_bytes = view.value_bytes()?;
+        let value = <V as PersistValue>::Codec::decode(value_bytes).ok()?;
+        Some((value, rc_info))
     }
 
     /// Try to insert a record into the read cache
@@ -245,7 +274,8 @@ where
     ) -> Result<Address, Status> {
         self.stats.record_insert();
 
-        let record_size = Record::<K, V>::size();
+        let (_, record_size, key_len, value_len) =
+            record_format::layout_for_ops::<K, V>(key, Some(value))?;
 
         // Try to allocate space
         let new_address = self.allocate(record_size)?;
@@ -261,8 +291,7 @@ where
         Self::ensure_buffer_bytes_len(&mut buffer, offset.saturating_add(record_size));
 
         // Create the record
-        let record_ptr =
-            unsafe { Self::buffer_as_mut_ptr(&mut buffer).add(offset) } as *mut Record<K, V>;
+        let record_ptr = unsafe { Self::buffer_as_mut_ptr(&mut buffer).add(offset) };
         unsafe {
             // Initialize record info with previous address pointing to HybridLog
             let record_info = RecordInfo::new(
@@ -274,15 +303,38 @@ where
             );
 
             // Write header
-            (*record_ptr).header = record_info;
+            std::ptr::write(record_ptr.cast::<RecordInfo>(), record_info);
 
-            // Write key
-            let key_ptr = (record_ptr as *mut u8).add(Record::<K, V>::key_offset()) as *mut K;
-            std::ptr::write(key_ptr, key.clone());
+            if record_format::is_fixed_record::<K, V>() {
+                let key_dst =
+                    std::slice::from_raw_parts_mut(record_ptr.add(RECORD_INFO_SIZE), key_len);
+                <K as PersistKey>::Codec::encode_into(key, key_dst)?;
+                let val_dst = std::slice::from_raw_parts_mut(
+                    record_ptr.add(RECORD_INFO_SIZE + key_len),
+                    value_len,
+                );
+                <V as PersistValue>::Codec::encode_into(value, val_dst)?;
+            } else {
+                let key_len_u32 = u32::try_from(key_len).map_err(|_| Status::ResourceExhausted)?;
+                let value_len_u32 =
+                    u32::try_from(value_len).map_err(|_| Status::ResourceExhausted)?;
 
-            // Write value
-            let value_ptr = (record_ptr as *mut u8).add(Record::<K, V>::value_offset()) as *mut V;
-            std::ptr::write(value_ptr, value.clone());
+                let len_dst = std::slice::from_raw_parts_mut(
+                    record_ptr.add(RECORD_INFO_SIZE),
+                    VARLEN_LENGTHS_SIZE,
+                );
+                len_dst[0..4].copy_from_slice(&key_len_u32.to_le_bytes());
+                len_dst[4..8].copy_from_slice(&value_len_u32.to_le_bytes());
+
+                let key_dst =
+                    std::slice::from_raw_parts_mut(record_ptr.add(VARLEN_HEADER_SIZE), key_len);
+                <K as PersistKey>::Codec::encode_into(key, key_dst)?;
+                let val_dst = std::slice::from_raw_parts_mut(
+                    record_ptr.add(VARLEN_HEADER_SIZE + key_len),
+                    value_len,
+                );
+                <V as PersistValue>::Codec::encode_into(value, val_dst)?;
+            }
         }
 
         self.stats.record_insert_success();
@@ -295,7 +347,17 @@ where
 
     /// Allocate space in the read cache
     fn allocate(&self, size: usize) -> Result<Address, Status> {
-        let size = size as u64;
+        let mem_size = self.config.mem_size;
+        if mem_size == 0 {
+            return Err(Status::ResourceExhausted);
+        }
+        let size = u64::try_from(size).map_err(|_| Status::ResourceExhausted)?;
+        if size > mem_size {
+            return Err(Status::ResourceExhausted);
+        }
+
+        let mem_size_usize = usize::try_from(mem_size).map_err(|_| Status::ResourceExhausted)?;
+        let size_usize = usize::try_from(size).map_err(|_| Status::ResourceExhausted)?;
 
         loop {
             let tail = self.tail_address.load(Ordering::Acquire);
@@ -307,6 +369,26 @@ where
                 // Trigger eviction
                 self.trigger_eviction()?;
                 continue;
+            }
+
+            // Avoid splitting a record across the end of the cache ring buffer.
+            if let Some(offset) = self.offset_in_cache(tail) {
+                let end = match offset.checked_add(size_usize) {
+                    Some(end) => end,
+                    None => return Err(Status::ResourceExhausted),
+                };
+                if end > mem_size_usize {
+                    let advance = mem_size.saturating_sub(tail % mem_size);
+                    let new_tail = tail + advance;
+                    if self
+                        .tail_address
+                        .compare_exchange(tail, new_tail, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    continue;
+                }
             }
 
             // Check if we're crossing a page boundary
@@ -388,19 +470,22 @@ where
             Err(_) => return,
         };
 
+        let buffer_bytes_len = Self::buffer_bytes_len(&buffer);
         let mut evicted = 0u64;
         let mut invalid = 0u64;
         let mut current = from_address;
 
         while current < to_address {
-            let record = match self.record_at(&buffer, current) {
-                Some(record) => record,
+            let offset = match self.record_offset(current.control(), buffer_bytes_len) {
+                Some(offset) => offset,
                 None => break,
             };
+            let record_ptr = unsafe { Self::buffer_as_ptr(&buffer).add(offset) };
 
-            let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
+            let header = unsafe { record_format::record_info_at(record_ptr) };
+            let rc_info = ReadCacheRecordInfo::from_record_info(header, false);
 
-            if record.header.is_null() {
+            if header.is_null() {
                 break;
             }
 
@@ -410,7 +495,19 @@ where
             }
 
             // Move to next record
-            current = Address::from_control(current.control() + Record::<K, V>::size() as u64);
+            let alloc_len = if record_format::is_fixed_record::<K, V>() {
+                record_format::fixed_alloc_len::<K, V>()
+            } else {
+                let limit = buffer_bytes_len.saturating_sub(offset);
+                let view = match unsafe {
+                    record_format::record_view_from_memory::<K, V>(current, record_ptr, limit)
+                } {
+                    Ok(view) => view,
+                    Err(_) => break,
+                };
+                record_format::varlen_alloc_len(view.key_bytes().len(), view.value_len())
+            };
+            current = Address::from_control(current.control() + alloc_len as u64);
         }
 
         self.stats.record_eviction(evicted, invalid);
@@ -427,12 +524,13 @@ where
             Ok(b) => b,
             Err(_) => return Address::INVALID,
         };
-        let record = match self.record_at(&buffer, rc_address) {
-            Some(record) => record,
+        let record_ptr = match self.record_at(&buffer, rc_address) {
+            Some(ptr) => ptr,
             None => return Address::INVALID,
         };
 
-        let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
+        let header = unsafe { record_format::record_info_at(record_ptr) };
+        let rc_info = ReadCacheRecordInfo::from_record_info(header, false);
         rc_info.get_previous_address()
     }
 
@@ -447,17 +545,30 @@ where
             Ok(b) => b,
             Err(_) => return Address::INVALID,
         };
-        let record = match self.record_at_mut(&mut buffer, rc_address) {
-            Some(record) => record,
+        let buffer_bytes_len = Self::buffer_bytes_len(&buffer);
+        let offset = match self.record_offset(rc_address.control(), buffer_bytes_len) {
+            Some(offset) => offset,
             None => return Address::INVALID,
         };
+        let record_ptr = unsafe { Self::buffer_as_mut_ptr(&mut buffer).add(offset) };
 
-        // Check if key matches
-        if unsafe { record.key() } == key {
-            record.header.set_invalid(true);
+        let header = unsafe { record_format::record_info_at(record_ptr) };
+        let rc_info = ReadCacheRecordInfo::from_record_info(header, false);
+
+        // Check if key matches.
+        let limit = buffer_bytes_len.saturating_sub(offset);
+        let key_matches = match unsafe {
+            record_format::record_view_from_memory::<K, V>(rc_address, record_ptr, limit)
+        } {
+            Ok(view) => {
+                <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key).unwrap_or(false)
+            }
+            Err(_) => false,
+        };
+        if key_matches {
+            header.set_invalid(true);
         }
 
-        let rc_info = ReadCacheRecordInfo::from_record_info(&record.header, false);
         rc_info.get_previous_address()
     }
 
@@ -479,36 +590,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-    struct TestKey(u64);
-
-    impl Key for TestKey {
-        fn size(&self) -> u32 {
-            std::mem::size_of::<Self>() as u32
-        }
-
-        fn get_hash(&self) -> u64 {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.hash(&mut hasher);
-            hasher.finish()
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Default)]
-    struct TestValue(u64);
-
-    impl Value for TestValue {
-        fn size(&self) -> u32 {
-            std::mem::size_of::<Self>() as u32
-        }
-    }
+    use crate::codec::{RawBytes, Utf8};
 
     #[test]
     fn test_create_cache() {
         let config = ReadCacheConfig::new(1024 * 1024);
-        let cache = ReadCache::<TestKey, TestValue>::new(config);
+        let cache = ReadCache::<u64, u64>::new(config);
 
         assert_eq!(cache.tail_address().control(), 64);
         assert_eq!(cache.stats().read_calls(), 0);
@@ -517,10 +604,10 @@ mod tests {
     #[test]
     fn test_insert_and_read() {
         let config = ReadCacheConfig::new(1024 * 1024);
-        let cache = ReadCache::<TestKey, TestValue>::new(config);
+        let cache = ReadCache::<u64, u64>::new(config);
 
-        let key = TestKey(42);
-        let value = TestValue(100);
+        let key = 42u64;
+        let value = 100u64;
         let prev_addr = Address::new(1, 500);
 
         // Insert
@@ -542,11 +629,11 @@ mod tests {
     #[test]
     fn test_read_miss_wrong_key() {
         let config = ReadCacheConfig::new(1024 * 1024);
-        let cache = ReadCache::<TestKey, TestValue>::new(config);
+        let cache = ReadCache::<u64, u64>::new(config);
 
-        let key = TestKey(42);
-        let wrong_key = TestKey(999);
-        let value = TestValue(100);
+        let key = 42u64;
+        let wrong_key = 999u64;
+        let value = 100u64;
         let prev_addr = Address::new(1, 500);
 
         // Insert
@@ -560,10 +647,10 @@ mod tests {
     #[test]
     fn test_skip() {
         let config = ReadCacheConfig::new(1024 * 1024);
-        let cache = ReadCache::<TestKey, TestValue>::new(config);
+        let cache = ReadCache::<u64, u64>::new(config);
 
-        let key = TestKey(42);
-        let value = TestValue(100);
+        let key = 42u64;
+        let value = 100u64;
         let prev_addr = Address::new(1, 500);
 
         // Insert
@@ -581,10 +668,10 @@ mod tests {
     #[test]
     fn test_stats() {
         let config = ReadCacheConfig::new(1024 * 1024);
-        let cache = ReadCache::<TestKey, TestValue>::new(config);
+        let cache = ReadCache::<u64, u64>::new(config);
 
-        let key = TestKey(42);
-        let value = TestValue(100);
+        let key = 42u64;
+        let value = 100u64;
 
         // Insert
         cache
@@ -596,5 +683,52 @@ mod tests {
         let addr = Address::from_control(64 | Address::READCACHE_BIT);
         let _ = cache.read(addr, &key);
         assert_eq!(cache.stats().read_calls(), 1);
+    }
+
+    #[test]
+    fn test_insert_and_read_varlen_utf8() {
+        let config = ReadCacheConfig::new(1024 * 1024);
+        let cache = ReadCache::<Utf8, Utf8>::new(config);
+
+        let key = Utf8::from("hello");
+        let value = Utf8::from("world");
+        let prev_addr = Address::new(1, 500);
+
+        let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
+        let (read_value, rc_info) = cache.read(cache_addr, &key).unwrap();
+        assert_eq!(read_value, value);
+        assert_eq!(rc_info.get_previous_address(), prev_addr);
+    }
+
+    #[test]
+    fn test_insert_and_read_varlen_raw_bytes() {
+        let config = ReadCacheConfig::new(1024 * 1024);
+        let cache = ReadCache::<RawBytes, RawBytes>::new(config);
+
+        let key = RawBytes::from(vec![1, 2, 3, 4]);
+        let value = RawBytes::from(vec![9, 8, 7]);
+        let prev_addr = Address::new(1, 500);
+
+        let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
+        let (read_value, rc_info) = cache.read(cache_addr, &key).unwrap();
+        assert_eq!(read_value, value);
+        assert_eq!(rc_info.get_previous_address(), prev_addr);
+    }
+
+    #[test]
+    fn test_invalidate_varlen_utf8() {
+        let config = ReadCacheConfig::new(1024 * 1024);
+        let cache = ReadCache::<Utf8, Utf8>::new(config);
+
+        let key = Utf8::from("hello");
+        let value = Utf8::from("world");
+        let prev_addr = Address::new(1, 500);
+
+        let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
+        assert!(cache.read(cache_addr, &key).is_some());
+
+        let previous = cache.invalidate(cache_addr, &key);
+        assert_eq!(previous, prev_addr);
+        assert!(cache.read(cache_addr, &key).is_none());
     }
 }

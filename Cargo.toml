@@ -11,9 +11,12 @@ keywords = ["kv-store", "database", "concurrent", "log", "storage"]
 categories = ["database", "data-structures", "concurrency"]
 
 [features]
-default = []
+default = ["hash-xxh3"]
 statistics = []
 io_uring = ["dep:io-uring"]
+hash-xxh3 = ["dep:xxhash-rust", "xxhash-rust/xxh3"]
+hash-xxh64 = ["dep:xxhash-rust", "xxhash-rust/xxh64"]
+f2 = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -29,6 +32,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
+bytemuck = { version = "1", features = ["derive"] }
+xxhash-rust = { version = "0.8", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6", optional = true }

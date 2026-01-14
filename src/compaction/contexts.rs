@@ -2,8 +2,13 @@
 //!
 //! Based on C++ FASTER's compact.h implementation.
 
+use std::slice;
+
 use crate::address::Address;
-use crate::record::{Key, Record, Value};
+use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
+use crate::status::Status;
+use crate::store::record_format;
+use crate::store::RecordView;
 
 /// Context for a compaction operation
 #[derive(Debug)]
@@ -67,71 +72,95 @@ impl CompactionContext {
 /// Context for conditional insert during compaction
 pub struct CompactionInsertContext<K, V>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
     /// Original address of the record
     pub original_address: Address,
-    /// Copy of the record data
-    record_data: Vec<u8>,
+    /// Copy of the record data (8-byte aligned).
+    ///
+    /// The record header contains an `AtomicU64`, so reading it via `RecordInfo` requires
+    /// proper alignment.
+    record_data: Vec<u64>,
+    /// Actual byte length of the record in `record_data`.
+    byte_len: usize,
     /// Phantom data for type parameters
     _marker: std::marker::PhantomData<(K, V)>,
 }
 
 impl<K, V> CompactionInsertContext<K, V>
 where
-    K: Key,
-    V: Value,
+    K: PersistKey,
+    V: PersistValue,
 {
-    /// Create a new insert context from a record
-    pub fn new(record: &Record<K, V>, original_address: Address) -> Self {
-        let record_size = Record::<K, V>::size();
-        let mut record_data = vec![0u8; record_size];
-
-        // Copy record data
+    /// Create a new insert context from encoded record bytes.
+    pub fn new(record_bytes: &[u8], original_address: Address) -> Self {
+        let word_len = record_bytes.len().div_ceil(std::mem::size_of::<u64>());
+        let mut record_data = vec![0u64; word_len];
         unsafe {
-            let src = record as *const Record<K, V> as *const u8;
-            std::ptr::copy_nonoverlapping(src, record_data.as_mut_ptr(), record_size);
+            std::ptr::copy_nonoverlapping(
+                record_bytes.as_ptr(),
+                record_data.as_mut_ptr().cast::<u8>(),
+                record_bytes.len(),
+            );
         }
 
         Self {
             original_address,
             record_data,
+            byte_len: record_bytes.len(),
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Get the record reference
-    pub fn record(&self) -> &Record<K, V> {
-        unsafe { &*(self.record_data.as_ptr() as *const Record<K, V>) }
+    #[inline]
+    fn record_bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.record_data.as_ptr().cast::<u8>(), self.byte_len) }
     }
 
-    /// Get the key reference
-    pub fn key(&self) -> &K {
-        unsafe { self.record().key() }
+    /// Parse the owned bytes into a zero-copy view.
+    pub fn view(&self) -> Result<RecordView<'_>, Status> {
+        unsafe {
+            record_format::record_view_from_memory::<K, V>(
+                self.original_address,
+                self.record_data.as_ptr().cast::<u8>(),
+                self.byte_len,
+            )
+        }
     }
 
-    /// Get the value reference
-    pub fn value(&self) -> &V {
-        unsafe { self.record().value() }
+    /// Decode and return the key.
+    pub fn key(&self) -> Result<K, Status> {
+        let view = self.view()?;
+        <K as PersistKey>::Codec::decode(view.key_bytes())
+    }
+
+    /// Decode and return the value (if not a tombstone).
+    pub fn value(&self) -> Result<Option<V>, Status> {
+        let view = self.view()?;
+        if view.is_tombstone() {
+            return Ok(None);
+        }
+        let bytes = view.value_bytes().ok_or(Status::Corruption)?;
+        Ok(Some(<V as PersistValue>::Codec::decode(bytes)?))
     }
 
     /// Check if this record is a tombstone
-    pub fn is_tombstone(&self) -> bool {
-        self.record().header.is_tombstone()
+    pub fn is_tombstone(&self) -> Result<bool, Status> {
+        Ok(self.view()?.is_tombstone())
     }
 
     /// Get the record size
     pub fn record_size(&self) -> usize {
-        self.record_data.len()
+        self.byte_len
     }
 
     /// Insert the record data into a destination
     pub fn insert_into(&self, dest: &mut [u8]) -> bool {
-        if dest.len() < self.record_data.len() {
+        if dest.len() < self.byte_len {
             return false;
         }
-        dest[..self.record_data.len()].copy_from_slice(&self.record_data);
+        dest[..self.byte_len].copy_from_slice(self.record_bytes());
         true
     }
 }
@@ -140,25 +169,22 @@ where
 mod tests {
     use super::*;
 
-    #[derive(Clone, Default, Debug, PartialEq, Eq)]
-    struct TestKey(u64);
+    fn make_fixed_record_u64(key: u64, value: u64, tombstone: bool) -> Vec<u8> {
+        let disk_len = crate::store::record_format::fixed_disk_len::<u64, u64>();
+        let mut buf = vec![0u8; disk_len];
 
-    impl Key for TestKey {
-        fn size(&self) -> u32 {
-            8
-        }
-        fn get_hash(&self) -> u64 {
-            self.0
-        }
-    }
-
-    #[derive(Clone, Default, Debug)]
-    struct TestValue(u64);
-
-    impl Value for TestValue {
-        fn size(&self) -> u32 {
-            8
-        }
+        let header = crate::record::RecordInfo::new(
+            Address::INVALID,
+            0,     // checkpoint_version
+            false, // invalid
+            tombstone,
+            false, // final_bit
+        );
+        let header_size = std::mem::size_of::<crate::record::RecordInfo>();
+        buf[0..header_size].copy_from_slice(&header.control().to_le_bytes());
+        buf[header_size..header_size + 8].copy_from_slice(&key.to_ne_bytes());
+        buf[header_size + 8..header_size + 16].copy_from_slice(&value.to_ne_bytes());
+        buf
     }
 
     #[test]
@@ -247,30 +273,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_insert_context_basic() {
-        // Test the record size method
-        let record_size = Record::<TestKey, TestValue>::size();
-        assert!(record_size > 0);
-    }
-
-    #[test]
     fn test_compaction_insert_context_record_size() {
-        // Create a buffer for the record
-        let record_size = Record::<TestKey, TestValue>::size();
-        let mut buffer = vec![0u8; record_size];
+        let buffer = make_fixed_record_u64(42, 100, false);
+        let record_size = buffer.len();
 
-        // Initialize the record in the buffer
-        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
-
-        // Initialize fields
-        record.header = crate::record::RecordInfo::default();
-        unsafe {
-            *record.key_mut() = TestKey(42);
-            *record.value_mut() = TestValue(100);
-        }
-
-        // Create insert context
-        let ctx = CompactionInsertContext::new(record, Address::from_control(1000));
+        let ctx = CompactionInsertContext::<u64, u64>::new(&buffer, Address::from_control(1000));
 
         // Verify original address
         assert_eq!(ctx.original_address.control(), 1000);
@@ -281,62 +288,35 @@ mod tests {
 
     #[test]
     fn test_compaction_insert_context_key_value() {
-        let record_size = Record::<TestKey, TestValue>::size();
-        let mut buffer = vec![0u8; record_size];
-
-        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
-        record.header = crate::record::RecordInfo::default();
-        unsafe {
-            *record.key_mut() = TestKey(123);
-            *record.value_mut() = TestValue(456);
-        }
-
-        let ctx = CompactionInsertContext::new(record, Address::new(2000, 0));
+        let buffer = make_fixed_record_u64(123, 456, false);
+        let ctx = CompactionInsertContext::<u64, u64>::new(&buffer, Address::new(2000, 0));
 
         // Test key access
-        let key = ctx.key();
-        assert_eq!(key.0, 123);
+        let key = ctx.key().unwrap();
+        assert_eq!(key, 123);
 
         // Test value access
-        let value = ctx.value();
-        assert_eq!(value.0, 456);
+        let value = ctx.value().unwrap();
+        assert_eq!(value, Some(456));
     }
 
     #[test]
     fn test_compaction_insert_context_is_tombstone() {
-        let record_size = Record::<TestKey, TestValue>::size();
-        let mut buffer = vec![0u8; record_size];
+        let buffer = make_fixed_record_u64(1, 1, false);
+        let ctx = CompactionInsertContext::<u64, u64>::new(&buffer, Address::new(0, 0));
+        assert!(!ctx.is_tombstone().unwrap());
 
-        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
-        record.header = crate::record::RecordInfo::default();
-        unsafe {
-            *record.key_mut() = TestKey(1);
-            *record.value_mut() = TestValue(1);
-        }
-
-        // Without tombstone flag
-        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
-        assert!(!ctx.is_tombstone());
-
-        // Set tombstone flag
-        record.header.set_tombstone(true);
-        let ctx_tombstone = CompactionInsertContext::new(record, Address::new(0, 0));
-        assert!(ctx_tombstone.is_tombstone());
+        let buffer = make_fixed_record_u64(1, 1, true);
+        let ctx_tombstone = CompactionInsertContext::<u64, u64>::new(&buffer, Address::new(0, 0));
+        assert!(ctx_tombstone.is_tombstone().unwrap());
+        assert_eq!(ctx_tombstone.value().unwrap(), None);
     }
 
     #[test]
     fn test_compaction_insert_context_insert_into() {
-        let record_size = Record::<TestKey, TestValue>::size();
-        let mut buffer = vec![0u8; record_size];
-
-        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
-        record.header = crate::record::RecordInfo::default();
-        unsafe {
-            *record.key_mut() = TestKey(999);
-            *record.value_mut() = TestValue(888);
-        }
-
-        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
+        let buffer = make_fixed_record_u64(999, 888, false);
+        let record_size = buffer.len();
+        let ctx = CompactionInsertContext::<u64, u64>::new(&buffer, Address::new(0, 0));
 
         // Test insert into sufficient buffer
         let mut dest = vec![0u8; record_size + 100];
@@ -352,25 +332,5 @@ mod tests {
         let mut dest_small = vec![0u8; record_size - 1];
         let result_small = ctx.insert_into(&mut dest_small);
         assert!(!result_small);
-    }
-
-    #[test]
-    fn test_compaction_insert_context_record_reference() {
-        let record_size = Record::<TestKey, TestValue>::size();
-        let mut buffer = vec![0u8; record_size];
-
-        let record = unsafe { &mut *(buffer.as_mut_ptr() as *mut Record<TestKey, TestValue>) };
-        record.header = crate::record::RecordInfo::default();
-        unsafe {
-            *record.key_mut() = TestKey(777);
-            *record.value_mut() = TestValue(666);
-        }
-
-        let ctx = CompactionInsertContext::new(record, Address::new(0, 0));
-
-        // Test getting the record reference
-        let record_ref = ctx.record();
-        assert_eq!(unsafe { record_ref.key() }.0, 777);
-        assert_eq!(unsafe { record_ref.value() }.0, 666);
     }
 }

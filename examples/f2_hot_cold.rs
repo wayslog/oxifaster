@@ -8,15 +8,27 @@
 //!
 //! 运行: cargo run --example f2_hot_cold
 
+#[cfg(not(feature = "f2"))]
+fn main() {
+    eprintln!(
+        "This example requires the `f2` feature. Run:\n  cargo run --example f2_hot_cold --features f2"
+    );
+}
+
+#[cfg(feature = "f2")]
 use std::path::PathBuf;
+#[cfg(feature = "f2")]
 use std::time::Duration;
 
+#[cfg(feature = "f2")]
 use oxifaster::cache::ReadCacheConfig;
+#[cfg(feature = "f2")]
 use oxifaster::f2::{
     ColdStoreConfig, F2CheckpointPhase, F2CheckpointState, F2CompactionConfig, F2Config,
     HotStoreConfig, ReadOperationStage, RmwOperationStage, StoreCheckpointStatus, StoreType,
 };
 
+#[cfg(feature = "f2")]
 fn main() {
     println!("=== oxifaster F2 Hot-Cold Architecture 示例 ===\n");
 

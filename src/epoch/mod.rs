@@ -21,9 +21,10 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use oxifaster::epoch::{LightEpoch, get_thread_id};
+//! use std::sync::Arc;
+//! use oxifaster::epoch::{EpochGuard, LightEpoch, get_thread_id};
 //!
-//! let epoch = LightEpoch::new();
+//! let epoch = Arc::new(LightEpoch::new());
 //! let tid = get_thread_id();
 //!
 //! // Protect before accessing shared data
@@ -36,7 +37,7 @@
 //!
 //! // Or use the RAII guard
 //! {
-//!     let _guard = EpochGuard::new(&epoch, tid);
+//!     let _guard = EpochGuard::new(epoch.clone(), tid);
 //!     // ... automatically unprotects when dropped ...
 //! }
 //! ```

@@ -3,7 +3,7 @@
 //! This benchmark tests the performance of FasterKv under different workloads:
 //! - Basic single-threaded operations (upsert, read, mixed, RMW)
 //! - Multi-threaded concurrent operations
-//! - Large key/value operations using SpanByte
+//! - Large key/value operations using RawBytes (varlen, no envelope)
 //! - Real disk I/O operations using FileSystemDisk
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,9 +13,9 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
 
+use oxifaster::codec::RawBytes;
 use oxifaster::device::{FileSystemDisk, NullDisk};
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::varlen::SpanByte;
 
 // =============================================================================
 // Helper Functions
@@ -33,11 +33,11 @@ fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, Nul
     Arc::new(FasterKv::new(config, device))
 }
 
-/// Create a test store with SpanByte key/value and NullDisk
-fn create_spanb_store(
+/// Create a test store with RawBytes key/value and NullDisk
+fn create_raw_bytes_store(
     table_size: u64,
     memory_size: u64,
-) -> Arc<FasterKv<SpanByte, SpanByte, NullDisk>> {
+) -> Arc<FasterKv<RawBytes, RawBytes, NullDisk>> {
     let config = FasterKvConfig {
         table_size,
         log_memory_size: memory_size,
@@ -382,7 +382,7 @@ fn bench_concurrent_write(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Large Key/Value Benchmarks (using SpanByte)
+// Large Key/Value Benchmarks (using RawBytes)
 // =============================================================================
 
 /// Benchmark read with 1KB values
@@ -393,7 +393,7 @@ fn bench_large_value_read_1kb(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(1024));
 
     // Small store: 64MB
-    let store = create_spanb_store(1 << 14, 1 << 26);
+    let store = create_raw_bytes_store(1 << 14, 1 << 26);
     let test_data = generate_random_bytes(1024);
     let num_keys = 500u64;
 
@@ -401,8 +401,8 @@ fn bench_large_value_read_1kb(c: &mut Criterion) {
     {
         let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
-            let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
-            let value = SpanByte::from_vec(test_data.clone());
+            let key = RawBytes::from(i.to_le_bytes().to_vec());
+            let value = RawBytes::from(test_data.clone());
             session.upsert(key, value);
         }
     }
@@ -412,7 +412,7 @@ fn bench_large_value_read_1kb(c: &mut Criterion) {
         let mut rng = rand::thread_rng();
         b.iter(|| {
             let key_num = rng.gen_range(0..num_keys);
-            let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+            let key = RawBytes::from(key_num.to_le_bytes().to_vec());
             session.read(black_box(&key))
         })
     });
@@ -427,15 +427,15 @@ fn bench_large_value_read_4kb(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Bytes(4096));
 
-    let store = create_spanb_store(1 << 14, 1 << 26);
+    let store = create_raw_bytes_store(1 << 14, 1 << 26);
     let test_data = generate_random_bytes(4096);
     let num_keys = 500u64;
 
     {
         let mut session = store.start_session().unwrap();
         for i in 0..num_keys {
-            let key = SpanByte::from_vec(i.to_le_bytes().to_vec());
-            let value = SpanByte::from_vec(test_data.clone());
+            let key = RawBytes::from(i.to_le_bytes().to_vec());
+            let value = RawBytes::from(test_data.clone());
             session.upsert(key, value);
         }
     }
@@ -445,7 +445,7 @@ fn bench_large_value_read_4kb(c: &mut Criterion) {
         let mut rng = rand::thread_rng();
         b.iter(|| {
             let key_num = rng.gen_range(0..num_keys);
-            let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
+            let key = RawBytes::from(key_num.to_le_bytes().to_vec());
             session.read(black_box(&key))
         })
     });
@@ -460,7 +460,7 @@ fn bench_large_value_write_1kb(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Bytes(1024));
 
-    let store = create_spanb_store(1 << 14, 1 << 26);
+    let store = create_raw_bytes_store(1 << 14, 1 << 26);
     let test_data: Arc<Vec<u8>> = Arc::new(generate_random_bytes(1024));
     let max_keys = 500u64;
     let key_counter = Arc::new(AtomicU64::new(0));
@@ -473,8 +473,8 @@ fn bench_large_value_write_1kb(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let key_num = key_counter.fetch_add(1, Ordering::Relaxed) % max_keys;
-                let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
-                let value = SpanByte::from_vec((*test_data).clone());
+                let key = RawBytes::from(key_num.to_le_bytes().to_vec());
+                let value = RawBytes::from((*test_data).clone());
                 (key, value)
             },
             |(key, value)| session.upsert(black_box(key), black_box(value)),
@@ -492,7 +492,7 @@ fn bench_large_value_write_4kb(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Bytes(4096));
 
-    let store = create_spanb_store(1 << 14, 1 << 26);
+    let store = create_raw_bytes_store(1 << 14, 1 << 26);
     let test_data: Arc<Vec<u8>> = Arc::new(generate_random_bytes(4096));
     let max_keys = 500u64;
     let key_counter = Arc::new(AtomicU64::new(0));
@@ -505,8 +505,8 @@ fn bench_large_value_write_4kb(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let key_num = key_counter.fetch_add(1, Ordering::Relaxed) % max_keys;
-                let key = SpanByte::from_vec(key_num.to_le_bytes().to_vec());
-                let value = SpanByte::from_vec((*test_data).clone());
+                let key = RawBytes::from(key_num.to_le_bytes().to_vec());
+                let value = RawBytes::from((*test_data).clone());
                 (key, value)
             },
             |(key, value)| session.upsert(black_box(key), black_box(value)),
@@ -651,7 +651,7 @@ criterion_group!(
     targets = bench_concurrent_read, bench_concurrent_mixed, bench_concurrent_write
 );
 
-// Large value benchmarks using SpanByte (separate functions to control memory)
+// Large value benchmarks using RawBytes (separate functions to control memory)
 criterion_group!(
     name = large_value_benches;
     config = Criterion::default()

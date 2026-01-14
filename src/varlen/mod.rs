@@ -59,5 +59,6 @@
 mod span_byte;
 mod traits;
 
+pub use span_byte::SpanByteView;
 pub use span_byte::{SpanByte, SpanByteBuilder};
 pub use traits::{VarLenKey, VarLenStruct, VarLenValue};

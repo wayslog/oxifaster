@@ -29,8 +29,8 @@ use crate::compaction::{CompactionConfig, Compactor};
 use crate::device::StorageDevice;
 use crate::f2::config::{F2CompactionConfig, F2Config};
 use crate::f2::state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
-use crate::record::{Key, Value};
 use crate::status::Status;
+use bytemuck::Pod;
 
 use self::key_access::KeyAccessTracker;
 
@@ -41,8 +41,8 @@ use self::key_access::KeyAccessTracker;
 /// while the cold store holds less frequently accessed data.
 pub struct F2Kv<K, V, D>
 where
-    K: Key,
-    V: Value,
+    K: Pod + Eq + Send + Sync,
+    V: Pod + Send + Sync,
     D: StorageDevice,
 {
     /// Configuration
@@ -75,8 +75,8 @@ where
 
 impl<K, V, D> F2Kv<K, V, D>
 where
-    K: Key + Clone + 'static,
-    V: Value + Clone + 'static,
+    K: Pod + Eq + Clone + Send + Sync + 'static,
+    V: Pod + Clone + Send + Sync + 'static,
     D: StorageDevice + 'static,
 {
     /// Default page size bits
@@ -92,15 +92,10 @@ where
         // - Records are written into the log memory via `ptr::write` directly as `K/V`. If `K/V`
         //   contains heap pointers (e.g., `String`/`Vec`), it would leak heap memory and any form
         //   of persistence/recovery would result in dangling pointers.
-        // - F2 does not yet define a general serialization format for records, so we must reject
-        //   non-POD types to avoid data corruption.
-        if std::mem::needs_drop::<K>() || std::mem::needs_drop::<V>() {
-            return Err(
-                "F2 currently supports only POD (Plain Old Data) keys/values (e.g. u64, i64, [u8; N]). \
-                 Non-POD types (e.g. String, Vec, SpanByte) require serialization support and are not supported yet."
-                    .to_string(),
-            );
-        }
+        // - F2 does not yet define a general serialization format for records, so only `Pod`
+        //   keys/values are supported to avoid data corruption.
+        //
+        // This constraint is enforced at compile time via the `K: Pod` / `V: Pod` bounds.
 
         // Create hot store
         let hot_store = InternalStore::new(
@@ -750,9 +745,9 @@ where
 
 impl<K, V, D> Drop for F2Kv<K, V, D>
 where
-    K: Key,
-    V: Value,
-    D: StorageDevice,
+    K: Pod + Eq + Clone + Send + Sync + 'static,
+    V: Pod + Clone + Send + Sync + 'static,
+    D: StorageDevice + 'static,
 {
     fn drop(&mut self) {
         // Wait for operations to complete

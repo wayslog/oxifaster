@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
+use oxifaster::codec::{RawBytes, Utf8};
 use oxifaster::device::NullDisk;
-use oxifaster::record::{Key, Value};
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use oxifaster::varlen::{SpanByte, SpanByteBuilder, VarLenKey, VarLenStruct, VarLenValue};
@@ -243,30 +243,9 @@ fn test_varlen_value_in_place_update() {
     assert!(!VarLenValue::try_in_place_update(&mut span1, &span3));
 }
 
-// ============ Key/Value Traits Tests ============
-
-#[test]
-fn test_span_byte_key_trait() {
-    let span = SpanByte::from_slice(b"key");
-
-    let size = Key::size(&span);
-    assert_eq!(size, span.total_size() as u32);
-
-    let hash = Key::get_hash(&span);
-    assert_ne!(hash, 0);
-}
-
-#[test]
-fn test_span_byte_value_trait() {
-    let span = SpanByte::from_slice(b"value");
-
-    let size = Value::size(&span);
-    assert_eq!(size, span.total_size() as u32);
-}
-
 // ============ FasterKv Integration Tests ============
 
-fn create_test_store() -> Arc<FasterKv<SpanByte, SpanByte, NullDisk>> {
+fn create_test_store() -> Arc<FasterKv<Utf8, Utf8, NullDisk>> {
     let config = FasterKvConfig {
         table_size: 1024,
         log_memory_size: 1 << 20,
@@ -278,12 +257,12 @@ fn create_test_store() -> Arc<FasterKv<SpanByte, SpanByte, NullDisk>> {
 }
 
 #[test]
-fn test_fasterkv_span_byte_upsert_read() {
+fn test_fasterkv_varlen_utf8_upsert_read() {
     let store = create_test_store();
     let mut session = store.start_session().unwrap();
 
-    let key = SpanByte::from_string("key1");
-    let value = SpanByte::from_string("value1");
+    let key = Utf8::from("key1");
+    let value = Utf8::from("value1");
 
     let status = session.upsert(key.clone(), value.clone());
     assert_eq!(status, Status::Ok);
@@ -293,12 +272,12 @@ fn test_fasterkv_span_byte_upsert_read() {
 }
 
 #[test]
-fn test_fasterkv_span_byte_delete() {
+fn test_fasterkv_varlen_utf8_delete() {
     let store = create_test_store();
     let mut session = store.start_session().unwrap();
 
-    let key = SpanByte::from_string("key1");
-    let value = SpanByte::from_string("value1");
+    let key = Utf8::from("key1");
+    let value = Utf8::from("value1");
 
     session.upsert(key.clone(), value);
     let delete_status = session.delete(&key);
@@ -309,13 +288,13 @@ fn test_fasterkv_span_byte_delete() {
 }
 
 #[test]
-fn test_fasterkv_span_byte_update() {
+fn test_fasterkv_varlen_utf8_update() {
     let store = create_test_store();
     let mut session = store.start_session().unwrap();
 
-    let key = SpanByte::from_string("key1");
-    let value1 = SpanByte::from_string("value1");
-    let value2 = SpanByte::from_string("value2");
+    let key = Utf8::from("key1");
+    let value1 = Utf8::from("value1");
+    let value2 = Utf8::from("value2");
 
     session.upsert(key.clone(), value1);
     session.upsert(key.clone(), value2.clone());
@@ -325,34 +304,42 @@ fn test_fasterkv_span_byte_update() {
 }
 
 #[test]
-fn test_fasterkv_span_byte_multiple_keys() {
+fn test_fasterkv_varlen_utf8_multiple_keys() {
     let store = create_test_store();
     let mut session = store.start_session().unwrap();
 
     for i in 0..100 {
-        let key = SpanByte::from_string(&format!("key{i}"));
-        let value = SpanByte::from_string(&format!("value{i}"));
+        let key = Utf8::from(format!("key{i}"));
+        let value = Utf8::from(format!("value{i}"));
         session.upsert(key, value);
     }
 
     for i in 0..100 {
-        let key = SpanByte::from_string(&format!("key{i}"));
-        let expected = SpanByte::from_string(&format!("value{i}"));
+        let key = Utf8::from(format!("key{i}"));
+        let expected = Utf8::from(format!("value{i}"));
         let result = session.read(&key);
         assert_eq!(result, Ok(Some(expected)));
     }
 }
 
 #[test]
-fn test_fasterkv_span_byte_binary_data() {
-    let store = create_test_store();
+fn test_fasterkv_varlen_raw_bytes() {
+    let config = FasterKvConfig {
+        table_size: 1024,
+        log_memory_size: 1 << 20,
+        page_size_bits: 14,
+        mutable_fraction: 0.9,
+    };
+    let store = Arc::new(FasterKv::<RawBytes, RawBytes, _>::new(
+        config,
+        NullDisk::new(),
+    ));
     let mut session = store.start_session().unwrap();
 
-    let key = SpanByte::from_vec(vec![0, 1, 2, 3, 4]);
-    let value = SpanByte::from_vec((0u8..=255).collect());
+    let key = RawBytes::from(vec![0, 1, 2, 3, 4]);
+    let value = RawBytes::from((0u8..=255).collect::<Vec<u8>>());
 
     session.upsert(key.clone(), value.clone());
-
     let result = session.read(&key);
     assert_eq!(result, Ok(Some(value)));
 }

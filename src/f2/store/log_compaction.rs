@@ -3,20 +3,22 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::address::Address;
+use crate::codec::hash64;
 use crate::compaction::{CompactionResult, CompactionStats};
 use crate::f2::config::HotToColdMigrationStrategy;
 use crate::f2::state::{F2CheckpointPhase, StoreCheckpointStatus};
 use crate::index::KeyHash;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::{Record, RecordInfo};
 use crate::status::Status;
+use bytemuck::Pod;
 
 use super::internal_store::InternalStore;
 use super::{F2Kv, StoreType};
 
 impl<K, V, D> F2Kv<K, V, D>
 where
-    K: Key + Clone + 'static,
-    V: Value + Clone + 'static,
+    K: Pod + Eq + Clone + Send + Sync + 'static,
+    V: Pod + Clone + Send + Sync + 'static,
     D: crate::device::StorageDevice + 'static,
 {
     /// Compact the hot log
@@ -55,7 +57,7 @@ where
             StoreType::Cold => (&self.cold_store, &self.cold_compactor),
         };
 
-        // Validate until_address（不能超过 tail）
+        // Validate until_address (must not exceed tail).
         let tail = store.tail_address();
         if until_address.control() > tail.control() {
             return Err(Status::InvalidArgument);
@@ -119,30 +121,30 @@ where
         debug_assert!(!std::mem::needs_drop::<K>());
         debug_assert!(!std::mem::needs_drop::<V>());
 
-        // 推进 begin_address 会让旧页有机会被复用，因此必须先 flush，保证被回收区间数据稳定落盘。
-        // flush 会同步更新 safe_read_only_address。
+        // Advancing begin_address makes old pages eligible for reuse. Flush first so that the
+        // reclaimed range is durably persisted; flushing also updates safe_read_only_address.
         if let Err(_e) = store.hlog().flush_until(until_address) {
             compactor.complete();
             return Err(Status::Corruption);
         }
 
-        // hot log compaction = 迁移：把 compact 区间内仍“活跃”的记录写入 cold store，
-        // 并尝试清理 hot index，之后才能安全推进 begin_address。
+        // Hot-log compaction is migration: copy still-live records from the compacted range into
+        // the cold store, and clear the hot index entry. Only then is it safe to advance begin.
         let mut current_address = begin_addr;
         let strategy = &self.config.compaction.hot_to_cold_migration;
         while current_address < until_address {
             let record_ptr = unsafe { store.hlog().get(current_address) };
 
             if let Some(ptr) = record_ptr {
-                // SAFETY: 受 epoch 保护，且 address 指向日志内一条 record。
+                // SAFETY: Protected by epoch; `current_address` points to a record in the log.
                 let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
                 let record_size_u64 = Record::<K, V>::size() as u64;
 
                 stats.records_scanned += 1;
                 stats.bytes_scanned += record_size_u64;
 
-                let record_key = unsafe { record.key() };
-                let hash = KeyHash::new(record_key.get_hash());
+                let record_key = unsafe { Record::<K, V>::read_key(ptr.as_ptr()) };
+                let hash = KeyHash::new(hash64(bytemuck::bytes_of(&record_key)));
                 let is_tombstone = record.header.is_tombstone();
                 if is_tombstone {
                     stats.tombstones_found += 1;
@@ -161,7 +163,7 @@ where
                             } => self.key_access.get_estimated(hash.hash()) >= *min_hot_accesses,
                         };
 
-                        // tombstone 一律迁移到 cold，避免未来热端回收后“冷端旧值复活”
+                        // Always migrate tombstones to cold to prevent cold-store resurrection.
                         let should_migrate_to_cold = is_tombstone || !keep_hot;
 
                         if should_migrate_to_cold {
@@ -170,7 +172,8 @@ where
                                     store,
                                     &index_result,
                                     record_key,
-                                    record,
+                                    ptr.as_ptr(),
+                                    is_tombstone,
                                     hash,
                                 )
                                 .is_ok()
@@ -184,7 +187,7 @@ where
                                 }
                             }
                         } else {
-                            let value = unsafe { record.value() };
+                            let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
                             if self
                                 .copy_record_to_hot_tail(
                                     store,
@@ -206,18 +209,18 @@ where
                             }
                         }
                     } else {
-                        // 不是最新记录
+                        // Not the latest record.
                         stats.records_skipped += 1;
                     }
                 } else {
-                    // 不在 index：可回收
+                    // Not in index: reclaimable.
                     stats.records_skipped += 1;
                 }
 
                 current_address =
                     Address::from_control(current_address.control() + record_size_u64);
             } else {
-                // 页内可能存在未写入区域，直接跳到下一页起点
+                // There may be unwritten space within the page; jump to the next page boundary.
                 let page_size = store.hlog().page_size() as u64;
                 let next_page = (current_address.control() / page_size + 1) * page_size;
                 current_address = Address::from_control(next_page);
@@ -242,17 +245,16 @@ where
         &self,
         store: &InternalStore<D>,
         index_result: &crate::index::FindResult,
-        record_key: &K,
-        record: &Record<K, V>,
+        record_key: K,
+        record_base: *const u8,
+        is_tombstone: bool,
         hash: KeyHash,
     ) -> Result<(), Status> {
-        let is_tombstone = record.header.is_tombstone();
-
         let write_result = if is_tombstone {
-            self.tombstone_into_store(&self.cold_store, hash, record_key.clone())
+            self.tombstone_into_store(&self.cold_store, hash, record_key)
         } else {
-            let value = unsafe { record.value() };
-            self.upsert_into_store(&self.cold_store, hash, record_key.clone(), value.clone())
+            let value = unsafe { Record::<K, V>::read_value(record_base) };
+            self.upsert_into_store(&self.cold_store, hash, record_key, value)
         };
 
         if write_result.is_err() {
@@ -283,8 +285,8 @@ where
         &self,
         store: &InternalStore<D>,
         index_result: &crate::index::FindResult,
-        record_key: &K,
-        value: &V,
+        record_key: K,
+        value: V,
         hash: KeyHash,
         old_address: Address,
     ) -> Result<(), Status> {
@@ -307,11 +309,8 @@ where
             );
             ptr::write(&mut (*new_record).header, header);
 
-            let key_ptr = record_ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
-            ptr::write(key_ptr, record_key.clone());
-
-            let value_ptr = record_ptr.as_ptr().add(Record::<K, V>::value_offset()) as *mut V;
-            ptr::write(value_ptr, value.clone());
+            Record::<K, V>::write_key(record_ptr.as_ptr(), record_key);
+            Record::<K, V>::write_value(record_ptr.as_ptr(), value);
         }
 
         let Some(atomic_entry) = index_result.atomic_entry else {
@@ -387,7 +386,7 @@ where
         // Respect max compacted size
         until_address = until_address.min(begin_address + self.config.compaction.max_compact_size);
 
-        // 不要超过 tail（flush 会在 compact 时做）
+        // Do not exceed tail (flush happens during compaction).
         let tail = store.tail_address().control();
         until_address = until_address.min(tail);
 

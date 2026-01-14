@@ -52,12 +52,14 @@ mod async_session;
 mod contexts;
 mod faster_kv;
 mod pending_io;
+pub(crate) mod record_format;
 mod session;
 mod state_transitions;
 
 pub use async_session::{AsyncSession, AsyncSessionBuilder};
 pub use contexts::{DeleteContext, PendingContext, ReadContext, RmwContext, UpsertContext};
 pub use faster_kv::{CheckpointKind, FasterKv, FasterKvConfig};
+pub use record_format::RecordView;
 pub use session::{Session, SessionBuilder, ThreadContext};
 pub use state_transitions::{Action, AtomicSystemState, Phase, SystemState};
 

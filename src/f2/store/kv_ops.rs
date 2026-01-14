@@ -2,23 +2,25 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use crate::address::Address;
+use crate::codec::hash64;
 use crate::f2::HotToColdMigrationStrategy;
 use crate::index::KeyHash;
-use crate::record::{Key, Record, RecordInfo, Value};
+use crate::record::{Record, RecordInfo};
 use crate::status::Status;
+use bytemuck::Pod;
 
 use super::internal_store::InternalStore;
 use super::F2Kv;
 
 impl<K, V, D> F2Kv<K, V, D>
 where
-    K: Key + Clone + 'static,
-    V: Value + Clone + 'static,
+    K: Pod + Eq + Clone + Send + Sync + 'static,
+    V: Pod + Clone + Send + Sync + 'static,
     D: crate::device::StorageDevice + 'static,
 {
-    /// 读取：先 hot 再 cold。
+    /// Read: hot first, then cold.
     pub fn read(&self, key: &K) -> Result<Option<V>, Status> {
-        let hash = KeyHash::new(key.get_hash());
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
 
         if let Some(value) = self.internal_read(&self.hot_store, true, key, hash)? {
             return Ok(Some(value));
@@ -31,41 +33,43 @@ where
         Ok(None)
     }
 
-    /// Upsert：总是写入 hot store。
+    /// Upsert: always writes to the hot store.
     pub fn upsert(&self, key: K, value: V) -> Result<(), Status> {
-        // 简单节流：hot log 超预算时等待后台 compaction/migration 推进 begin。
+        // Basic throttling: wait for background compaction/migration to advance begin.
         let max_size = self.hot_store.max_hlog_size.load(Ordering::Acquire);
         while self.hot_store.size() >= max_size {
             self.refresh();
             std::hint::spin_loop();
         }
 
-        let hash = KeyHash::new(key.get_hash());
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
         self.track_key_access(hash.hash());
         self.upsert_into_store(&self.hot_store, hash, key, value)
     }
 
-    /// Delete：写入 hot store tombstone，确保能覆盖 cold store 的旧值。
+    /// Delete: writes a hot-store tombstone to override a cold-store value.
     pub fn delete(&self, key: &K) -> Result<(), Status> {
-        let hash = KeyHash::new(key.get_hash());
-        self.tombstone_into_store(&self.hot_store, hash, key.clone())
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
+        self.tombstone_into_store(&self.hot_store, hash, *key)
     }
 
-    /// Read-Modify-Write：
-    /// - 若 hot 可 in-place（mutable region 且命中同 key 且非 tombstone），直接原地修改；
-    /// - 否则先读 hot/cold 得到值（若都不存在则用 Default），修改后 upsert 回 hot。
+    /// Read-Modify-Write:
+    /// - If the hot record is mutable and matches, update in-place.
+    /// - Otherwise, read hot/cold (or use `Default`), apply the update, and upsert into hot.
     pub fn rmw<F>(&self, key: K, modify: F) -> Result<(), Status>
     where
         F: FnOnce(&mut V),
         V: Default,
     {
-        let hash = KeyHash::new(key.get_hash());
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
         self.track_key_access(hash.hash());
 
-        if let Some(value_ptr) = self.try_get_mutable_value_ptr(&self.hot_store, &key, hash)? {
-            // SAFETY: value_ptr 指向 mutable region 的记录 value，且 epoch 已保护。
-            let value = unsafe { &mut *value_ptr };
-            modify(value);
+        if let Some(record_base) = self.try_get_mutable_record_ptr(&self.hot_store, &key, hash)? {
+            // SAFETY: `record_base` points to a record in the mutable region and is epoch-protected.
+            let value_ptr = unsafe { record_base.add(Record::<K, V>::value_offset()) as *mut V };
+            let mut current = unsafe { ptr::read_unaligned(value_ptr) };
+            modify(&mut current);
+            unsafe { ptr::write_unaligned(value_ptr, current) };
             return Ok(());
         }
 
@@ -91,26 +95,27 @@ where
             return Ok(None);
         }
 
-        // 只实现内存读取路径：PersistentMemoryMalloc 当前没有对外暴露“同步读盘”能力。
+        // Only the in-memory read path is implemented: `PersistentMemoryMalloc` does not currently
+        // expose a synchronous disk-read API.
         while address.is_valid() {
             let record_ptr = unsafe { store.hlog().get(address) };
             let Some(ptr) = record_ptr else {
                 break;
             };
 
-            // SAFETY: address 指向日志中一条 record，且访问受 epoch 保护。
+            // SAFETY: `address` points to a log record and the access is epoch-protected.
             let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
-            let record_key = unsafe { record.key() };
+            let record_key = unsafe { Record::<K, V>::read_key(ptr.as_ptr()) };
 
-            if record_key == key {
+            if record_key == *key {
                 if record.header.is_tombstone() {
                     return Ok(None);
                 }
-                let value = unsafe { record.value() };
+                let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
                 if is_hot {
                     self.track_key_access(hash.hash());
                 }
-                return Ok(Some(value.clone()));
+                return Ok(Some(value));
             }
 
             address = record.header.previous_address();
@@ -138,11 +143,12 @@ where
         debug_assert!(!std::mem::needs_drop::<K>());
         debug_assert!(!std::mem::needs_drop::<V>());
 
-        // 为避免在高并发下 CAS 失败直接丢写，这里做有限次重试。
+        // To avoid dropping writes under high contention due to CAS failures, retry a bounded number of times.
         const MAX_RETRIES: usize = 32;
 
-        // 避免在 CAS 重试时反复分配日志空间：先分配并初始化 record（key/value），
-        // 每次重试只更新 header.previous_address 并尝试更新 index。
+        // Avoid allocating log space repeatedly across CAS retries:
+        // allocate and initialize the record (key/value) once, then only update
+        // `header.previous_address` and retry updating the index.
         let record_size = Record::<K, V>::size();
         let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
 
@@ -153,11 +159,8 @@ where
 
         let record = ptr.as_ptr() as *mut Record<K, V>;
         unsafe {
-            let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
-            ptr::write(key_ptr, key.clone());
-
-            let value_ptr = ptr.as_ptr().add(Record::<K, V>::value_offset()) as *mut V;
-            ptr::write(value_ptr, value.clone());
+            Record::<K, V>::write_key(ptr.as_ptr(), key);
+            Record::<K, V>::write_value(ptr.as_ptr(), value);
         }
 
         for _ in 0..MAX_RETRIES {
@@ -202,7 +205,7 @@ where
 
         const MAX_RETRIES: usize = 32;
 
-        // 与 upsert 同理：避免 CAS 重试造成日志空间“空洞”。
+        // Same rationale as upsert: avoid creating holes in the log due to CAS retries.
         let record_size = Record::<K, V>::size();
         let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
 
@@ -213,8 +216,7 @@ where
 
         let record = ptr.as_ptr() as *mut Record<K, V>;
         unsafe {
-            let key_ptr = ptr.as_ptr().add(Record::<K, V>::key_offset()) as *mut K;
-            ptr::write(key_ptr, key.clone());
+            Record::<K, V>::write_key(ptr.as_ptr(), key);
         }
 
         for _ in 0..MAX_RETRIES {
@@ -247,12 +249,12 @@ where
         Err(Status::Aborted)
     }
 
-    fn try_get_mutable_value_ptr(
+    fn try_get_mutable_record_ptr(
         &self,
         store: &InternalStore<D>,
         key: &K,
         hash: KeyHash,
-    ) -> Result<Option<*mut V>, Status> {
+    ) -> Result<Option<*mut u8>, Status> {
         let find_result = store.hash_index.find_entry(hash);
         if !find_result.found() {
             return Ok(None);
@@ -273,17 +275,16 @@ where
         };
 
         unsafe {
-            let record = ptr.as_ptr() as *mut Record<K, V>;
-            let record_key = (*record).key();
-            if record_key != key {
+            let record = &*(ptr.as_ptr() as *const Record<K, V>);
+            let record_key = Record::<K, V>::read_key(ptr.as_ptr());
+            if record_key != *key {
                 return Ok(None);
             }
-            if (*record).header.is_tombstone() {
+            if record.header.is_tombstone() {
                 return Ok(None);
             }
 
-            let value_ptr = ptr.as_ptr().add(Record::<K, V>::value_offset()) as *mut V;
-            Ok(Some(value_ptr))
+            Ok(Some(ptr.as_ptr()))
         }
     }
 }

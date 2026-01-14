@@ -7,35 +7,7 @@ use std::thread;
 
 use oxifaster::cache::{ReadCache, ReadCacheConfig, ReadCacheStats};
 use oxifaster::device::NullDisk;
-use oxifaster::record::{Key, Value};
 use oxifaster::store::{FasterKv, FasterKvConfig};
-
-// ============ Test Types ============
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
-struct TestKey(u64);
-
-impl Key for TestKey {
-    fn size(&self) -> u32 {
-        std::mem::size_of::<Self>() as u32
-    }
-
-    fn get_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-struct TestValue(u64);
-
-impl Value for TestValue {
-    fn size(&self) -> u32 {
-        std::mem::size_of::<Self>() as u32
-    }
-}
 
 // ============ Helper Functions ============
 
@@ -114,7 +86,7 @@ fn test_cache_config_clamp_fraction() {
 #[test]
 fn test_read_cache_create() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
     assert_eq!(cache.tail_address().control(), 64);
     assert_eq!(cache.stats().read_calls(), 0);
@@ -123,10 +95,10 @@ fn test_read_cache_create() {
 #[test]
 fn test_read_cache_insert_and_read() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
-    let key = TestKey(42);
-    let value = TestValue(100);
+    let key = 42u64;
+    let value = 100u64;
     let prev_addr = oxifaster::Address::new(1, 500);
 
     // Insert
@@ -148,11 +120,11 @@ fn test_read_cache_insert_and_read() {
 #[test]
 fn test_read_cache_miss_wrong_key() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
-    let key = TestKey(42);
-    let wrong_key = TestKey(999);
-    let value = TestValue(100);
+    let key = 42u64;
+    let wrong_key = 999u64;
+    let value = 100u64;
 
     let cache_addr = cache
         .try_insert(&key, &value, oxifaster::Address::INVALID, false)
@@ -166,10 +138,10 @@ fn test_read_cache_miss_wrong_key() {
 #[test]
 fn test_read_cache_skip() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
-    let key = TestKey(42);
-    let value = TestValue(100);
+    let key = 42u64;
+    let value = 100u64;
     let prev_addr = oxifaster::Address::new(1, 500);
 
     let cache_addr = cache.try_insert(&key, &value, prev_addr, false).unwrap();
@@ -186,10 +158,10 @@ fn test_read_cache_skip() {
 #[test]
 fn test_read_cache_invalidate() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
-    let key = TestKey(42);
-    let value = TestValue(100);
+    let key = 42u64;
+    let value = 100u64;
 
     let cache_addr = cache
         .try_insert(&key, &value, oxifaster::Address::INVALID, false)
@@ -208,12 +180,12 @@ fn test_read_cache_invalidate() {
 #[test]
 fn test_read_cache_clear() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
     // Insert some data
     for i in 0..10 {
-        let key = TestKey(i);
-        let value = TestValue(i * 100);
+        let key = i as u64;
+        let value = (i * 100) as u64;
         cache
             .try_insert(&key, &value, oxifaster::Address::INVALID, false)
             .unwrap();
@@ -527,7 +499,7 @@ fn test_concurrent_cache_insert_and_read() {
 #[test]
 fn test_cache_with_zero_size() {
     let config = ReadCacheConfig::new(0);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
     // Should handle gracefully
     assert_eq!(cache.config().mem_size, 0);
@@ -554,13 +526,13 @@ fn test_cache_with_zero_mutable_fraction() {
 #[test]
 fn test_cache_multiple_inserts_same_key() {
     let config = ReadCacheConfig::new(1024 * 1024);
-    let cache = ReadCache::<TestKey, TestValue>::new(config);
+    let cache = ReadCache::<u64, u64>::new(config);
 
-    let key = TestKey(42);
+    let key = 42u64;
 
     // Insert multiple times with different values
     for i in 0..10 {
-        let value = TestValue(i * 100);
+        let value = (i * 100) as u64;
         cache
             .try_insert(&key, &value, oxifaster::Address::INVALID, false)
             .unwrap();
