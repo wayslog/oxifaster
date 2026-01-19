@@ -1,7 +1,7 @@
 use std::io;
-use std::sync::atomic::Ordering;
 
-use crate::address::{Address, AtomicAddress};
+use crate::address::Address;
+use crate::allocator::page_allocator::FlushStatus;
 use crate::device::StorageDevice;
 
 use super::PersistentMemoryMalloc;
@@ -9,7 +9,8 @@ use super::PersistentMemoryMalloc;
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Flush all pages up to (but not including) the specified address.
     ///
-    /// This writes in-memory pages to the storage device.
+    /// This writes in-memory pages to the storage device. Callers that need durable
+    /// persistence must invoke `StorageDevice::flush()` separately.
     pub fn flush_until(&self, until_address: Address) -> io::Result<()> {
         let current_flushed = self.get_flushed_until_address();
 
@@ -47,13 +48,41 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         };
 
         for page in pages_to_flush {
-            if let Some(page_data) = self.pages.get_page(page) {
-                write_page_sync(page, page_data)?;
+            match self.flush_shared.page_flush_status(page) {
+                FlushStatus::Flushed => {}
+                FlushStatus::Dirty => {
+                    if !self.flush_shared.try_mark_flushing(page) {
+                        while self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        self.flush_shared.advance_safe_read_only(until_address);
+                        continue;
+                    }
+
+                    if let Some(page_data) = self.pages.get_page(page) {
+                        if let Err(e) = write_page_sync(page, page_data) {
+                            self.flush_shared.mark_page_dirty_after_error(page);
+                            return Err(e);
+                        }
+                        self.flush_shared.mark_page_flushed(page);
+                    } else {
+                        self.flush_shared.mark_page_dirty_after_error(page);
+                        return Err(io::Error::other(format!(
+                            "missing in-memory page {page} during flush"
+                        )));
+                    }
+                }
+                FlushStatus::Flushing => {
+                    while self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
             }
+
+            self.flush_shared.advance_safe_read_only(until_address);
         }
 
-        Self::bump_max_address(&self.flushed_until_address, until_address);
-        Self::bump_max_address(&self.safe_read_only_address, until_address);
+        self.flush_shared.advance_safe_read_only(until_address);
 
         Ok(())
     }
@@ -88,21 +117,5 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         }
 
         Some(begin_page..=last_page)
-    }
-
-    fn bump_max_address(target: &AtomicAddress, value: Address) {
-        loop {
-            let current = target.load(Ordering::Acquire);
-            if value <= current {
-                break;
-            }
-
-            if target
-                .compare_exchange(current, value, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
-        }
     }
 }

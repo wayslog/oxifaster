@@ -1,5 +1,6 @@
 use super::*;
 use crate::device::NullDisk;
+use std::time::{Duration, Instant};
 
 fn create_test_allocator() -> PersistentMemoryMalloc<NullDisk> {
     let config = HybridLogConfig {
@@ -10,6 +11,24 @@ fn create_test_allocator() -> PersistentMemoryMalloc<NullDisk> {
     };
     let device = Arc::new(NullDisk::new());
     PersistentMemoryMalloc::new(config, device)
+}
+
+fn wait_for_safe_read_only(
+    allocator: &PersistentMemoryMalloc<NullDisk>,
+    target: Address,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if allocator.get_safe_read_only_address() >= target {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!(
+        "timeout waiting for safe_read_only to reach {target}, current={}",
+        allocator.get_safe_read_only_address()
+    );
 }
 
 #[test]
@@ -112,6 +131,30 @@ fn test_flush_until() {
     allocator.flush_until(flush_addr).unwrap();
 
     assert!(allocator.get_flushed_until_address() >= flush_addr);
+}
+
+#[test]
+fn test_read_only_transition_triggers_flush() {
+    let config = HybridLogConfig {
+        page_size: 256,
+        memory_pages: 4,
+        mutable_pages: 1,
+        segment_size: 1 << 20,
+    };
+    let device = Arc::new(NullDisk::new());
+    let allocator = PersistentMemoryMalloc::new(config, device);
+
+    let page_size = allocator.page_size() as u32;
+    for _ in 0..4 {
+        allocator.allocate(page_size).unwrap();
+    }
+
+    let read_only = allocator.get_read_only_address();
+    assert!(read_only >= Address::new(1, 0));
+
+    let target = Address::new(1, 0);
+    wait_for_safe_read_only(&allocator, target, Duration::from_secs(2));
+    assert!(allocator.get_safe_read_only_address() >= target);
 }
 
 #[test]

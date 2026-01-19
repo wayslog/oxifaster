@@ -13,6 +13,7 @@ use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
 use crate::status::Status;
 use crate::utility::{is_power_of_two, AlignedBuffer};
+use flush_worker::{FlushManager, FlushShared};
 
 /// Configuration for the hybrid log allocator
 #[derive(Debug, Clone)]
@@ -58,7 +59,7 @@ struct PageArray {
     /// Page buffers
     buffers: Vec<Option<AlignedBuffer>>,
     /// Page info
-    info: Vec<PageInfo>,
+    info: Arc<Vec<PageInfo>>,
     /// Number of buffer pages
     buffer_size: u32,
 }
@@ -66,11 +67,10 @@ struct PageArray {
 impl PageArray {
     fn new(buffer_size: u32) -> Self {
         let mut buffers = Vec::with_capacity(buffer_size as usize);
-        let mut info = Vec::with_capacity(buffer_size as usize);
+        let info = Arc::new(vec![PageInfo::new(); buffer_size as usize]);
 
         for _ in 0..buffer_size {
             buffers.push(None);
-            info.push(PageInfo::new());
         }
 
         Self {
@@ -120,6 +120,10 @@ impl PageArray {
         &self.info[idx]
     }
 
+    fn info_arc(&self) -> Arc<Vec<PageInfo>> {
+        Arc::clone(&self.info)
+    }
+
     /// Clear a page
     fn clear_page(&mut self, page: u32) {
         let idx = self.buffer_index(page);
@@ -146,21 +150,25 @@ pub struct PersistentMemoryMalloc<D: StorageDevice> {
     /// Current tail (page + offset)
     tail_page_offset: AtomicPageOffset,
     /// Read-only address boundary
-    read_only_address: AtomicAddress,
-    /// Safe read-only address (flushed)
-    safe_read_only_address: AtomicAddress,
+    read_only_address: Arc<AtomicAddress>,
+    /// Safe read-only address (flushed read-only boundary)
+    safe_read_only_address: Arc<AtomicAddress>,
     /// Head address (beginning of log)
     head_address: AtomicAddress,
     /// Safe head address (can be reclaimed)
     safe_head_address: AtomicAddress,
-    /// Flushed until address
-    flushed_until_address: AtomicAddress,
+    /// Flushed until address (pages written; durability requires explicit device flush)
+    flushed_until_address: Arc<AtomicAddress>,
     /// Begin address (first valid address)
     begin_address: AtomicAddress,
     /// Buffer size (number of pages in memory)
     buffer_size: u32,
     /// Number of pending flushes
-    pending_flushes: AtomicU64,
+    pending_flushes: Arc<AtomicU64>,
+    /// Shared flush state
+    flush_shared: Arc<FlushShared<D>>,
+    /// Flush worker
+    flush_manager: FlushManager<D>,
 }
 
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
@@ -179,19 +187,36 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             pages.allocate_page(i, page_size);
         }
 
+        let read_only_address = Arc::new(AtomicAddress::new(Address::new(0, 0)));
+        let safe_read_only_address = Arc::new(AtomicAddress::new(Address::new(0, 0)));
+        let flushed_until_address = Arc::new(AtomicAddress::new(Address::new(0, 0)));
+        let pending_flushes = Arc::new(AtomicU64::new(0));
+        let flush_shared = Arc::new(FlushShared::new(
+            device.clone(),
+            pages.info_arc(),
+            buffer_size,
+            Arc::clone(&read_only_address),
+            Arc::clone(&safe_read_only_address),
+            Arc::clone(&flushed_until_address),
+            Arc::clone(&pending_flushes),
+        ));
+        let flush_manager = FlushManager::new(Arc::clone(&flush_shared));
+
         Self {
             config,
             device,
             pages,
             tail_page_offset: AtomicPageOffset::from_address(Address::new(0, 0)),
-            read_only_address: AtomicAddress::new(Address::new(0, 0)),
-            safe_read_only_address: AtomicAddress::new(Address::new(0, 0)),
+            read_only_address,
+            safe_read_only_address,
             head_address: AtomicAddress::new(Address::new(0, 0)),
             safe_head_address: AtomicAddress::new(Address::new(0, 0)),
-            flushed_until_address: AtomicAddress::new(Address::new(0, 0)),
+            flushed_until_address,
             begin_address: AtomicAddress::new(Address::new(0, 0)),
             buffer_size,
-            pending_flushes: AtomicU64::new(0),
+            pending_flushes,
+            flush_shared,
+            flush_manager,
         }
     }
 
@@ -281,6 +306,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
                 // Calculate address - safe cast since offset <= Address::MAX_OFFSET
                 let address = Address::new(page, offset as u32);
+                self.mark_page_dirty(page);
                 return Ok(address);
             }
 
@@ -375,7 +401,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Check if an address is in the safe read-only region
     #[inline]
     pub fn is_safe_read_only(&self, address: Address) -> bool {
-        address >= self.get_safe_read_only_address() && address < self.get_read_only_address()
+        address < self.get_safe_read_only_address() && address >= self.get_head_address()
     }
 
     /// Check if an address is on disk
@@ -402,7 +428,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Trigger flush for pages that became read-only
+                    self.schedule_read_only_flushes(current, new_read_only);
                     break;
                 }
                 Err(_) => continue,
@@ -425,6 +451,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                self.schedule_read_only_flushes(current, new_address);
                 return;
             }
         }
@@ -471,6 +498,43 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         self.pages.get_info(page)
     }
 
+    fn mark_page_dirty(&self, page: u32) {
+        self.flush_shared.mark_page_dirty(page);
+    }
+
+    fn schedule_read_only_flushes(&self, old_read_only: Address, new_read_only: Address) {
+        if new_read_only <= old_read_only {
+            return;
+        }
+
+        let start_page = old_read_only.page();
+        let end_page = new_read_only.page();
+        for page in start_page..end_page {
+            self.schedule_flush_page(page);
+        }
+
+        self.flush_shared.advance_safe_read_only(new_read_only);
+    }
+
+    fn schedule_flush_page(&self, page: u32) {
+        if !self.flush_shared.try_mark_flushing(page) {
+            return;
+        }
+        let Some(page_data) = self.pages.get_page(page) else {
+            self.flush_shared.mark_page_dirty_after_error(page);
+            return;
+        };
+
+        let mut data = vec![0u8; page_data.len()];
+        data.copy_from_slice(page_data);
+
+        self.flush_shared.increment_pending();
+        if !self.flush_manager.submit_page(page, data) {
+            self.flush_shared.mark_page_dirty_after_error(page);
+            self.flush_shared.decrement_pending();
+        }
+    }
+
     /// Initialize the log from a given address (for recovery)
     pub fn initialize_from_address(&self, begin_address: Address, head_address: Address) {
         self.begin_address.store(begin_address, Ordering::Release);
@@ -514,12 +578,14 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 mod checkpoint;
 mod delta;
 mod flush;
+mod flush_worker;
 
 // SAFETY: `PersistentMemoryMalloc` is safe to send/share between threads because:
 // - All concurrent state is stored in atomics (`*_address`, `tail_page_offset`, `pending_flushes`).
 // - The in-memory page ring (`pages`) is pre-allocated during construction and only mutated through
 //   `&mut self` methods; shared `&self` access only reads from those buffers.
 // - `D: StorageDevice` is `Send + Sync` and is held behind an `Arc`.
+// - Background flush coordination uses channels and atomic page metadata.
 unsafe impl<D: StorageDevice> Send for PersistentMemoryMalloc<D> {}
 unsafe impl<D: StorageDevice> Sync for PersistentMemoryMalloc<D> {}
 

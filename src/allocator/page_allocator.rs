@@ -10,15 +10,19 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 pub enum FlushStatus {
     /// Page is not being flushed
     Flushed = 0,
+    /// Page has unflushed data
+    Dirty = 1,
     /// Page is currently being flushed
-    InProgress = 1,
+    Flushing = 2,
 }
 
 impl From<u8> for FlushStatus {
     fn from(value: u8) -> Self {
         match value {
             0 => FlushStatus::Flushed,
-            _ => FlushStatus::InProgress,
+            1 => FlushStatus::Dirty,
+            2 => FlushStatus::Flushing,
+            _ => FlushStatus::Flushing,
         }
     }
 }
@@ -247,7 +251,8 @@ mod tests {
     #[test]
     fn test_flush_status() {
         assert_eq!(FlushStatus::from(0), FlushStatus::Flushed);
-        assert_eq!(FlushStatus::from(1), FlushStatus::InProgress);
+        assert_eq!(FlushStatus::from(1), FlushStatus::Dirty);
+        assert_eq!(FlushStatus::from(2), FlushStatus::Flushing);
     }
 
     #[test]
@@ -274,12 +279,12 @@ mod tests {
         assert!(loaded.is_open());
 
         let mut new_status = FullPageStatus::new();
-        new_status.flush_status = FlushStatus::InProgress as u8;
+        new_status.flush_status = FlushStatus::Flushing as u8;
         atomic.store(new_status, Ordering::Relaxed);
 
         let loaded2 = atomic.load(Ordering::Relaxed);
         assert!(!loaded2.is_flushed());
-        assert_eq!(loaded2.flush(), FlushStatus::InProgress);
+        assert_eq!(loaded2.flush(), FlushStatus::Flushing);
     }
 
     #[test]
