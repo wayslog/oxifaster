@@ -209,6 +209,10 @@ pub mod constants {
     /// Maximum number of threads supported
     pub const MAX_THREADS: usize = 96;
 
+    // NOTE: CPR uses a `u128` bitmask to track active thread participants.
+    // Keep this constraint explicit to avoid panics from shifting by >= 128.
+    const _: () = assert!(MAX_THREADS <= 128);
+
     /// Page size (32 MB)
     pub const PAGE_SIZE: usize = 1 << 25;
 }

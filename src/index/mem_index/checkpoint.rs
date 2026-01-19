@@ -48,7 +48,14 @@ impl MemHashIndex {
         let version = self.version.load(Ordering::Acquire) as usize;
         let table_size = self.tables[version].size();
 
-        let file = File::create(path)?;
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?
+            .to_string_lossy();
+        let tmp_path = parent.join(format!(".{file_name}.tmp"));
+
+        let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
 
         // index.dat v1:
@@ -94,7 +101,16 @@ impl MemHashIndex {
         writer.seek(SeekFrom::Start(8))?;
         writer.write_all(&overflow_count.to_le_bytes())?;
         writer.flush()?;
-        Ok(())
+        writer.get_ref().sync_all()?;
+
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(path);
+                std::fs::rename(&tmp_path, path)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Recover the hash index from a checkpoint.

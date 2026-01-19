@@ -9,6 +9,25 @@ use crate::device::StorageDevice;
 
 use super::PersistentMemoryMalloc;
 
+fn rename_tmp_overwrite(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        match std::fs::rename(src, dst) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(dst)?;
+                std::fs::rename(src, dst)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(src, dst)
+    }
+}
+
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Create checkpoint metadata from the current log state.
     pub fn checkpoint_metadata(
@@ -17,12 +36,36 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         version: u32,
         use_snapshot: bool,
     ) -> LogMetadata {
+        self.checkpoint_metadata_at(
+            token,
+            version,
+            self.get_begin_address(),
+            self.get_tail_address(),
+            self.get_flushed_until_address(),
+            use_snapshot,
+        )
+    }
+
+    /// Build checkpoint metadata from explicit addresses.
+    ///
+    /// This is used by cooperative CPR so that all artifacts (metadata + snapshot/fold-over)
+    /// reflect a single coherent `(begin, final, flushed_until)` view even as the store
+    /// continues accepting writes.
+    pub fn checkpoint_metadata_at(
+        &self,
+        token: crate::checkpoint::CheckpointToken,
+        version: u32,
+        begin_address: Address,
+        final_address: Address,
+        flushed_until_address: Address,
+        use_snapshot: bool,
+    ) -> LogMetadata {
         let mut metadata = LogMetadata::with_token(token);
         metadata.use_snapshot_file = use_snapshot;
         metadata.version = version;
-        metadata.begin_address = self.get_begin_address();
-        metadata.final_address = self.get_tail_address();
-        metadata.flushed_until_address = self.get_flushed_until_address();
+        metadata.begin_address = begin_address;
+        metadata.final_address = final_address;
+        metadata.flushed_until_address = flushed_until_address;
         metadata.use_object_log = false;
         metadata
     }
@@ -51,13 +94,20 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         self.flush_until(tail_address)?;
 
-        let metadata = self.checkpoint_metadata(token, version, use_snapshot);
+        let metadata = self.checkpoint_metadata_at(
+            token,
+            version,
+            self.get_begin_address(),
+            tail_address,
+            self.get_flushed_until_address(),
+            use_snapshot,
+        );
 
         let meta_path = checkpoint_dir.join("log.meta");
         metadata.write_to_file(&meta_path)?;
 
         let snapshot_path = checkpoint_dir.join("log.snapshot");
-        self.write_log_snapshot(&snapshot_path)?;
+        self.write_log_snapshot(&snapshot_path, metadata.begin_address, tail_address)?;
 
         Ok(metadata)
     }
@@ -74,7 +124,14 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         self.flush_until(tail_address)?;
 
-        let mut metadata = self.checkpoint_metadata(token, version, true);
+        let mut metadata = self.checkpoint_metadata_at(
+            token,
+            version,
+            self.get_begin_address(),
+            tail_address,
+            self.get_flushed_until_address(),
+            true,
+        );
         metadata.session_states = session_states;
         metadata.num_threads = metadata.session_states.len() as u32;
 
@@ -82,17 +139,31 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         metadata.write_to_file(&meta_path)?;
 
         let snapshot_path = checkpoint_dir.join("log.snapshot");
-        self.write_log_snapshot(&snapshot_path)?;
+        self.write_log_snapshot(&snapshot_path, metadata.begin_address, tail_address)?;
 
         Ok(metadata)
     }
 
-    fn write_log_snapshot(&self, path: &Path) -> io::Result<()> {
-        let file = File::create(path)?;
+    /// Write an in-memory snapshot of log pages in `[begin, final_address)`.
+    ///
+    /// The format is compatible with `read_log_snapshot` and is used by snapshot checkpoints.
+    pub fn write_log_snapshot(
+        &self,
+        path: &Path,
+        begin: Address,
+        final_address: Address,
+    ) -> io::Result<()> {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?
+            .to_string_lossy();
+        let tmp_path = parent.join(format!(".{file_name}.tmp"));
+
+        let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::with_capacity(1 << 20, file);
 
-        let begin = self.get_begin_address();
-        let tail = self.get_tail_address();
+        let tail = final_address;
         let page_size = self.config.page_size as u64;
 
         writer.write_all(&begin.control().to_le_bytes())?;
@@ -101,7 +172,15 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         writer.write_all(&(self.buffer_size as u64).to_le_bytes())?;
 
         let begin_page = begin.page();
-        let tail_page = tail.page();
+        let mut tail_page = tail.page();
+        if tail.offset() == 0 {
+            if tail_page == 0 {
+                writer.write_all(&u64::MAX.to_le_bytes())?;
+                writer.flush()?;
+                return rename_tmp_overwrite(&tmp_path, path);
+            }
+            tail_page = tail_page.saturating_sub(1);
+        }
 
         for page in begin_page..=tail_page {
             if let Some(page_data) = self.pages.get_page(page) {
@@ -113,7 +192,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         writer.write_all(&u64::MAX.to_le_bytes())?;
 
         writer.flush()?;
-        Ok(())
+        rename_tmp_overwrite(&tmp_path, path)
     }
 
     /// Recover the log from a checkpoint.
@@ -132,18 +211,24 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             }
         };
 
-        let snapshot_path = checkpoint_dir.join("log.snapshot");
-        if !snapshot_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "Log snapshot file missing: {}. Checkpoint appears incomplete or corrupted.",
-                    snapshot_path.display()
-                ),
-            ));
-        }
-
-        let (snapshot_begin, snapshot_tail) = self.read_log_snapshot(&snapshot_path)?;
+        let (snapshot_begin, snapshot_tail) = if _metadata.use_snapshot_file {
+            let snapshot_path = checkpoint_dir.join("log.snapshot");
+            if !snapshot_path.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Log snapshot file missing: {}. Checkpoint appears incomplete or corrupted.",
+                        snapshot_path.display()
+                    ),
+                ));
+            }
+            self.read_log_snapshot(&snapshot_path)?
+        } else {
+            let begin = _metadata.begin_address;
+            let tail = _metadata.final_address;
+            self.read_log_from_device(begin, tail)?;
+            (begin, tail)
+        };
 
         self.begin_address.store(snapshot_begin, Ordering::Release);
         self.head_address.store(snapshot_begin, Ordering::Release);
@@ -159,6 +244,72 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             .store_address(snapshot_tail, Ordering::Release);
 
         Ok(())
+    }
+
+    fn read_log_from_device(&mut self, begin: Address, final_address: Address) -> io::Result<()> {
+        let page_size = self.config.page_size;
+        let begin_page = begin.page();
+        let mut tail_page = final_address.page();
+        if final_address.offset() == 0 {
+            if tail_page == 0 {
+                return Ok(());
+            }
+            tail_page = tail_page.saturating_sub(1);
+        }
+
+        let mut reads = Vec::new();
+        for page in begin_page..=tail_page {
+            if !self.pages.allocate_page(page, page_size) {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!("Failed to allocate page {page} during recovery"),
+                ));
+            }
+
+            let Some(dst) = self.pages.get_page_mut(page) else {
+                return Err(io::Error::other(format!(
+                    "Page {page} not available after allocation"
+                )));
+            };
+
+            let offset = Address::new(page, 0).control();
+            reads.push((page, offset, dst.as_mut_ptr(), dst.len()));
+        }
+
+        let device = self.device.clone();
+        let fut = async move {
+            for (page, offset, ptr, len) in reads {
+                let dst = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+                let n = device.read(offset, dst).await?;
+                if n != len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("short read for page {page}: expected {len}, got {n}"),
+                    ));
+                }
+            }
+
+            Ok(())
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+                    return Err(io::Error::other(
+                        "Cannot recover within a current-thread Tokio runtime. \
+                         Call recovery from a blocking thread (e.g., spawn_blocking) or outside Tokio.",
+                    ));
+                }
+
+                tokio::task::block_in_place(|| handle.block_on(fut))
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(fut)
+            }
+        }
     }
 
     fn read_log_snapshot(&mut self, path: &Path) -> io::Result<(Address, Address)> {

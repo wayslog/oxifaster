@@ -21,6 +21,7 @@ pub(crate) enum IoRequest {
     ReadBytes {
         thread_id: usize,
         thread_tag: u64,
+        ctx_id: u64,
         address: Address,
         len: usize,
     },
@@ -31,6 +32,7 @@ pub(crate) enum IoRequest {
     ReadVarLenRecord {
         thread_id: usize,
         thread_tag: u64,
+        ctx_id: u64,
         address: Address,
     },
     Shutdown,
@@ -41,6 +43,7 @@ pub(crate) enum IoCompletion {
     ReadBytesDone {
         thread_id: usize,
         thread_tag: u64,
+        ctx_id: u64,
         address: Address,
         result: io::Result<Vec<u8>>,
     },
@@ -78,6 +81,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                     let _ = comp_tx.send(IoCompletion::ReadBytesDone {
                         thread_id: 0,
                         thread_tag: 0,
+                        ctx_id: 0,
                         address: Address::INVALID,
                         result: Err(io::Error::other(e.to_string())),
                     });
@@ -90,6 +94,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                     IoRequest::ReadBytes {
                         thread_id,
                         thread_tag,
+                        ctx_id,
                         address,
                         len,
                     } => {
@@ -108,6 +113,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                         let _ = comp_tx.send(IoCompletion::ReadBytesDone {
                             thread_id,
                             thread_tag,
+                            ctx_id,
                             address,
                             result,
                         });
@@ -115,6 +121,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                     IoRequest::ReadVarLenRecord {
                         thread_id,
                         thread_tag,
+                        ctx_id,
                         address,
                     } => {
                         // Read a reasonable guess first to avoid the 2-IOP path for small records.
@@ -202,6 +209,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
                         let _ = comp_tx.send(IoCompletion::ReadBytesDone {
                             thread_id,
                             thread_tag,
+                            ctx_id,
                             address,
                             result,
                         });
@@ -231,6 +239,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
         &self,
         thread_id: usize,
         thread_tag: u64,
+        ctx_id: u64,
         address: Address,
         len: usize,
     ) -> bool {
@@ -247,6 +256,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
             .send(IoRequest::ReadBytes {
                 thread_id,
                 thread_tag,
+                ctx_id,
                 address,
                 len,
             })
@@ -263,6 +273,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
         &self,
         thread_id: usize,
         thread_tag: u64,
+        ctx_id: u64,
         address: Address,
     ) -> bool {
         {
@@ -277,6 +288,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
             .send(IoRequest::ReadVarLenRecord {
                 thread_id,
                 thread_tag,
+                ctx_id,
                 address,
             })
             .is_err()

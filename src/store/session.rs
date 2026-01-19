@@ -10,23 +10,52 @@
 //! - A monotonically increasing serial number tracks operations
 //! - Session state can be saved to and restored from checkpoints
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use crate::address::Address;
 use crate::checkpoint::SessionState;
-use crate::codec::{PersistKey, PersistValue};
+use crate::codec::{KeyCodec, PersistKey, PersistValue};
 use crate::device::StorageDevice;
 use crate::epoch::{get_thread_tag, EpochGuard};
 use crate::status::Status;
+use crate::store::{Action, Phase};
 use crate::store::{FasterKv, RecordView};
+
+use super::faster_kv::ChainReadOutcome;
 
 /// Thread context for FASTER operations
 ///
 /// Tracks per-thread state including the serial number for CPR (Concurrent Prefix Recovery).
 /// The serial number is incremented with each operation and is used to determine
 /// which operations have been persisted during recovery.
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionContext {
+    pub(crate) id: u64,
+    pub(crate) version: u32,
+    pub(crate) pending_ios: u32,
+    pub(crate) retry_requests: u32,
+}
+
+impl ExecutionContext {
+    fn new(id: u64, version: u32) -> Self {
+        Self {
+            id,
+            version,
+            pending_ios: 0,
+            retry_requests: 0,
+        }
+    }
+}
+
+/// Thread context for FASTER operations.
+///
+/// Tracks per-thread state including the serial number for CPR (Concurrent Prefix Recovery).
+/// The serial number is incremented with each successful mutating operation and is used to
+/// validate recovery boundaries.
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     /// Thread ID
@@ -40,17 +69,33 @@ pub struct ThreadContext {
     pub pending_count: u32,
     /// Retry counter
     pub retry_count: u32,
+
+    // === CPR internal state ===
+    pub(crate) current: ExecutionContext,
+    pub(crate) prev: ExecutionContext,
+    next_ctx_id: u64,
+    /// Last CPR state (packed as: action(8) | phase(8) | version(32)).
+    pub(crate) last_cpr_state: u64,
+    /// Last on-disk address observed by `read()` when returning `Status::Pending`.
+    pub(crate) last_pending_read: Option<Address>,
 }
 
 impl ThreadContext {
     /// Create a new thread context
     pub fn new(thread_id: usize) -> Self {
+        let current = ExecutionContext::new(1, 0);
+        let prev = ExecutionContext::new(0, 0);
         Self {
             thread_id,
-            version: 0,
+            version: current.version,
             serial_num: 0,
-            pending_count: 0,
-            retry_count: 0,
+            pending_count: current.pending_ios,
+            retry_count: current.retry_requests,
+            current,
+            prev,
+            next_ctx_id: 2,
+            last_cpr_state: 0,
+            last_pending_read: None,
         }
     }
 
@@ -72,6 +117,102 @@ impl ThreadContext {
     #[inline]
     pub fn set_serial_num(&mut self, serial_num: u64) {
         self.serial_num = serial_num;
+    }
+
+    #[inline]
+    pub(crate) fn current_ctx_id(&self) -> u64 {
+        self.current.id
+    }
+
+    #[inline]
+    pub(crate) fn prev_ctx_id(&self) -> u64 {
+        self.prev.id
+    }
+
+    #[inline]
+    pub(crate) fn on_pending_io_submitted(&mut self) {
+        self.current.pending_ios = self.current.pending_ios.saturating_add(1);
+        self.pending_count = self.current.pending_ios;
+    }
+
+    #[inline]
+    pub(crate) fn on_pending_io_submitted_for_ctx(&mut self, ctx_id: u64) {
+        if self.current.id == ctx_id {
+            self.on_pending_io_submitted();
+            return;
+        }
+        if self.prev.id == ctx_id {
+            self.prev.pending_ios = self.prev.pending_ios.saturating_add(1);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn on_pending_io_completed(&mut self, ctx_id: u64, n: u32) {
+        if self.current.id == ctx_id {
+            self.current.pending_ios = self.current.pending_ios.saturating_sub(n);
+            self.pending_count = self.current.pending_ios;
+            return;
+        }
+        if self.prev.id == ctx_id {
+            self.prev.pending_ios = self.prev.pending_ios.saturating_sub(n);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn on_retry_requests_ready(&mut self, ctx_id: u64, n: u32) {
+        if self.current.id == ctx_id {
+            self.current.retry_requests = self.current.retry_requests.saturating_add(n);
+            self.retry_count = self.current.retry_requests;
+            return;
+        }
+        if self.prev.id == ctx_id {
+            self.prev.retry_requests = self.prev.retry_requests.saturating_add(n);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn on_retry_request_consumed(&mut self, ctx_id: u64) {
+        if self.current.id == ctx_id {
+            self.current.retry_requests = self.current.retry_requests.saturating_sub(1);
+            self.retry_count = self.current.retry_requests;
+            return;
+        }
+        if self.prev.id == ctx_id {
+            self.prev.retry_requests = self.prev.retry_requests.saturating_sub(1);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn prev_ctx_is_drained(&self) -> bool {
+        self.prev.pending_ios == 0 && self.prev.retry_requests == 0
+    }
+
+    #[inline]
+    pub(crate) fn total_pending_ios(&self) -> u32 {
+        self.current
+            .pending_ios
+            .saturating_add(self.prev.pending_ios)
+    }
+
+    #[inline]
+    pub(crate) fn total_retry_requests(&self) -> u32 {
+        self.current
+            .retry_requests
+            .saturating_add(self.prev.retry_requests)
+    }
+
+    pub(crate) fn cpr_state_sig(action: Action, phase: Phase, version: u32) -> u64 {
+        (action as u64) | ((phase as u64) << 8) | ((version as u64) << 16)
+    }
+
+    pub(crate) fn swap_contexts_for_checkpoint(&mut self, new_version: u32) {
+        std::mem::swap(&mut self.current, &mut self.prev);
+        let id = self.next_ctx_id;
+        self.next_ctx_id = self.next_ctx_id.saturating_add(1);
+        self.current = ExecutionContext::new(id, new_version);
+        self.version = self.current.version;
+        self.pending_count = self.current.pending_ios;
+        self.retry_count = self.current.retry_requests;
     }
 }
 
@@ -100,6 +241,26 @@ where
     ctx: ThreadContext,
     /// Whether the session is active
     active: bool,
+    /// Pending read requests grouped by execution context id.
+    pending_reads: HashMap<u64, Vec<PendingReadRequest<K>>>,
+    /// Completed read results grouped by stable key hash.
+    completed_reads: HashMap<u64, Vec<CompletedRead<K, V>>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingReadRequest<K: PersistKey> {
+    key: K,
+    hash: u64,
+    address: Address,
+    ctx_id: u64,
+    cancelled: bool,
+    retry_tracked: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CompletedRead<K: PersistKey, V: PersistValue> {
+    key: K,
+    result: Result<Option<V>, Status>,
 }
 
 impl<K, V, D> Session<K, V, D>
@@ -123,6 +284,8 @@ where
             guid: Uuid::new_v4(),
             ctx: ThreadContext::new(thread_id),
             active: false,
+            pending_reads: HashMap::new(),
+            completed_reads: HashMap::new(),
         }
     }
 
@@ -142,6 +305,204 @@ where
             guid: state.guid,
             ctx,
             active: false,
+            pending_reads: HashMap::new(),
+            completed_reads: HashMap::new(),
+        }
+    }
+
+    fn try_take_completed_read(
+        &mut self,
+        key: &K,
+    ) -> Result<Option<Result<Option<V>, Status>>, Status> {
+        let hash = <K as PersistKey>::Codec::hash(key)?;
+        let Some(entries) = self.completed_reads.get_mut(&hash) else {
+            return Ok(None);
+        };
+        let Some(pos) = entries.iter().position(|e| e.key == *key) else {
+            return Ok(None);
+        };
+        let entry = entries.swap_remove(pos);
+        if entries.is_empty() {
+            self.completed_reads.remove(&hash);
+        }
+        Ok(Some(entry.result))
+    }
+
+    fn enqueue_pending_read(&mut self, ctx_id: u64, key: K, hash: u64, address: Address) {
+        self.pending_reads
+            .entry(ctx_id)
+            .or_default()
+            .push(PendingReadRequest {
+                key,
+                hash,
+                address,
+                ctx_id,
+                cancelled: false,
+                retry_tracked: true,
+            });
+        self.ctx.on_retry_requests_ready(ctx_id, 1);
+    }
+
+    fn cancel_one_pending_read(&mut self, key: &K) -> Result<(), Status> {
+        let hash = <K as PersistKey>::Codec::hash(key)?;
+        let current_id = self.ctx.current_ctx_id();
+        let prev_id = self.ctx.prev_ctx_id();
+
+        for ctx_id in [current_id, prev_id] {
+            if ctx_id == 0 {
+                continue;
+            }
+            let Some(requests) = self.pending_reads.get_mut(&ctx_id) else {
+                continue;
+            };
+            let Some(req) = requests
+                .iter_mut()
+                .find(|r| r.hash == hash && r.key == *key)
+            else {
+                continue;
+            };
+            if req.retry_tracked {
+                self.ctx.on_retry_request_consumed(req.ctx_id);
+                req.retry_tracked = false;
+            }
+            req.cancelled = true;
+            break;
+        }
+
+        Ok(())
+    }
+
+    fn drive_pending_reads_for_ctx(&mut self, ctx_id: u64, thread_tag: u64) {
+        let head_address = self.store.head_address();
+        let thread_id = self.ctx.thread_id;
+
+        let mut should_remove = false;
+        if let Some(requests) = self.pending_reads.get_mut(&ctx_id) {
+            let mut i = 0usize;
+            while i < requests.len() {
+                let address = requests[i].address;
+
+                if requests[i].cancelled {
+                    if self.store.take_disk_read_result(address).is_some() {
+                        let _ = requests.swap_remove(i);
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+
+                let Some(parsed) = self.store.take_disk_read_result(address) else {
+                    i += 1;
+                    continue;
+                };
+
+                match parsed {
+                    Err(status) => {
+                        let req = requests.swap_remove(i);
+                        self.completed_reads
+                            .entry(req.hash)
+                            .or_default()
+                            .push(CompletedRead {
+                                key: req.key,
+                                result: Err(status),
+                            });
+                        if req.retry_tracked {
+                            self.ctx.on_retry_request_consumed(req.ctx_id);
+                        }
+                        continue;
+                    }
+                    Ok(disk) => {
+                        if disk.key.as_ref() == Some(&requests[i].key) {
+                            let req = requests.swap_remove(i);
+                            self.completed_reads
+                                .entry(req.hash)
+                                .or_default()
+                                .push(CompletedRead {
+                                    key: req.key,
+                                    result: Ok(disk.value),
+                                });
+                            if req.retry_tracked {
+                                self.ctx.on_retry_request_consumed(req.ctx_id);
+                            }
+                            continue;
+                        }
+
+                        let next = disk.previous_address;
+                        if !next.is_valid() {
+                            let req = requests.swap_remove(i);
+                            self.completed_reads
+                                .entry(req.hash)
+                                .or_default()
+                                .push(CompletedRead {
+                                    key: req.key,
+                                    result: Ok(None),
+                                });
+                            if req.retry_tracked {
+                                self.ctx.on_retry_request_consumed(req.ctx_id);
+                            }
+                            continue;
+                        }
+
+                        if !next.in_readcache() && next < head_address {
+                            let submitted = self
+                                .store
+                                .submit_disk_read_for_context(thread_id, thread_tag, ctx_id, next);
+                            if submitted {
+                                self.ctx.on_pending_io_submitted_for_ctx(ctx_id);
+                            }
+                            requests[i].address = next;
+                            i += 1;
+                            continue;
+                        }
+
+                        match self.store.read_chain_from_memory(&requests[i].key, next) {
+                            Ok(ChainReadOutcome::Completed(resumed)) => {
+                                let req = requests.swap_remove(i);
+                                self.completed_reads.entry(req.hash).or_default().push(
+                                    CompletedRead {
+                                        key: req.key,
+                                        result: Ok(resumed),
+                                    },
+                                );
+                                if req.retry_tracked {
+                                    self.ctx.on_retry_request_consumed(req.ctx_id);
+                                }
+                                continue;
+                            }
+                            Ok(ChainReadOutcome::NeedDiskRead(address)) => {
+                                let submitted = self.store.submit_disk_read_for_context(
+                                    thread_id, thread_tag, ctx_id, address,
+                                );
+                                if submitted {
+                                    self.ctx.on_pending_io_submitted_for_ctx(ctx_id);
+                                }
+                                requests[i].address = address;
+                                i += 1;
+                                continue;
+                            }
+                            Err(status) => {
+                                let req = requests.swap_remove(i);
+                                self.completed_reads.entry(req.hash).or_default().push(
+                                    CompletedRead {
+                                        key: req.key,
+                                        result: Err(status),
+                                    },
+                                );
+                                if req.retry_tracked {
+                                    self.ctx.on_retry_request_consumed(req.ctx_id);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            should_remove = requests.is_empty();
+        }
+
+        if should_remove {
+            self.pending_reads.remove(&ctx_id);
         }
     }
 
@@ -192,6 +553,7 @@ where
         if !self.active {
             self.store.epoch().reentrant_protect(self.ctx.thread_id);
             self.active = true;
+            self.store.register_thread(self.ctx.thread_id);
             // Register session when starting
             self.store.register_session(&self.to_session_state());
         }
@@ -222,6 +584,7 @@ where
     /// checkpoint information current.
     pub fn refresh(&mut self) {
         if self.active {
+            self.store.cpr_refresh(&mut self.ctx);
             self.store
                 .epoch()
                 .reentrant_protect_and_drain(self.ctx.thread_id);
@@ -237,8 +600,33 @@ where
     /// operations that are persisted and need to be recovered.
     pub fn read(&mut self, key: &K) -> Result<Option<V>, Status> {
         self.start();
+        self.store.cpr_refresh(&mut self.ctx);
 
-        self.store.read_sync(&mut self.ctx, key)
+        if let Some(result) = self.try_take_completed_read(key)? {
+            return result;
+        }
+
+        match self.store.read_sync(&mut self.ctx, key) {
+            Ok(value) => {
+                // Best-effort: if a prior attempt returned `Pending`, cancel it so that
+                // `WAIT_PENDING` does not wait indefinitely on an abandoned read.
+                let _ = self.cancel_one_pending_read(key);
+                Ok(value)
+            }
+            Err(Status::Pending) => {
+                if let Some(address) = self.ctx.last_pending_read.take() {
+                    let hash = <K as PersistKey>::Codec::hash(key)?;
+                    self.enqueue_pending_read(
+                        self.ctx.current_ctx_id(),
+                        key.clone(),
+                        hash,
+                        address,
+                    );
+                }
+                Err(Status::Pending)
+            }
+            Err(status) => Err(status),
+        }
     }
 
     /// Read a record as a zero-copy view.
@@ -254,6 +642,7 @@ where
         key: &K,
     ) -> Result<Option<RecordView<'g>>, Status> {
         self.start();
+        self.store.cpr_refresh(&mut self.ctx);
         if guard.thread_id() != self.ctx.thread_id {
             return Err(Status::InvalidArgument);
         }
@@ -268,6 +657,7 @@ where
     /// Upsert a key-value pair
     pub fn upsert(&mut self, key: K, value: V) -> Status {
         self.start();
+        self.store.cpr_refresh(&mut self.ctx);
 
         let status = self.store.upsert_sync(&mut self.ctx, key, value);
         self.bump_serial_on_ok(status)
@@ -280,6 +670,7 @@ where
     /// doesn't write to the log and shouldn't affect CPR recovery.
     pub fn delete(&mut self, key: &K) -> Status {
         self.start();
+        self.store.cpr_refresh(&mut self.ctx);
 
         let status = self.store.delete_sync(&mut self.ctx, key);
         self.bump_serial_on_ok(status)
@@ -291,6 +682,7 @@ where
         F: FnMut(&mut V) -> bool,
     {
         self.start();
+        self.store.cpr_refresh(&mut self.ctx);
 
         let status = self.store.rmw_sync(&mut self.ctx, key, modifier);
         self.bump_serial_on_ok(status)
@@ -328,14 +720,34 @@ where
         let start = Instant::now();
 
         loop {
-            let completed = self
-                .store
-                .take_completed_io_for_thread(self.ctx.thread_id, get_thread_tag());
-            if completed > 0 {
-                self.ctx.pending_count = self.ctx.pending_count.saturating_sub(completed);
+            let thread_tag = get_thread_tag();
+
+            let current_id = self.ctx.current_ctx_id();
+            let completed_current = self.store.take_completed_io_for_context(
+                self.ctx.thread_id,
+                thread_tag,
+                current_id,
+            );
+            if completed_current > 0 {
+                self.ctx
+                    .on_pending_io_completed(current_id, completed_current);
             }
 
-            if !wait || self.ctx.pending_count == 0 {
+            let prev_id = self.ctx.prev_ctx_id();
+            let completed_prev =
+                self.store
+                    .take_completed_io_for_context(self.ctx.thread_id, thread_tag, prev_id);
+            if completed_prev > 0 {
+                self.ctx.on_pending_io_completed(prev_id, completed_prev);
+            }
+
+            self.drive_pending_reads_for_ctx(current_id, thread_tag);
+            if prev_id != current_id {
+                self.drive_pending_reads_for_ctx(prev_id, thread_tag);
+            }
+
+            if !wait || (self.ctx.total_pending_ios() == 0 && self.ctx.total_retry_requests() == 0)
+            {
                 break;
             }
 
@@ -351,7 +763,7 @@ where
             std::thread::yield_now();
         }
 
-        self.ctx.pending_count == 0
+        self.ctx.total_pending_ios() == 0 && self.ctx.total_retry_requests() == 0
     }
 
     /// Get a reference to the thread context
@@ -375,6 +787,7 @@ where
         self.end();
         // Unregister from the session registry on drop
         self.store.unregister_session(self.guid);
+        self.store.unregister_thread(self.ctx.thread_id);
     }
 }
 

@@ -19,13 +19,24 @@ use crate::codec::{PersistKey, PersistValue};
 use crate::compaction::{CompactionConfig, Compactor};
 use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
+use crate::epoch::try_get_thread_id;
 use crate::epoch::LightEpoch;
 use crate::index::{MemHashIndex, MemHashIndexConfig};
 use crate::stats::StatsCollector;
 use crate::store::pending_io::PendingIoManager;
 use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
+use crate::store::ThreadContext;
 
+use super::cpr::{
+    ActiveCheckpoint, ActiveCheckpointStart, CheckpointDurability, LogCheckpointBackend,
+};
 use super::{CheckpointKind, FasterKv, FasterKvConfig, ReadCacheOps};
+
+fn fsync_dir_best_effort(dir: &Path) {
+    if let Ok(file) = std::fs::File::open(dir) {
+        let _ = file.sync_all();
+    }
+}
 
 impl<K, V, D> FasterKv<K, V, D>
 where
@@ -51,20 +62,27 @@ where
     /// Create an incremental checkpoint, falling back to a full checkpoint when needed.
     pub fn checkpoint_incremental(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
         let prev_snapshot = self.last_snapshot_checkpoint.read();
-        let can_use_incremental = prev_snapshot.is_some();
+        let can_use_incremental = prev_snapshot
+            .as_ref()
+            .is_some_and(|state| state.checkpoint_type.uses_snapshot_file());
         drop(prev_snapshot);
 
         if can_use_incremental {
             self.checkpoint_with_action(checkpoint_dir, Action::CheckpointIncremental)
         } else {
-            let token = self.checkpoint(checkpoint_dir)?;
-            Ok(token)
+            self.checkpoint_full_snapshot(checkpoint_dir)
         }
     }
 
     /// Force a full snapshot checkpoint and record it as the incremental base.
     pub fn checkpoint_full_snapshot(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
-        self.checkpoint_with_action(checkpoint_dir, Action::CheckpointFull)
+        let token = Uuid::new_v4();
+        self.checkpoint_with_action_internal_with_backend(
+            checkpoint_dir,
+            Action::CheckpointFull,
+            token,
+            Some(LogCheckpointBackend::Snapshot),
+        )
     }
 
     fn checkpoint_with_action(
@@ -83,6 +101,17 @@ where
         action: Action,
         token: CheckpointToken,
     ) -> io::Result<CheckpointToken> {
+        self.checkpoint_with_action_internal_with_backend(checkpoint_dir, action, token, None)
+    }
+
+    fn checkpoint_with_action_internal_with_backend(
+        &self,
+        checkpoint_dir: &Path,
+        action: Action,
+        token: CheckpointToken,
+        backend_override: Option<LogCheckpointBackend>,
+    ) -> io::Result<CheckpointToken> {
+        let durability = self.checkpoint_durability();
         let start_result = self.system_state.try_start_action(action);
         let start_state = match start_result {
             Ok(prev) => prev,
@@ -98,8 +127,13 @@ where
         };
         let start_version = start_state.version;
 
-        let result = create_checkpoint_directory(checkpoint_dir, token)
-            .and_then(|cp_dir| self.execute_checkpoint_state_machine(&cp_dir, token, action));
+        let result = create_checkpoint_directory(checkpoint_dir, token).and_then(|cp_dir| {
+            // Make the newly created checkpoint directory entry durable.
+            if durability == CheckpointDurability::FsyncOnCheckpoint {
+                fsync_dir_best_effort(checkpoint_dir);
+            }
+            self.execute_checkpoint_state_machine(&cp_dir, token, action, backend_override)
+        });
 
         if result.is_err() {
             self.system_state.store(
@@ -116,94 +150,254 @@ where
         cp_dir: &Path,
         token: CheckpointToken,
         action: Action,
+        backend_override: Option<LogCheckpointBackend>,
     ) -> io::Result<()> {
-        let mut index_metadata: Option<IndexMetadata> = None;
-        let mut log_metadata: Option<LogMetadata> = None;
         let is_incremental = action == Action::CheckpointIncremental;
+
+        let driver_thread_id = try_get_thread_id().ok_or_else(|| {
+            io::Error::other("Checkpoint requires a registered LightEpoch thread id")
+        })?;
+
+        struct CheckpointCleanup<'a, K, V, D>
+        where
+            K: PersistKey,
+            V: PersistValue,
+            D: StorageDevice,
+        {
+            store: &'a FasterKv<K, V, D>,
+            thread_id: usize,
+            unregister_thread: bool,
+            clear_cpr: bool,
+        }
+
+        impl<'a, K, V, D> Drop for CheckpointCleanup<'a, K, V, D>
+        where
+            K: PersistKey,
+            V: PersistValue,
+            D: StorageDevice,
+        {
+            fn drop(&mut self) {
+                if self.clear_cpr {
+                    self.store.cpr.clear();
+                }
+                self.store.epoch().reentrant_unprotect(self.thread_id);
+                if self.unregister_thread {
+                    self.store.unregister_thread(self.thread_id);
+                }
+            }
+        }
+
+        let driver_bit = 1u128
+            .checked_shl(driver_thread_id as u32)
+            .ok_or_else(|| io::Error::other("Checkpoint requires driver thread_id < 128"))?;
+        let already_active = (self.active_threads_snapshot() & driver_bit) != 0;
+        if !already_active {
+            self.register_thread(driver_thread_id);
+        }
+        self.epoch().reentrant_protect(driver_thread_id);
+        let mut cleanup = CheckpointCleanup {
+            store: self,
+            thread_id: driver_thread_id,
+            unregister_thread: !already_active,
+            clear_cpr: false,
+        };
+
+        let backend = if is_incremental {
+            LogCheckpointBackend::Snapshot
+        } else if let Some(backend) = backend_override {
+            backend
+        } else {
+            LogCheckpointBackend::from(
+                self.default_log_checkpoint_backend
+                    .load(std::sync::atomic::Ordering::Acquire) as u8,
+            )
+        };
+        let durability = CheckpointDurability::from(
+            self.default_checkpoint_durability
+                .load(std::sync::atomic::Ordering::Acquire) as u8,
+        );
+
+        let participants = self.active_threads_snapshot() | driver_bit;
+        self.cpr.start(ActiveCheckpoint::new(ActiveCheckpointStart {
+            token,
+            dir: cp_dir.to_path_buf(),
+            action,
+            backend,
+            durability,
+            driver_thread_id,
+            participants,
+            version: self.system_state.version(),
+        }));
+        cleanup.clear_cpr = true;
+
+        let mut driver_ctx = ThreadContext::new(driver_thread_id);
 
         loop {
             let current_state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
+            self.cpr_refresh(&mut driver_ctx);
 
-            // Handle current phase
+            if current_state.phase == Phase::Rest {
+                break;
+            }
+
+            let is_driver = self
+                .cpr
+                .with_active(|active| active.driver_thread_id == driver_thread_id)
+                .unwrap_or(false);
+            if !is_driver {
+                break;
+            }
+
+            // Drive current phase (driver thread only).
             match current_state.phase {
                 Phase::PrepIndexChkpt => {
-                    // Phase 1: Prepare index checkpoint
-                    // In a full implementation, this would synchronize all threads
-                    // For now, we just advance to the next phase
-                    self.handle_prep_index_checkpoint()?;
+                    // Rendezvous: wait for all participant threads to observe the phase at an
+                    // operation boundary (via refresh/operation-entry hook).
+                    let _ = self.cpr.with_active_mut(|active| {
+                        active.set_phase(current_state.phase, current_state.version);
+                    });
+                    let barrier_complete = self
+                        .cpr
+                        .with_active(|active| active.barrier_complete())
+                        .unwrap_or(false);
+                    if barrier_complete {
+                        let _ = self.system_state.try_advance();
+                    }
                 }
 
                 Phase::IndexChkpt => {
-                    // Phase 2: Write index to disk
-                    index_metadata = Some(self.handle_index_checkpoint(cp_dir, token)?);
+                    // Driver writes the index checkpoint (other threads continue running).
+                    let meta = self.handle_index_checkpoint(cp_dir, token)?;
+                    let _ = self
+                        .cpr
+                        .with_active_mut(|active| active.index_metadata = Some(meta));
+
+                    if durability == CheckpointDurability::FsyncOnCheckpoint {
+                        let index_dat = cp_dir.join("index.dat");
+                        let index_meta = cp_dir.join("index.meta");
+                        std::fs::File::open(&index_dat).and_then(|f| f.sync_all())?;
+                        std::fs::File::open(&index_meta).and_then(|f| f.sync_all())?;
+                        fsync_dir_best_effort(cp_dir);
+                    }
+
+                    let _ = self.system_state.try_advance();
                 }
 
                 Phase::Prepare => {
-                    // Phase 3: Prepare hybrid log checkpoint
-                    self.handle_prepare_checkpoint()?;
+                    // Rendezvous: ensure all participant threads reach a safe operation boundary
+                    // before we cut the prefix boundary and advance to IN_PROGRESS.
+                    let _ = self.cpr.with_active_mut(|active| {
+                        active.set_phase(current_state.phase, current_state.version);
+                    });
+
+                    let barrier_complete = self
+                        .cpr
+                        .with_active(|active| active.barrier_complete())
+                        .unwrap_or(false);
+                    if barrier_complete {
+                        // Capture a coherent view for this checkpoint.
+                        let session_states = self.get_session_states();
+                        let (begin_address, final_address) = unsafe {
+                            let hlog = &*self.hlog.get();
+                            (hlog.get_begin_address(), hlog.get_tail_address())
+                        };
+
+                        let _ = self.cpr.with_active_mut(|active| {
+                            active.begin_address = begin_address;
+                            active.final_address = final_address;
+                            active.session_states = session_states;
+                        });
+
+                        let _ = self.system_state.try_advance();
+                    }
                 }
 
                 Phase::InProgress => {
-                    // Phase 4: Checkpoint in progress
-                    // Version is already incremented by state machine
-                    if is_incremental {
-                        log_metadata = Some(self.handle_incremental_checkpoint(
-                            cp_dir,
-                            token,
-                            current_state.version,
-                        )?);
-                    } else {
-                        log_metadata = Some(self.handle_in_progress_checkpoint(
-                            cp_dir,
-                            token,
-                            current_state.version,
-                        )?);
+                    // Wait for all participant threads to perform the execution-context swap to the
+                    // new version.
+                    let _ = self.cpr.with_active_mut(|active| {
+                        active.set_phase(current_state.phase, current_state.version);
+                    });
+                    let barrier_complete = self
+                        .cpr
+                        .with_active(|active| active.barrier_complete())
+                        .unwrap_or(false);
+                    if barrier_complete {
+                        let _ = self.system_state.try_advance();
                     }
                 }
 
                 Phase::WaitPending => {
-                    // Phase 5: Wait for pending operations
-                    self.handle_wait_pending()?;
+                    // WAIT_PENDING semantics: wait only for the previous execution context to drain
+                    // (pending I/Os + retry_requests).
+                    let _ = self.cpr.with_active_mut(|active| {
+                        active.set_phase(current_state.phase, current_state.version);
+                    });
+                    let barrier_complete = self
+                        .cpr
+                        .with_active(|active| active.barrier_complete())
+                        .unwrap_or(false);
+                    if barrier_complete {
+                        let _ = self.system_state.try_advance();
+                    }
                 }
 
                 Phase::WaitFlush => {
-                    // Phase 6: Wait for flush to complete
+                    // Wait for the checkpoint backend to meet its durability boundary.
+                    let _ = self.cpr.with_active_mut(|active| {
+                        active.set_phase(current_state.phase, current_state.version);
+                    });
+
                     if is_incremental {
-                        self.handle_incremental_wait_flush(cp_dir, token, current_state.version)?;
+                        self.drive_incremental_wait_flush(token, current_state.version)?;
                     } else {
-                        self.handle_wait_flush()?;
+                        self.drive_wait_flush(token, current_state.version)?;
+                    }
+
+                    let barrier_complete = self
+                        .cpr
+                        .with_active(|active| active.barrier_complete())
+                        .unwrap_or(false);
+                    if barrier_complete {
+                        let _ = self.system_state.try_advance();
                     }
                 }
 
                 Phase::PersistenceCallback => {
-                    // Phase 7: Invoke persistence callback
+                    let (index_meta, log_meta) = self
+                        .cpr
+                        .with_active(|active| {
+                            (active.index_metadata.clone(), active.log_metadata.clone())
+                        })
+                        .unwrap_or((None, None));
+
+                    // Invoke persistence callback (currently a no-op).
                     self.handle_persistence_callback(
                         cp_dir,
                         token,
-                        index_metadata.as_ref(),
-                        log_metadata.as_ref(),
+                        index_meta.as_ref(),
+                        log_meta.as_ref(),
                     )?;
 
-                    // Save checkpoint state for future incremental checkpoints
-                    if !is_incremental && log_metadata.is_some() {
-                        let mut state = CheckpointState::new(CheckpointType::Snapshot);
-                        if let Some(ref log_meta) = log_metadata {
-                            state.log_metadata = log_meta.clone();
+                    // Save checkpoint state for future incremental checkpoints.
+                    if !is_incremental && backend == LogCheckpointBackend::Snapshot {
+                        if let Some(log_meta) = log_meta {
+                            let mut state = CheckpointState::new(CheckpointType::Snapshot);
+                            state.log_metadata = log_meta;
+                            if let Some(index_meta) = index_meta {
+                                state.index_metadata = index_meta;
+                            }
+                            state.index_metadata.token = token;
+                            state.log_metadata.token = token;
+                            *self.last_snapshot_checkpoint.write() = Some(state);
                         }
-                        if let Some(ref index_meta) = index_metadata {
-                            state.index_metadata = index_meta.clone();
-                        }
-                        // Set tokens AFTER cloning to ensure they're not overwritten
-                        // Both index and log metadata must have the same token for consistency
-                        state.index_metadata.token = token;
-                        state.log_metadata.token = token;
-                        *self.last_snapshot_checkpoint.write() = Some(state);
                     }
+
+                    let _ = self.system_state.try_advance();
                 }
 
                 Phase::Rest => {
-                    // Phase 8: Back to rest state - checkpoint complete
-                    return Ok(());
+                    break;
                 }
 
                 _ => {
@@ -217,15 +411,10 @@ where
                 }
             }
 
-            // Advance to the next phase
-            if let Err(err_state) = self.system_state.try_advance() {
-                // If we can't advance and we're in rest state, we're done
-                if err_state.phase == Phase::Rest {
-                    return Ok(());
-                }
-                // Otherwise, retry (another thread may have advanced)
-            }
+            std::thread::yield_now();
         }
+
+        Ok(())
     }
 
     fn handle_prep_index_checkpoint(&self) -> io::Result<()> {
@@ -244,39 +433,89 @@ where
         self.hash_index.checkpoint(cp_dir, token)
     }
 
-    fn handle_prepare_checkpoint(&self) -> io::Result<()> {
-        // Prepare for hybrid log checkpoint
-        // Get flushed addresses, etc.
-        Ok(())
-    }
+    fn drive_wait_flush(&self, token: CheckpointToken, version: u32) -> io::Result<()> {
+        let (dir, begin, final_address, session_states, backend, durability, already_done) = self
+            .cpr
+            .with_active(|active| {
+                (
+                    active.dir.clone(),
+                    active.begin_address,
+                    active.final_address,
+                    active.session_states.clone(),
+                    active.backend,
+                    active.durability,
+                    active.snapshot_written,
+                )
+            })
+            .ok_or_else(|| io::Error::other("No active checkpoint"))?;
 
-    fn handle_in_progress_checkpoint(
-        &self,
-        cp_dir: &Path,
-        token: CheckpointToken,
-        version: u32,
-    ) -> io::Result<LogMetadata> {
-        // Collect session states for persistence
-        let session_states = self.get_session_states();
+        let meta_path = dir.join("log.meta");
+        let snapshot_path = dir.join("log.snapshot");
 
-        // SAFETY: checkpoint() is protected by the epoch system
-        unsafe {
-            (*self.hlog.get()).checkpoint_with_sessions(cp_dir, token, version, session_states)
+        let write_log_meta = |use_snapshot_file: bool| -> io::Result<LogMetadata> {
+            let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
+            let mut meta = unsafe {
+                (*self.hlog.get()).checkpoint_metadata_at(
+                    token,
+                    version,
+                    begin,
+                    final_address,
+                    flushed_until,
+                    use_snapshot_file,
+                )
+            };
+            meta.session_states = session_states.clone();
+            meta.num_threads = meta.session_states.len() as u32;
+            meta.write_to_file(&meta_path)?;
+            Ok(meta)
+        };
+
+        let fsync_checkpoint_artifacts = |include_snapshot: bool| -> io::Result<()> {
+            if durability != CheckpointDurability::FsyncOnCheckpoint {
+                return Ok(());
+            }
+
+            if include_snapshot {
+                std::fs::File::open(&snapshot_path).and_then(|f| f.sync_all())?;
+            }
+            std::fs::File::open(&meta_path).and_then(|f| f.sync_all())?;
+            fsync_dir_best_effort(&dir);
+            Ok(())
+        };
+
+        match backend {
+            LogCheckpointBackend::Snapshot => {
+                if already_done {
+                    return Ok(());
+                }
+
+                unsafe {
+                    (*self.hlog.get()).write_log_snapshot(&snapshot_path, begin, final_address)?;
+                }
+
+                let meta = write_log_meta(true)?;
+                fsync_checkpoint_artifacts(true)?;
+
+                let _ = self.cpr.with_active_mut(|active| {
+                    active.log_metadata = Some(meta);
+                    active.snapshot_written = true;
+                });
+            }
+            LogCheckpointBackend::FoldOver => {
+                // Fold-over uses the main log device: ensure the prefix is flushed to the device.
+                unsafe {
+                    (*self.hlog.get()).flush_until(final_address)?;
+                }
+
+                let meta = write_log_meta(false)?;
+                fsync_checkpoint_artifacts(false)?;
+
+                let _ = self.cpr.with_active_mut(|active| {
+                    active.log_metadata = Some(meta);
+                });
+            }
         }
-    }
 
-    fn handle_wait_pending(&self) -> io::Result<()> {
-        // Wait for all pending operations to complete
-        // In async implementation, this would drain pending I/Os
-        Ok(())
-    }
-
-    fn handle_wait_flush(&self) -> io::Result<()> {
-        // Wait for log flush to complete
-        // SAFETY: Flush is protected by epoch
-        unsafe {
-            (*self.hlog.get()).flush_to_disk()?;
-        }
         Ok(())
     }
 
@@ -293,6 +532,12 @@ where
                 "No previous snapshot for incremental checkpoint",
             )
         })?;
+        if !prev_state.checkpoint_type.uses_snapshot_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Incremental checkpoint requires a snapshot base checkpoint",
+            ));
+        }
 
         let prev_token = prev_state.token();
         let prev_final_address = prev_state.log_metadata.final_address;
@@ -314,13 +559,25 @@ where
         Ok(metadata)
     }
 
-    fn handle_incremental_wait_flush(
-        &self,
-        cp_dir: &Path,
-        token: CheckpointToken,
-        version: u32,
-    ) -> io::Result<()> {
-        // Get the previous snapshot state
+    fn drive_incremental_wait_flush(&self, token: CheckpointToken, version: u32) -> io::Result<()> {
+        let (dir, begin, final_address, session_states, durability, already_done) = self
+            .cpr
+            .with_active(|active| {
+                (
+                    active.dir.clone(),
+                    active.begin_address,
+                    active.final_address,
+                    active.session_states.clone(),
+                    active.durability,
+                    active.snapshot_written,
+                )
+            })
+            .ok_or_else(|| io::Error::other("No active checkpoint"))?;
+
+        if already_done {
+            return Ok(());
+        }
+
         let prev_snapshot = self.last_snapshot_checkpoint.read();
         let prev_state = prev_snapshot.as_ref().ok_or_else(|| {
             io::Error::new(
@@ -331,22 +588,15 @@ where
 
         let prev_token = prev_state.token();
         let prev_final_address = prev_state.log_metadata.final_address;
-
         drop(prev_snapshot);
 
-        // Get current log addresses
-        let (flushed_address, final_address) = unsafe {
-            let hlog = &*self.hlog.get();
-            (hlog.get_flushed_until_address(), hlog.get_tail_address())
-        };
+        let flushed_address = unsafe { (*self.hlog.get()).get_flushed_until_address() };
 
-        // Create delta log device (using a file in the checkpoint directory)
-        let delta_path = delta_log_path(cp_dir, 0);
+        let delta_path = delta_log_path(&dir, 0);
         let delta_device = Arc::new(crate::device::FileSystemDisk::single_file(&delta_path)?);
         let delta_config = DeltaLogConfig::new(22); // 4MB pages
         let delta_log = DeltaLog::new(delta_device.clone(), delta_config, 0);
 
-        // Flush delta records
         let num_entries = unsafe {
             (*self.hlog.get()).flush_delta_to_device(
                 flushed_address,
@@ -357,7 +607,7 @@ where
             )?
         };
 
-        // Write delta log metadata (use checkpoint token, not a random UUID)
+        let delta_meta_path = delta_metadata_path(&dir);
         let delta_meta = DeltaLogMetadata {
             token: token.to_string(),
             base_snapshot_token: prev_token.to_string(),
@@ -371,12 +621,39 @@ where
                 .unwrap_or(0),
             num_entries,
         };
-        delta_meta.write_to_file(&delta_metadata_path(cp_dir))?;
+        delta_meta.write_to_file(&delta_meta_path)?;
 
-        // Flush the regular log as well
-        unsafe {
-            (*self.hlog.get()).flush_to_disk()?;
+        let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
+        let mut meta = unsafe {
+            (*self.hlog.get()).checkpoint_metadata_at(
+                token,
+                version,
+                begin,
+                final_address,
+                flushed_until,
+                true,
+            )
+        };
+        meta.session_states = session_states;
+        meta.num_threads = meta.session_states.len() as u32;
+        meta.is_incremental = true;
+        meta.prev_snapshot_token = Some(prev_token);
+        meta.start_logical_address = prev_final_address;
+
+        let meta_path = dir.join("log.meta");
+        meta.write_to_file(&meta_path)?;
+
+        if durability == CheckpointDurability::FsyncOnCheckpoint {
+            std::fs::File::open(&delta_path).and_then(|f| f.sync_all())?;
+            std::fs::File::open(&delta_meta_path).and_then(|f| f.sync_all())?;
+            std::fs::File::open(&meta_path).and_then(|f| f.sync_all())?;
+            fsync_dir_best_effort(&dir);
         }
+
+        let _ = self.cpr.with_active_mut(|active| {
+            active.log_metadata = Some(meta);
+            active.snapshot_written = true;
+        });
 
         Ok(())
     }
@@ -543,6 +820,14 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(session_registry),
+            active_threads: Mutex::new(0),
+            cpr: super::cpr::CprCoordinator::default(),
+            default_log_checkpoint_backend: AtomicU32::new(
+                super::cpr::LogCheckpointBackend::Snapshot as u32,
+            ),
+            default_checkpoint_durability: AtomicU32::new(
+                super::cpr::CheckpointDurability::FasterLike as u32,
+            ),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -666,6 +951,14 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(HashMap::new()),
+            active_threads: Mutex::new(0),
+            cpr: super::cpr::CprCoordinator::default(),
+            default_log_checkpoint_backend: AtomicU32::new(
+                super::cpr::LogCheckpointBackend::Snapshot as u32,
+            ),
+            default_checkpoint_durability: AtomicU32::new(
+                super::cpr::CheckpointDurability::FasterLike as u32,
+            ),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -726,6 +1019,14 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(session_registry),
+            active_threads: Mutex::new(0),
+            cpr: super::cpr::CprCoordinator::default(),
+            default_log_checkpoint_backend: AtomicU32::new(
+                super::cpr::LogCheckpointBackend::Snapshot as u32,
+            ),
+            default_checkpoint_durability: AtomicU32::new(
+                super::cpr::CheckpointDurability::FasterLike as u32,
+            ),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })

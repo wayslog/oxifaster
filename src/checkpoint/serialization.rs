@@ -18,10 +18,27 @@ fn invalid_data(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io:
 }
 
 fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result<()> {
-    let file = File::create(path)?;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?
+        .to_string_lossy();
+    let tmp_path = parent.join(format!(".{file_name}.tmp"));
+
+    let file = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, value).map_err(invalid_data)?;
-    writer.flush()
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(path);
+            fs::rename(&tmp_path, path)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {

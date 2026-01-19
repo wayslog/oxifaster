@@ -146,8 +146,13 @@ impl CheckpointInfo {
             // Incremental checkpoints need delta log instead of full snapshot
             has_basic && delta_log_path(&self.directory, 0).exists()
         } else {
-            // Full checkpoints need log snapshot
-            has_basic && self.directory.join("log.snapshot").exists()
+            match self.log_metadata.as_ref() {
+                Some(log_meta) if log_meta.use_snapshot_file => {
+                    has_basic && self.directory.join("log.snapshot").exists()
+                }
+                Some(_) => has_basic,
+                None => false,
+            }
         }
     }
 
@@ -426,10 +431,15 @@ fn validate_required_files(checkpoint_dir: &Path, required_files: &[&str]) -> io
 
 /// Validate that a checkpoint directory contains all required files
 pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
-    validate_required_files(
-        checkpoint_dir,
-        &["index.meta", "index.dat", "log.meta", "log.snapshot"],
-    )
+    validate_required_files(checkpoint_dir, &["index.meta", "index.dat", "log.meta"])?;
+
+    let log_meta_path = checkpoint_dir.join("log.meta");
+    let log_meta = crate::checkpoint::LogMetadata::read_from_file(&log_meta_path)?;
+    if log_meta.use_snapshot_file {
+        validate_required_files(checkpoint_dir, &["log.snapshot"])?;
+    }
+
+    Ok(())
 }
 
 /// Validate that a checkpoint directory contains all required files for an incremental checkpoint

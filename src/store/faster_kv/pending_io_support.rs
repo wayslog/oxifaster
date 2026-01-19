@@ -1,3 +1,4 @@
+use crate::address::Address;
 use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::device::StorageDevice;
 use crate::epoch::current_thread_tag_for;
@@ -5,7 +6,7 @@ use crate::record::RecordInfo;
 use crate::status::Status;
 
 use super::record_format;
-use super::{DiskReadResult, FasterKv, PendingIoKey};
+use super::{DiskReadCacheEntry, DiskReadResult, FasterKv, PendingIoKey};
 
 impl<K, V, D> FasterKv<K, V, D>
 where
@@ -31,6 +32,7 @@ where
                 crate::store::pending_io::IoCompletion::ReadBytesDone {
                     thread_id,
                     thread_tag,
+                    ctx_id,
                     address,
                     result,
                 } => {
@@ -40,7 +42,7 @@ where
                     };
                     self.disk_read_results
                         .lock()
-                        .insert(address.control(), parsed);
+                        .insert(address.control(), DiskReadCacheEntry { parsed });
 
                     if current_thread_tag_for(thread_id) != thread_tag {
                         continue;
@@ -50,6 +52,7 @@ where
                         .entry(PendingIoKey {
                             thread_id,
                             thread_tag,
+                            ctx_id,
                         })
                         .or_insert(0) += 1;
                 }
@@ -57,16 +60,59 @@ where
         }
     }
 
-    /// Consume and return the number of completed I/Os for the given thread.
-    pub(crate) fn take_completed_io_for_thread(&self, thread_id: usize, thread_tag: u64) -> u32 {
+    /// Consume and return the number of completed I/Os for the given execution context.
+    pub(crate) fn take_completed_io_for_context(
+        &self,
+        thread_id: usize,
+        thread_tag: u64,
+        ctx_id: u64,
+    ) -> u32 {
         self.process_pending_io_completions();
         self.pending_io_completed
             .lock()
             .remove(&PendingIoKey {
                 thread_id,
                 thread_tag,
+                ctx_id,
             })
             .unwrap_or(0)
+    }
+
+    /// Consume a parsed disk read result for `address` (if present).
+    ///
+    /// This is primarily used to advance pending requests inside `complete_pending()`.
+    pub(crate) fn take_disk_read_result(
+        &self,
+        address: Address,
+    ) -> Option<Result<DiskReadResult<K, V>, Status>> {
+        self.disk_read_results
+            .lock()
+            .remove(&address.control())
+            .map(|e| e.parsed)
+    }
+
+    /// Submit a disk read for a specific execution context.
+    ///
+    /// Returns `true` if a new I/O was submitted, or `false` if the address is already inflight.
+    pub(crate) fn submit_disk_read_for_context(
+        &self,
+        thread_id: usize,
+        thread_tag: u64,
+        ctx_id: u64,
+        address: Address,
+    ) -> bool {
+        if record_format::is_fixed_record::<K, V>() {
+            self.pending_io.submit_read_bytes(
+                thread_id,
+                thread_tag,
+                ctx_id,
+                address,
+                record_format::fixed_disk_len::<K, V>(),
+            )
+        } else {
+            self.pending_io
+                .submit_read_varlen_record(thread_id, thread_tag, ctx_id, address)
+        }
     }
 
     /// Parse key/value from disk-read record bytes (producing an owned result).

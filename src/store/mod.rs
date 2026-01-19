@@ -58,7 +58,9 @@ mod state_transitions;
 
 pub use async_session::{AsyncSession, AsyncSessionBuilder};
 pub use contexts::{DeleteContext, PendingContext, ReadContext, RmwContext, UpsertContext};
-pub use faster_kv::{CheckpointKind, FasterKv, FasterKvConfig};
+pub use faster_kv::{
+    CheckpointDurability, CheckpointKind, FasterKv, FasterKvConfig, LogCheckpointBackend,
+};
 pub use record_format::RecordView;
 pub use session::{Session, SessionBuilder, ThreadContext};
 pub use state_transitions::{Action, AtomicSystemState, Phase, SystemState};

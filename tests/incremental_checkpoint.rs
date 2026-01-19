@@ -7,14 +7,13 @@
 
 use oxifaster::checkpoint::{
     delta_log_path, delta_metadata_path, CheckpointType, DeltaLogMetadata,
-    IncrementalCheckpointChain,
+    IncrementalCheckpointChain, LogMetadata,
 };
 use oxifaster::delta_log::{
     DeltaLog, DeltaLogConfig, DeltaLogEntry, DeltaLogEntryType, DeltaLogIterator,
 };
 use oxifaster::device::NullDisk;
-use oxifaster::store::FasterKv;
-use oxifaster::store::FasterKvConfig;
+use oxifaster::store::{FasterKv, FasterKvConfig, LogCheckpointBackend};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -290,6 +289,51 @@ fn test_store_checkpoint_types() {
     assert!(!log_token.is_nil());
     assert_ne!(full_token, log_token);
     assert_ne!(index_token, log_token);
+}
+
+#[test]
+fn test_incremental_checkpoint_does_not_use_foldover_base() {
+    let store = create_test_store();
+    store.set_log_checkpoint_backend(LogCheckpointBackend::FoldOver);
+
+    let temp_dir = tempdir().unwrap();
+
+    {
+        let mut session = store.start_session().unwrap();
+        for i in 0..100u64 {
+            let _ = session.upsert(i, i);
+        }
+        session.refresh();
+    }
+
+    // Fold-over checkpoint should not become the incremental base.
+    let foldover_token = store.checkpoint(temp_dir.path()).unwrap();
+    let foldover_dir = temp_dir.path().join(foldover_token.to_string());
+    assert!(foldover_dir.join("log.meta").exists());
+    assert!(!foldover_dir.join("log.snapshot").exists());
+
+    // First incremental call should fall back to a full snapshot checkpoint as base.
+    let base_token = store.checkpoint_incremental(temp_dir.path()).unwrap();
+    assert_ne!(base_token, foldover_token);
+    let base_dir = temp_dir.path().join(base_token.to_string());
+    assert!(base_dir.join("log.snapshot").exists());
+
+    // Subsequent incremental checkpoint should produce delta files referencing the snapshot base.
+    {
+        let mut session = store.start_session().unwrap();
+        for i in 50..150u64 {
+            let _ = session.upsert(i, i * 10);
+        }
+        session.refresh();
+    }
+    let incr_token = store.checkpoint_incremental(temp_dir.path()).unwrap();
+    let incr_dir = temp_dir.path().join(incr_token.to_string());
+    assert!(delta_log_path(&incr_dir, 0).exists());
+    assert!(delta_metadata_path(&incr_dir).exists());
+
+    let log_meta = LogMetadata::read_from_file(&incr_dir.join("log.meta")).unwrap();
+    assert!(log_meta.is_incremental);
+    assert_eq!(log_meta.prev_snapshot_token, Some(base_token));
 }
 
 // ============ Iterator Tests ============

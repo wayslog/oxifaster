@@ -4,6 +4,7 @@
 
 mod checkpoint;
 mod compaction;
+mod cpr;
 mod index_grow;
 mod pending_io_support;
 
@@ -25,6 +26,7 @@ use crate::cache::{ReadCache, ReadCacheConfig};
 use crate::checkpoint::{CheckpointState, SessionState};
 use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::compaction::{CompactionConfig, Compactor};
+use crate::constants::MAX_THREADS;
 use crate::device::StorageDevice;
 use crate::epoch::EpochGuard;
 use crate::epoch::{get_thread_tag, try_get_thread_id, LightEpoch};
@@ -37,6 +39,8 @@ use crate::store::state_transitions::{AtomicSystemState, SystemState};
 use crate::store::{AsyncSession, RecordView, Session, ThreadContext};
 
 use super::record_format;
+use cpr::CprCoordinator;
+pub use cpr::{CheckpointDurability, LogCheckpointBackend};
 
 /// Configuration for FasterKV
 #[derive(Debug, Clone)]
@@ -74,21 +78,32 @@ impl Default for FasterKvConfig {
     }
 }
 
-#[derive(Clone)]
-struct DiskReadResult<K, V> {
+#[derive(Debug, Clone)]
+pub(crate) struct DiskReadResult<K, V> {
     /// Decoded key for the record. `None` means the record was marked invalid and should be skipped.
-    key: Option<K>,
-    value: Option<V>,
-    previous_address: Address,
+    pub(crate) key: Option<K>,
+    pub(crate) value: Option<V>,
+    pub(crate) previous_address: Address,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PendingIoKey {
     thread_id: usize,
     thread_tag: u64,
+    ctx_id: u64,
 }
 
-type DiskReadCache<K, V> = HashMap<u64, Result<DiskReadResult<K, V>, Status>>;
+#[derive(Debug, Clone)]
+struct DiskReadCacheEntry<K, V> {
+    parsed: Result<DiskReadResult<K, V>, Status>,
+}
+
+type DiskReadCache<K, V> = HashMap<u64, DiskReadCacheEntry<K, V>>;
+
+pub(crate) enum ChainReadOutcome<V> {
+    Completed(Option<V>),
+    NeedDiskRead(Address),
+}
 
 /// FasterKV - High-performance concurrent key-value store
 ///
@@ -143,6 +158,14 @@ where
     /// Active session states registry
     /// Maps session GUID to session state for checkpoint persistence
     session_registry: RwLock<HashMap<Uuid, SessionState>>,
+    /// Active thread set (bitmask by `thread_id`) for CPR rendezvous.
+    active_threads: Mutex<u128>,
+    /// Cooperative CPR coordinator state for the currently running checkpoint (if any).
+    cpr: CprCoordinator,
+    /// Default log checkpoint backend for `checkpoint()`.
+    default_log_checkpoint_backend: AtomicU32,
+    /// Default durability mode for checkpoint artifacts.
+    default_checkpoint_durability: AtomicU32,
     /// Last snapshot checkpoint state for incremental checkpoints
     /// Used to track the base snapshot for incremental checkpoints
     last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
@@ -301,6 +324,10 @@ where
             grow_state: UnsafeCell::new(None),
             stats_collector: StatsCollector::with_defaults(),
             session_registry: RwLock::new(HashMap::new()),
+            active_threads: Mutex::new(0),
+            cpr: CprCoordinator::default(),
+            default_log_checkpoint_backend: AtomicU32::new(LogCheckpointBackend::Snapshot as u32),
+            default_checkpoint_durability: AtomicU32::new(CheckpointDurability::FasterLike as u32),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
         }
@@ -321,6 +348,136 @@ where
         self.system_state.load(Ordering::Acquire)
     }
 
+    /// Get the log checkpoint backend used by `checkpoint()`.
+    pub fn log_checkpoint_backend(&self) -> LogCheckpointBackend {
+        LogCheckpointBackend::from(self.default_log_checkpoint_backend.load(Ordering::Acquire) as u8)
+    }
+
+    /// Configure the log checkpoint backend used by `checkpoint()`.
+    pub fn set_log_checkpoint_backend(&self, backend: LogCheckpointBackend) {
+        self.default_log_checkpoint_backend
+            .store(u32::from(backend as u8), Ordering::Release);
+    }
+
+    /// Get the durability mode for checkpoint artifacts.
+    pub fn checkpoint_durability(&self) -> CheckpointDurability {
+        CheckpointDurability::from(self.default_checkpoint_durability.load(Ordering::Acquire) as u8)
+    }
+
+    /// Configure the durability mode for checkpoint artifacts.
+    pub fn set_checkpoint_durability(&self, durability: CheckpointDurability) {
+        self.default_checkpoint_durability
+            .store(u32::from(durability as u8), Ordering::Release);
+    }
+
+    pub(crate) fn cpr_refresh(&self, ctx: &mut ThreadContext) {
+        let state = self.system_state.load(Ordering::Acquire);
+
+        if state.phase == crate::store::Phase::Rest || state.action == crate::store::Action::None {
+            ctx.version = state.version;
+            ctx.current.version = state.version;
+            return;
+        }
+
+        let state_sig = ThreadContext::cpr_state_sig(state.action, state.phase, state.version);
+        if ctx.last_cpr_state == state_sig {
+            return;
+        }
+
+        let Some(is_participant) = self
+            .cpr
+            .with_active(|active| active.is_participant(ctx.thread_id))
+        else {
+            // The store is in a CPR phase, but the checkpoint coordinator isn't fully initialized
+            // yet. Do not advance `last_cpr_state`, otherwise the caller could miss an ack.
+            ctx.version = state.version;
+            ctx.current.version = state.version;
+            return;
+        };
+
+        if !is_participant {
+            if ctx.version != state.version {
+                ctx.swap_contexts_for_checkpoint(state.version);
+            } else {
+                ctx.version = state.version;
+                ctx.current.version = state.version;
+            }
+            ctx.last_cpr_state = state_sig;
+            return;
+        }
+
+        match state.phase {
+            crate::store::Phase::PrepIndexChkpt | crate::store::Phase::Prepare => {
+                if self
+                    .cpr
+                    .with_active_mut(|active| {
+                        active.set_phase(state.phase, state.version);
+                        active.ack(ctx.thread_id);
+                    })
+                    .is_some()
+                {
+                    ctx.last_cpr_state = state_sig;
+                }
+            }
+            crate::store::Phase::InProgress => {
+                if ctx.version != state.version {
+                    ctx.swap_contexts_for_checkpoint(state.version);
+                } else {
+                    ctx.current.version = state.version;
+                }
+
+                if self
+                    .cpr
+                    .with_active_mut(|active| {
+                        active.set_phase(state.phase, state.version);
+                        active.ack(ctx.thread_id);
+                    })
+                    .is_some()
+                {
+                    ctx.last_cpr_state = state_sig;
+                }
+            }
+            crate::store::Phase::WaitPending => {
+                if ctx.prev_ctx_is_drained()
+                    && self
+                        .cpr
+                        .with_active_mut(|active| {
+                            active.set_phase(state.phase, state.version);
+                            active.ack(ctx.thread_id);
+                        })
+                        .is_some()
+                {
+                    ctx.last_cpr_state = state_sig;
+                }
+            }
+            crate::store::Phase::WaitFlush => {
+                let ready = self.cpr.with_active(|active| match active.backend {
+                    LogCheckpointBackend::Snapshot => {
+                        active.snapshot_written && active.log_metadata.is_some()
+                    }
+                    LogCheckpointBackend::FoldOver => unsafe {
+                        active.log_metadata.is_some()
+                            && (*self.hlog.get()).get_flushed_until_address()
+                                >= active.final_address
+                    },
+                });
+
+                if ready.unwrap_or(false)
+                    && self
+                        .cpr
+                        .with_active_mut(|active| {
+                            active.set_phase(state.phase, state.version);
+                            active.ack(ctx.thread_id);
+                        })
+                        .is_some()
+                {
+                    ctx.last_cpr_state = state_sig;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Get hash index statistics
     pub fn index_stats(&self) -> crate::index::IndexStats {
         self.hash_index.dump_distribution()
@@ -330,6 +487,12 @@ where
     pub fn log_stats(&self) -> crate::allocator::LogStats {
         // SAFETY: get_stats() is a read-only operation
         unsafe { (*self.hlog.get()).get_stats() }
+    }
+
+    /// Current hybrid log head address (records below this are considered "on disk").
+    pub(crate) fn head_address(&self) -> Address {
+        // SAFETY: reading the head address is a read-only operation.
+        unsafe { self.hlog().get_head_address() }
     }
 
     // ============ Statistics Collection API ============
@@ -432,6 +595,38 @@ where
         session.start();
 
         Ok(session)
+    }
+
+    pub(crate) fn register_thread(&self, thread_id: usize) {
+        assert!(
+            thread_id < MAX_THREADS,
+            "register_thread: thread_id {thread_id} exceeds MAX_THREADS={MAX_THREADS}"
+        );
+        let mut mask = self.active_threads.lock();
+        let bit = 1u128
+            .checked_shl(thread_id as u32)
+            .expect("register_thread: thread_id must be < 128 for u128 bitmask");
+        *mask |= bit;
+    }
+
+    pub(crate) fn unregister_thread(&self, thread_id: usize) {
+        assert!(
+            thread_id < MAX_THREADS,
+            "unregister_thread: thread_id {thread_id} exceeds MAX_THREADS={MAX_THREADS}"
+        );
+        let mut mask = self.active_threads.lock();
+        let bit = 1u128
+            .checked_shl(thread_id as u32)
+            .expect("unregister_thread: thread_id must be < 128 for u128 bitmask");
+        *mask &= !bit;
+
+        let _ = self
+            .cpr
+            .with_active_mut(|active| active.mark_thread_inactive(thread_id));
+    }
+
+    pub(crate) fn active_threads_snapshot(&self) -> u128 {
+        *self.active_threads.lock()
     }
 
     /// Start a new async session for this store
@@ -598,7 +793,7 @@ where
             if address < head_address {
                 // Prefer hitting the "disk read result cache" to avoid duplicate I/O submissions.
                 if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
-                    match result {
+                    match result.parsed {
                         Ok(parsed) => {
                             if parsed.key.as_ref() == Some(key) {
                                 // The cache stores tombstone(None) or value(Some) after a read completes.
@@ -630,6 +825,7 @@ where
                     self.pending_io.submit_read_bytes(
                         ctx.thread_id,
                         get_thread_tag(),
+                        ctx.current_ctx_id(),
                         address,
                         record_format::fixed_disk_len::<K, V>(),
                     )
@@ -637,12 +833,14 @@ where
                     self.pending_io.submit_read_varlen_record(
                         ctx.thread_id,
                         get_thread_tag(),
+                        ctx.current_ctx_id(),
                         address,
                     )
                 };
 
+                ctx.last_pending_read = Some(address);
                 if submitted {
-                    ctx.pending_count = ctx.pending_count.saturating_add(1);
+                    ctx.on_pending_io_submitted();
                 }
                 return Err(Status::Pending);
             }
@@ -727,6 +925,62 @@ where
                 .record_latency(start.elapsed());
         }
         Ok(None)
+    }
+
+    /// Continue a read by traversing an in-memory hash chain starting at `address`.
+    ///
+    /// This helper is used to resume collision traversal after a disk read yields a mismatched key.
+    pub(crate) fn read_chain_from_memory(
+        &self,
+        key: &K,
+        mut address: Address,
+    ) -> Result<ChainReadOutcome<V>, Status> {
+        while address.is_valid() {
+            if address.in_readcache() {
+                if let Some(value) = self.try_read_from_cache(address, key) {
+                    return Ok(ChainReadOutcome::Completed(Some(value)));
+                }
+                address = self.skip_read_cache(address);
+                continue;
+            }
+
+            // SAFETY: read-only access to hybrid log metadata.
+            let head_address = unsafe { self.hlog().get_head_address() };
+            if address < head_address {
+                return Ok(ChainReadOutcome::NeedDiskRead(address));
+            }
+
+            let record_ptr = unsafe { self.hlog().get(address) };
+            if let Some(ptr) = record_ptr {
+                let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+                if info.is_invalid() {
+                    address = info.previous_address();
+                    continue;
+                }
+
+                let page_size = unsafe { self.hlog().page_size() };
+                let limit = page_size.saturating_sub(address.offset() as usize);
+                let view: RecordView<'_> = unsafe {
+                    record_format::record_view_from_memory::<K, V>(address, ptr.as_ptr(), limit)?
+                };
+
+                if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
+                    if view.is_tombstone() {
+                        return Ok(ChainReadOutcome::Completed(None));
+                    }
+
+                    let value_bytes = view.value_bytes().ok_or(Status::Corruption)?;
+                    let value = <V as PersistValue>::Codec::decode(value_bytes)?;
+                    return Ok(ChainReadOutcome::Completed(Some(value)));
+                }
+
+                address = info.previous_address();
+            } else {
+                break;
+            }
+        }
+
+        Ok(ChainReadOutcome::Completed(None))
     }
 
     /// Zero-copy read that returns a `RecordView` into the hybrid log.
