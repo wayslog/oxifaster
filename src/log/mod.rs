@@ -45,10 +45,12 @@
 
 pub mod faster_log;
 mod format;
+pub mod inspect;
 mod io;
 mod types;
 
 pub use faster_log::FasterLog;
+pub use inspect::{LogInspector, LogStats as InspectorLogStats};
 pub use types::{
     FasterLogConfig, FasterLogOpenOptions, FasterLogSelfCheckOptions, FasterLogSelfCheckReport,
     LogError, LogErrorKind, LogStats,

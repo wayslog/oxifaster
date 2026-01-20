@@ -98,3 +98,273 @@
   - `Corruption` -> `Status::Corruption`
   - `Config` -> `Status::InvalidArgument`
 - `open()` returns `Status::NotFound` when metadata is missing and `create_if_missing = false`.
+
+## Format Versioning and Migration Strategy
+
+### Current Version
+
+- **Format Version**: 1
+- **Magic**: `OXFLOG1\0`
+- **Introduced**: 2026-01-20
+- **Status**: Stable
+- **Features**: Basic append-only log with commit points, checksums, and truncation
+
+### Version Detection
+
+The format version is encoded in the metadata header at offset 8 (after the 8-byte magic string):
+
+```rust
+pub fn detect_version(device: &D) -> Result<u32, LogError> {
+    let mut buf = vec![0u8; LogMetadata::ENCODED_SIZE];
+    // Read metadata from device
+    device.read(0, &mut buf)?;
+    // Check magic
+    let magic = &buf[0..8];
+    if magic != b"OXFLOG1\0" {
+        return Err(LogError::new(LogErrorKind::Metadata, "Invalid magic"));
+    }
+    // Return version field (u32 at offset 8)
+    let version = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+    Ok(version)
+}
+```
+
+### Supported Versions
+
+| Version | Status | Date | Notes |
+|---------|--------|------|-------|
+| 1 | Current | 2026-01-20 | Initial stable format with truncation support |
+| 2+ | Future | TBD | Reserved for future use |
+
+### Migration Strategy
+
+When introducing a new format version:
+
+#### 1. Version 2 Implementation Guidelines
+
+- Add `LogMetadata::VERSION_2` constant
+- Update `encode()` to support both versions (write new version)
+- Update `decode()` to detect and handle all supported versions
+- Add migration function: `migrate_v1_to_v2()`
+- Provide clear migration path in documentation
+
+#### 2. Reading Old Formats (Backward Compatibility)
+
+```rust
+impl LogMetadata {
+    pub fn decode(buf: &[u8]) -> Result<Self, LogMetadataError> {
+        // Check magic
+        let magic = &buf[0..8];
+        if magic != Self::MAGIC {
+            return Err(LogMetadataError::MagicMismatch);
+        }
+
+        // Read version
+        let version = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+
+        // Dispatch to version-specific decoder
+        match version {
+            1 => Self::decode_v1(buf),
+            2 => Self::decode_v2(buf),
+            _ => Err(LogMetadataError::UnsupportedVersion(version)),
+        }
+    }
+
+    fn decode_v1(buf: &[u8]) -> Result<Self, LogMetadataError> {
+        // Current format decoder
+        // ...
+    }
+
+    fn decode_v2(buf: &[u8]) -> Result<Self, LogMetadataError> {
+        // Future format decoder with additional fields
+        // ...
+    }
+}
+```
+
+#### 3. Writing New Format
+
+By default, always write the newest supported version:
+
+```rust
+impl LogMetadata {
+    pub fn encode(&self, buf: &mut [u8]) -> Result<(), LogMetadataError> {
+        // Always write newest version
+        let version = Self::VERSION_2;
+        // ... encode with version 2 format
+    }
+
+    // Optional: Support writing old formats for compatibility
+    pub fn encode_with_version(&self, buf: &mut [u8], version: u32) -> Result<(), LogMetadataError> {
+        match version {
+            1 => self.encode_v1(buf),
+            2 => self.encode_v2(buf),
+            _ => Err(LogMetadataError::UnsupportedVersion(version)),
+        }
+    }
+}
+```
+
+#### 4. Migration Tool
+
+Provide a standalone migration utility:
+
+```rust
+/// Migrate a log from one version to another
+pub fn migrate_log(
+    path: &Path,
+    from_version: u32,
+    to_version: u32,
+) -> Result<(), LogError> {
+    // 1. Open log with old format (read-only)
+    let old_log = FasterLog::open_with_version(config, device, from_version)?;
+
+    // 2. Create new log with new format
+    let new_log = FasterLog::create_with_version(config, new_device, to_version)?;
+
+    // 3. Copy all entries
+    for (addr, entry) in old_log.scan(old_log.get_begin_address(), old_log.get_committed_until()) {
+        new_log.append(&entry)?;
+    }
+
+    // 4. Commit and close
+    new_log.commit()?;
+    new_log.wait_for_commit(new_log.get_tail_address())?;
+
+    Ok(())
+}
+```
+
+### Backward Compatibility Policy
+
+1. **Minor versions (1.x)**: Must read all previous minor versions
+   - Can write new format
+   - Must support reading old format for at least 2 minor versions
+
+2. **Major versions (x.0)**: May drop support for old versions
+   - Must provide migration tool before dropping support
+   - Deprecation notice for at least 2 major versions
+
+3. **Deprecation Timeline**:
+   - Version N-2: Announce deprecation
+   - Version N-1: Warn on old format detection
+   - Version N: Drop support (with migration tool)
+
+### Format Change Guidelines
+
+When considering format changes:
+
+#### Requires Version Bump
+
+- Metadata structure changes (adding/removing/reordering fields)
+- Entry header structure changes
+- Checksum algorithm changes
+- Page size or addressing changes
+- Magic number changes
+
+#### May Not Require Version Bump (Use Entry Flags)
+
+- New entry types (use new flag values)
+- Optional entry metadata (backward compatible if ignored)
+- Performance optimizations that don't change format
+
+#### Example: Add new field without version bump
+
+If the new field can be optional and ignored by old readers:
+
+```rust
+// Use reserved bytes in metadata
+// Old readers ignore, new readers use
+let new_field = if buf.len() > 64 {
+    u32::from_le_bytes([buf[64], buf[65], buf[66], buf[67]])
+} else {
+    0 // Default value
+};
+```
+
+### Example: Adding Compression (Hypothetical v2)
+
+Suppose version 2 adds optional compression:
+
+```rust
+// Version 2 metadata adds:
+pub struct LogMetadataV2 {
+    // ... all v1 fields ...
+    pub compression_algorithm: u8, // 0 = none, 1 = lz4, 2 = zstd
+    pub compression_level: u8,
+    pub reserved: [u8; 6], // For future use
+}
+
+// Entry flag for compressed entries
+const ENTRY_FLAG_COMPRESSED: u32 = 1 << 1;
+
+// Entry header for v2 (if entry is compressed)
+pub struct CompressedEntryHeader {
+    pub uncompressed_length: u32, // Original size
+    pub compressed_length: u32,   // Stored size
+    pub flags: u32,               // Includes ENTRY_FLAG_COMPRESSED
+    pub checksum: u64,            // Checksum of compressed data
+}
+```
+
+Migration from v1 to v2:
+- All v1 entries remain uncompressed
+- New entries can be compressed
+- v2 readers handle both compressed and uncompressed entries
+- v1 readers cannot open v2 logs (version check fails gracefully)
+
+### Testing Strategy
+
+For format versioning:
+
+1. **Backward Compatibility Tests**:
+   - Read v1 logs with v2 code
+   - Verify all data is accessible
+   - Verify metadata is correctly interpreted
+
+2. **Forward Compatibility Tests**:
+   - Attempt to read v2 logs with v1 code
+   - Verify graceful error (not corruption)
+   - Verify clear error message about version
+
+3. **Migration Tests**:
+   - Migrate v1 log to v2
+   - Verify all entries preserved
+   - Verify metadata correctly updated
+   - Verify v2 log is valid
+
+4. **Fuzzing**:
+   - Fuzz old version formats for robustness
+   - Verify version detection is reliable
+   - Verify corruption detection still works
+
+### Upgrade Path Recommendation
+
+For users upgrading:
+
+1. **Before Upgrade**:
+   - Backup existing logs
+   - Note current format version
+   - Read release notes for breaking changes
+
+2. **During Upgrade**:
+   - Use migration tool if format changed
+   - Or: keep old format (if supported)
+   - Or: start fresh log (if truncation acceptable)
+
+3. **After Upgrade**:
+   - Verify logs are accessible
+   - Monitor for any format-related errors
+   - Keep old binary available as fallback
+
+### Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1 | 2026-01-20 | Initial stable format |
+| | | - 64-byte metadata header |
+| | | - 16-byte entry header |
+| | | - XOR checksums |
+| | | - Truncation support |
+| | | - Padding records |
+
