@@ -24,3 +24,6 @@ FASTER/
 
 .gemini/
 gha-creds-*.json
+
+# Claude Code CLI
+.claude/
