@@ -35,7 +35,10 @@ fn test_cpr_version_tracking() {
     // Version should still be 0 (no checkpoint yet)
     let version_before_checkpoint = session.context().version;
     println!("Version before checkpoint: {}", version_before_checkpoint);
-    assert_eq!(version_before_checkpoint, 0, "Version should be 0 before checkpoint");
+    assert_eq!(
+        version_before_checkpoint, 0,
+        "Version should be 0 before checkpoint"
+    );
 
     drop(session);
 
@@ -105,8 +108,10 @@ fn test_cpr_context_swapping() {
     println!("After checkpoint: version={}", version_after);
 
     // Version should have changed due to checkpoint
-    println!("Context swapping test completed - version changed from {} to {}",
-             version_before, version_after);
+    println!(
+        "Context swapping test completed - version changed from {} to {}",
+        version_before, version_after
+    );
 }
 
 /// Test CPR phase transitions

@@ -57,7 +57,7 @@ fn test_concurrent_checkpoint_under_write_load() {
                 counter += 1;
 
                 // Small delay to allow checkpoint to run
-                if counter % 100 == 0 {
+                if counter.is_multiple_of(100) {
                     thread::sleep(Duration::from_micros(10));
                 }
             }
@@ -149,7 +149,7 @@ fn test_multiple_concurrent_checkpoints() {
                 session.refresh();
                 counter += 1;
 
-                if counter % 100 == 0 {
+                if counter.is_multiple_of(100) {
                     thread::sleep(Duration::from_micros(10));
                 }
             }
@@ -286,7 +286,7 @@ fn test_checkpoint_with_concurrent_reads() {
                 session.refresh();
                 counter += 1;
 
-                if counter % 100 == 0 {
+                if counter.is_multiple_of(100) {
                     thread::sleep(Duration::from_micros(10));
                 }
             }
@@ -372,13 +372,11 @@ fn test_checkpoint_thread_coordination() {
                 if checkpoint_start.load(Ordering::Acquire) {
                     // After checkpoint starts, refresh more frequently
                     // to help advance the checkpoint state machine
-                    if counter % 10 == 0 {
+                    if counter.is_multiple_of(10) {
                         thread::sleep(Duration::from_micros(5));
                     }
-                } else {
-                    if counter % 100 == 0 {
-                        thread::sleep(Duration::from_micros(10));
-                    }
+                } else if counter.is_multiple_of(100) {
+                    thread::sleep(Duration::from_micros(10));
                 }
             }
         });
@@ -420,10 +418,7 @@ fn test_checkpoint_thread_coordination() {
         session.refresh();
     }
 
-    println!(
-        "Threads with data after recovery: {}",
-        threads_with_data
-    );
+    println!("Threads with data after recovery: {}", threads_with_data);
     assert!(
         threads_with_data >= 6,
         "Most threads should have contributed data"

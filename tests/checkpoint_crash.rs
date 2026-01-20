@@ -81,7 +81,7 @@ fn test_concurrent_write_checkpoint_crash() {
         while !stop_clone.load(Ordering::Relaxed) {
             session.upsert(counter, counter * 3);
             counter += 1;
-            if counter % 100 == 0 {
+            if counter.is_multiple_of(100) {
                 thread::sleep(Duration::from_micros(10));
             }
         }
@@ -154,7 +154,12 @@ fn test_flush_device_durability() {
     // Verify all data
     for (k, v) in expected {
         let value = session.read(&k).unwrap();
-        assert_eq!(value, Some(v), "Key {} should be durable after checkpoint", k);
+        assert_eq!(
+            value,
+            Some(v),
+            "Key {} should be durable after checkpoint",
+            k
+        );
     }
 }
 
@@ -167,7 +172,8 @@ fn test_checkpoint_without_writes() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config.clone(), device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config.clone(), device));
 
     // Checkpoint empty store
     let token = store.checkpoint(&checkpoint_dir).unwrap();

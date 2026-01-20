@@ -61,19 +61,23 @@ impl LogInspector {
         device: &D,
         page_size: usize,
     ) -> Result<LogMetadata, LogError> {
-        let io_exec = IoExecutor::new()
-            .map_err(|e| LogError::new(LogErrorKind::Io, e.to_string()))?;
+        let io_exec =
+            IoExecutor::new().map_err(|e| LogError::new(LogErrorKind::Io, e.to_string()))?;
 
         let alignment = device.alignment();
-        let mut buffer = AlignedBuffer::zeroed(alignment, page_size)
-            .ok_or_else(|| LogError::new(LogErrorKind::Io, "buffer allocation failed".to_string()))?;
+        let mut buffer = AlignedBuffer::zeroed(alignment, page_size).ok_or_else(|| {
+            LogError::new(LogErrorKind::Io, "buffer allocation failed".to_string())
+        })?;
 
         let size = device
             .size()
             .map_err(|e| LogError::new(LogErrorKind::Io, e.to_string()))?;
 
         if size < page_size as u64 {
-            return Err(LogError::new(LogErrorKind::Metadata, "file too small".to_string()));
+            return Err(LogError::new(
+                LogErrorKind::Metadata,
+                "file too small".to_string(),
+            ));
         }
 
         let read = io_exec
@@ -81,7 +85,10 @@ impl LogInspector {
             .map_err(|e| LogError::new(LogErrorKind::Io, e.to_string()))?;
 
         if read < LogMetadata::ENCODED_SIZE {
-            return Err(LogError::new(LogErrorKind::Metadata, "incomplete metadata".to_string()));
+            return Err(LogError::new(
+                LogErrorKind::Metadata,
+                "incomplete metadata".to_string(),
+            ));
         }
 
         LogMetadata::decode(&buffer.as_slice()[..LogMetadata::ENCODED_SIZE])
@@ -108,10 +115,7 @@ impl LogInspector {
     ///
     /// # Returns
     /// Statistics about the log
-    pub fn get_stats<D: StorageDevice>(
-        device: &D,
-        page_size: usize,
-    ) -> Result<LogStats, LogError> {
+    pub fn get_stats<D: StorageDevice>(device: &D, page_size: usize) -> Result<LogStats, LogError> {
         let meta = Self::read_metadata(device, page_size)?;
 
         // Rough estimate of entries (assuming average entry size of 64 bytes)

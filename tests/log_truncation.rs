@@ -45,7 +45,10 @@ fn test_log_truncation_basic() {
     let log = FasterLog::open(config2, device).unwrap();
     let begin_after_reopen = log.get_begin_address();
     println!("Begin address after reopen: {}", begin_after_reopen);
-    assert_eq!(begin_after_reopen, mid_address, "Begin address should persist");
+    assert_eq!(
+        begin_after_reopen, mid_address,
+        "Begin address should persist"
+    );
 }
 
 #[test]
@@ -116,7 +119,10 @@ fn test_truncation_with_recovery() {
         let committed = log.get_committed_until();
 
         println!("After reopen: begin={}, committed={}", begin, committed);
-        assert!(begin > Address::from(0u64), "Begin address should be updated");
+        assert!(
+            begin > Address::from(0u64),
+            "Begin address should be updated"
+        );
         assert!(begin <= committed, "Begin should be at or before committed");
     }
 }

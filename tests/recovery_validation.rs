@@ -143,7 +143,10 @@ fn test_recovery_with_session_continuation() {
         }
 
         println!("Continued session found {} existing keys", found_count);
-        assert!(found_count > 0, "Should find existing data in continued session");
+        assert!(
+            found_count > 0,
+            "Should find existing data in continued session"
+        );
 
         // Continue writing with the same session
         for i in 500u64..1000 {
