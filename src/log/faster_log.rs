@@ -742,6 +742,92 @@ impl<D: StorageDevice> FasterLog<D> {
         self.shared.begin_address.load(Ordering::Acquire)
     }
 
+    /// Truncate the log before the specified address.
+    ///
+    /// This removes all log entries before `before_address` and updates
+    /// the log's begin address. The space may not be immediately reclaimed
+    /// depending on the storage device.
+    ///
+    /// # Arguments
+    /// - `before_address`: Entries before this address will be removed
+    ///
+    /// # Returns
+    /// The new begin address after truncation
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - `before_address` is beyond the committed address
+    /// - Device I/O fails
+    /// - Metadata update fails
+    pub fn truncate_before(&self, before_address: Address) -> Result<Address, Status> {
+        // Validate address
+        let committed = self.shared.committed_until.load(Ordering::Acquire);
+        if before_address > committed {
+            return Err(Status::InvalidArgument);
+        }
+
+        let begin = self.shared.begin_address.load(Ordering::Acquire);
+        if before_address <= begin {
+            return Ok(begin); // Already truncated
+        }
+
+        // Update begin address
+        self.shared
+            .begin_address
+            .store(before_address, Ordering::Release);
+
+        // Persist updated metadata
+        let io_exec = IoExecutor::new().map_err(|e| {
+            self.shared
+                .record_error(LogError::new(LogErrorKind::Io, e.to_string()));
+            Status::IoError
+        })?;
+
+        let mut meta = self.shared.metadata.lock().map_err(|_| Status::IoError)?;
+        meta.begin_address = u64::from(before_address);
+
+        Self::persist_metadata(
+            &self.shared.device,
+            &io_exec,
+            self.shared.config.page_size,
+            self.shared.device.alignment(),
+            &meta,
+        )
+        .map_err(|e| {
+            self.shared.record_error(e.clone());
+            status_from_error(&e)
+        })?;
+
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(
+                from = %begin,
+                to = %before_address,
+                "log truncated"
+            );
+        }
+
+        Ok(before_address)
+    }
+
+    /// Get the reclaimable space in bytes.
+    ///
+    /// This is an estimate of space that could be reclaimed by truncating
+    /// to the current committed address.
+    pub fn get_reclaimable_space(&self) -> u64 {
+        let begin = self.shared.begin_address.load(Ordering::Acquire);
+        let committed = self.shared.committed_until.load(Ordering::Acquire);
+
+        if committed <= begin {
+            return 0;
+        }
+
+        // Estimate based on page size
+        let begin_page = begin.page();
+        let committed_page = committed.page();
+        let pages = committed_page.saturating_sub(begin_page);
+        pages as u64 * self.shared.config.page_size as u64
+    }
+
     /// Get the last error, if any.
     pub fn last_error(&self) -> Option<LogError> {
         self.shared
