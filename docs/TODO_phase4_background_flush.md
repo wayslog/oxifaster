@@ -574,14 +574,14 @@ where
 
 Phase 4 is complete when:
 
-✅ Background flush worker implemented
-✅ Memory pressure detection working
-✅ Metrics collection in place
-✅ Auto flush can be enabled/disabled
-✅ Clean shutdown implemented
-✅ All tests passing
-✅ Integration with FasterKv complete
-✅ Documentation updated
+ Background flush worker implemented
+ Memory pressure detection working
+ Metrics collection in place
+ Auto flush can be enabled/disabled
+ Clean shutdown implemented
+ All tests passing
+ Integration with FasterKv complete
+ Documentation updated
 
 ---
 

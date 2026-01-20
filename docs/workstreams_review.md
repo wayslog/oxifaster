@@ -7,15 +7,15 @@
 This document reviews the implementation status of Workstreams B (CPR Integration), C (Hybrid Log Durability), and D (Durable FasterLog) and provides a detailed plan to complete the remaining gaps.
 
 ### Overall Status:
-- **Workstream B (CPR Integration)**: ✅ 85% Complete - Core infrastructure implemented, missing some edge cases
-- **Workstream C (Hybrid Log Durability)**: ⚠️ 60% Complete - Critical gap in device.flush() integration
-- **Workstream D (Durable FasterLog)**: ✅ 90% Complete - Well implemented with proper durability
+- **Workstream B (CPR Integration)**:  85% Complete - Core infrastructure implemented, missing some edge cases
+- **Workstream C (Hybrid Log Durability)**:  60% Complete - Critical gap in device.flush() integration
+- **Workstream D (Durable FasterLog)**:  90% Complete - Well implemented with proper durability
 
 ---
 
 ## Workstream B: CPR Integration (Cooperative Checkpointing)
 
-### ✅ What's Implemented
+###  What's Implemented
 
 1. **CPR Coordinator Infrastructure** (`src/store/faster_kv/cpr.rs`):
    - `ActiveCheckpoint` state machine with phase tracking
@@ -46,7 +46,7 @@ This document reviews the implementation status of Workstreams B (CPR Integratio
    - Tracing integration with timing metrics
    - Recovery statistics
 
-### ⚠️ Gaps Identified
+###  Gaps Identified
 
 1. **WaitPending Phase Not Fully Implemented**:
    - Phase exists but no explicit pending I/O draining
@@ -61,14 +61,14 @@ This document reviews the implementation status of Workstreams B (CPR Integratio
    - Serial numbers tracked but not validated during recovery
    - No tests for operation ordering during recovery
 
-### ✅ Acceptance Criteria Met
+###  Acceptance Criteria Met
 
-- ✅ refresh() integrated into operation entry points
-- ✅ ThreadContext.version updated during operations
-- ✅ Checkpoint phases implemented (most phases)
-- ✅ Thread acknowledgement and barriers working
-- ⚠️ Multi-thread checkpoint tests missing
-- ⚠️ Recovery serial number validation missing
+-  refresh() integrated into operation entry points
+-  ThreadContext.version updated during operations
+-  Checkpoint phases implemented (most phases)
+-  Thread acknowledgement and barriers working
+-  Multi-thread checkpoint tests missing
+-  Recovery serial number validation missing
 
 ### Completion Estimate: **85% Complete**
 
@@ -76,7 +76,7 @@ This document reviews the implementation status of Workstreams B (CPR Integratio
 
 ## Workstream C: Hybrid Log Durability
 
-### ✅ What's Implemented
+###  What's Implemented
 
 1. **Page Flush Infrastructure** (`src/allocator/hybrid_log/flush.rs`):
    - `flush_until()` writes pages to device
@@ -93,7 +93,7 @@ This document reviews the implementation status of Workstreams B (CPR Integratio
    - Flush start/complete events
    - Error logging for flush failures
 
-### ❌ Critical Gaps
+###  Critical Gaps
 
 1. **`device.flush()` NOT Called by HybridLog** (CRITICAL):
    - `flush_until()` explicitly documents: "Callers that need durable persistence must invoke `StorageDevice::flush()` separately"
@@ -114,7 +114,7 @@ This document reviews the implementation status of Workstreams B (CPR Integratio
    - No combined `flush_and_shift_head()` operation
    - No API to force flush and advance head atomically
 
-### ⚠️ Impact on Production Readiness
+###  Impact on Production Readiness
 
 **This is the MOST CRITICAL gap for production deployment.**
 
@@ -124,13 +124,13 @@ Without `device.flush()` calls:
 - FoldOver checkpoints are NOT crash-consistent
 - Cannot make durability claims
 
-### ❌ Acceptance Criteria NOT Met
+###  Acceptance Criteria NOT Met
 
-- ❌ `device.flush()` NOT integrated into flush path
-- ❌ WaitFlush does NOT call device.flush()
-- ❌ Automatic background flushing NOT implemented
-- ❌ Crash consistency tests NOT present
-- ⚠️ Page transition semantics incomplete
+-  `device.flush()` NOT integrated into flush path
+-  WaitFlush does NOT call device.flush()
+-  Automatic background flushing NOT implemented
+-  Crash consistency tests NOT present
+-  Page transition semantics incomplete
 
 ### Completion Estimate: **60% Complete**
 
@@ -140,7 +140,7 @@ Without `device.flush()` calls:
 
 ## Workstream D: Durable FasterLog
 
-### ✅ What's Implemented
+###  What's Implemented
 
 1. **Format Specification** (`src/log/format.rs`, `docs/fasterlog_format.md`):
    - Complete metadata format with magic number, version, checksums
@@ -158,8 +158,8 @@ Without `device.flush()` calls:
    - Background flush worker thread
    - `commit()` enqueues flush request
    - `wait_for_commit()` waits for durability
-   - **CRITICAL**: `flush_to()` calls `device.flush()` at line 1242 ✅
-   - Metadata persisted after flush ✅
+   - **CRITICAL**: `flush_to()` calls `device.flush()` at line 1242 
+   - Metadata persisted after flush 
 
 4. **Recovery Implementation**:
    - Metadata recovery with validation
@@ -183,7 +183,7 @@ Without `device.flush()` calls:
    - Multi-threaded tests
    - Commit durability tests
 
-### ⚠️ Minor Gaps
+###  Minor Gaps
 
 1. **Incremental Truncation**:
    - `truncate()` exists but no incremental space reclamation
@@ -196,14 +196,14 @@ Without `device.flush()` calls:
 3. **Compression Support**:
    - No compression of log entries (could be future enhancement)
 
-### ✅ Acceptance Criteria Met
+###  Acceptance Criteria Met
 
-- ✅ `device.flush()` called for durability
-- ✅ Metadata persistence with checksums
-- ✅ Recovery with corruption detection
-- ✅ Commit/wait semantics implemented
-- ✅ End-to-end tests present
-- ✅ Format documented
+-  `device.flush()` called for durability
+-  Metadata persistence with checksums
+-  Recovery with corruption detection
+-  Commit/wait semantics implemented
+-  End-to-end tests present
+-  Format documented
 
 ### Completion Estimate: **90% Complete**
 
@@ -407,21 +407,21 @@ Graceful shutdown on drop
 ## Success Criteria
 
 ### Workstream B Complete When:
-- ✅ All phases implemented (including WaitPending)
-- ✅ Multi-thread checkpoint tests pass
-- ✅ Recovery serial number validation works
-- ✅ CPR prefix guarantee verified
+-  All phases implemented (including WaitPending)
+-  Multi-thread checkpoint tests pass
+-  Recovery serial number validation works
+-  CPR prefix guarantee verified
 
 ### Workstream C Complete When:
-- ✅ `device.flush()` called in flush path
-- ✅ Checkpoint WaitFlush ensures device durability
-- ✅ Crash consistency tests pass
-- ✅ Documentation updated with durability semantics
+-  `device.flush()` called in flush path
+-  Checkpoint WaitFlush ensures device durability
+-  Crash consistency tests pass
+-  Documentation updated with durability semantics
 
 ### Workstream D Complete When:
-- ✅ (Already mostly complete)
-- ✅ Truncation API added
-- ✅ Format versioning documented
+-  (Already mostly complete)
+-  Truncation API added
+-  Format versioning documented
 
 ---
 
@@ -447,16 +447,16 @@ Graceful shutdown on drop
 ## Risk Assessment
 
 ### HIGH RISK (Must Fix)
-- ❌ Missing `device.flush()` in checkpoint → **DATA LOSS on crash**
-- ❌ No crash consistency tests → **Cannot verify durability claims**
+-  Missing `device.flush()` in checkpoint → **DATA LOSS on crash**
+-  No crash consistency tests → **Cannot verify durability claims**
 
 ### MEDIUM RISK (Should Fix)
-- ⚠️ WaitPending not implemented → **Checkpoint may miss in-flight operations**
-- ⚠️ No concurrent checkpoint tests → **Race conditions possible**
+-  WaitPending not implemented → **Checkpoint may miss in-flight operations**
+-  No concurrent checkpoint tests → **Race conditions possible**
 
 ### LOW RISK (Nice to Have)
-- ⚠️ No automatic background flush → **Manual flush required**
-- ⚠️ No log truncation → **Unbounded log growth**
+-  No automatic background flush → **Manual flush required**
+-  No log truncation → **Unbounded log growth**
 
 ---
 

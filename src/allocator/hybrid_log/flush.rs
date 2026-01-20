@@ -66,7 +66,6 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                         while self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
-                        self.flush_shared.advance_safe_read_only(until_address);
                         continue;
                     }
 
@@ -95,14 +94,13 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                     }
                 }
             }
-
-            self.flush_shared.advance_safe_read_only(until_address);
         }
-
-        self.flush_shared.advance_safe_read_only(until_address);
 
         // Ensure durability: flush device buffers to stable storage
         rt.block_on(async { self.device.flush().await })?;
+
+        // Only advance safe read-only address AFTER device flush completes
+        self.flush_shared.advance_safe_read_only(until_address);
 
         if tracing::enabled!(tracing::Level::DEBUG) {
             tracing::debug!(until = %until_address, "hybrid log flush completed (durable)");
