@@ -33,19 +33,28 @@ cargo bench
 ```
 
 ### Code Quality Checks
+
+**CRITICAL: After ANY code changes, you MUST run these three scripts:**
+```bash
+./scripts/check-fmt.sh       # Format check (REQUIRED)
+./scripts/check-clippy.sh    # Clippy with -D warnings (REQUIRED)
+./scripts/check-test.sh      # Run all tests (REQUIRED)
+```
+
+**Additional CI scripts:**
+```bash
+./scripts/check-test-all-features.sh  # Test all feature combinations
+./scripts/check-build.sh     # Build check
+./scripts/check-bench.sh     # Bench compile check
+```
+
+**Direct commands (scripts are preferred):**
 ```bash
 # Format code (required before committing)
 cargo fmt --all
 
 # Run clippy (must pass with zero warnings)
 cargo clippy --all-targets --all-features -- -D warnings
-
-# Run all checks (CI gates)
-./scripts/check-fmt.sh       # Format check
-./scripts/check-clippy.sh    # Clippy with -D warnings
-./scripts/check-test-all-features.sh  # Test all feature combinations
-./scripts/check-build.sh     # Build check
-./scripts/check-bench.sh     # Bench compile check
 ```
 
 ### Running Examples
