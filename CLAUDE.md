@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+# Principle
+
+- use chinese simplified communicate with me.
+- Never use any emoji
+
 ## Project Overview
 
 oxifaster is a Rust port of Microsoft FASTER - a high-performance concurrent key-value store and log engine. The system uses:
@@ -20,11 +25,8 @@ cargo build
 # Run all tests
 cargo test
 
-# Run tests with all features enabled
-cargo test --all-features
-
-# Run tests for specific feature
-cargo test --features io_uring  # Linux only
+# Run tests
+./scripts/check-test.sh      # Run tests
 
 # Run benchmarks
 cargo bench
@@ -41,7 +43,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Run all checks (CI gates)
 ./scripts/check-fmt.sh       # Format check
 ./scripts/check-clippy.sh    # Clippy with -D warnings
-./scripts/check-test.sh      # Run tests
 ./scripts/check-test-all-features.sh  # Test all feature combinations
 ./scripts/check-build.sh     # Build check
 ./scripts/check-bench.sh     # Bench compile check
