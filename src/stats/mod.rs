@@ -47,6 +47,7 @@ pub mod reporter;
 
 pub use collector::{StatsCollector, StatsConfig, StatsSnapshot};
 pub use metrics::{
-    AllocatorStats, HashIndexStats, HybridLogStats, OperationStats, SessionStats, StoreStats,
+    AllocatorStats, HashIndexStats, HybridLogStats, OperationStats, OperationalStats, SessionStats,
+    StoreStats,
 };
 pub use reporter::{ReportFormat, StatsReporter};

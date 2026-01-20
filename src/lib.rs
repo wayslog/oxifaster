@@ -143,12 +143,14 @@
 //! | [`cache`] | Read cache for hot data acceleration |
 //! | [`checkpoint`] | Checkpoint and recovery with CPR protocol |
 //! | [`compaction`] | Log compaction for space reclamation |
+//! | [`config`] | Configuration loading helpers |
 //! | [`delta_log`] | Delta log for incremental checkpoints |
 //! | [`device`] | Storage device abstraction layer |
 //! | [`epoch`] | Epoch-based memory reclamation framework |
 //! | [`f2`] | F2 two-tier hot-cold storage architecture |
 //! | [`index`] | High-performance in-memory hash index |
 //! | [`log`] | FasterLog append-only log |
+//! | [`ops`] | Operational helpers for self-check and recovery |
 //! | [`record`] | Record format and Key/Value traits |
 //! | [`scan`] | Log scanning and iteration |
 //! | [`stats`] | Statistics collection and reporting |
@@ -178,6 +180,7 @@ pub mod cache;
 pub mod checkpoint;
 pub mod codec;
 pub mod compaction;
+pub mod config;
 pub mod delta_log;
 pub mod device;
 pub mod epoch;
@@ -185,6 +188,7 @@ pub mod epoch;
 pub mod f2;
 pub mod index;
 pub mod log;
+pub mod ops;
 pub mod record;
 pub mod scan;
 pub mod stats;

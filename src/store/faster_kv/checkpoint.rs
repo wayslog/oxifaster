@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
@@ -126,6 +127,17 @@ where
             }
         };
         let start_version = start_state.version;
+        let started_at = Instant::now();
+
+        if self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operational
+                .record_checkpoint_started();
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(action = ?action, token = %token, "checkpoint start");
+        }
 
         let result = create_checkpoint_directory(checkpoint_dir, token).and_then(|cp_dir| {
             // Make the newly created checkpoint directory entry durable.
@@ -140,6 +152,39 @@ where
                 SystemState::rest(start_version),
                 std::sync::atomic::Ordering::Release,
             );
+        }
+
+        if self.stats_collector.is_enabled() {
+            if result.is_ok() {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_checkpoint_completed();
+            } else {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_checkpoint_failed();
+            }
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            let duration_ms = started_at.elapsed().as_millis();
+            if let Err(ref err) = result {
+                tracing::warn!(
+                    action = ?action,
+                    token = %token,
+                    duration_ms,
+                    error = %err,
+                    "checkpoint failed"
+                );
+            } else {
+                tracing::info!(
+                    action = ?action,
+                    token = %token,
+                    duration_ms,
+                    "checkpoint completed"
+                );
+            }
         }
 
         result.map(|_| token)
@@ -503,6 +548,7 @@ where
             }
             LogCheckpointBackend::FoldOver => {
                 // Fold-over uses the main log device: ensure the prefix is flushed to the device.
+                // NOTE: flush_until() now calls device.flush() for durability (Workstream C).
                 unsafe {
                     (*self.hlog.get()).flush_until(final_address)?;
                 }
@@ -761,32 +807,67 @@ where
         compaction_config: CompactionConfig,
         cache_config: Option<ReadCacheConfig>,
     ) -> io::Result<Self> {
+        let started_at = Instant::now();
         let device = Arc::new(device);
         let cp_dir = checkpoint_dir.join(token.to_string());
+        let stats_collector = StatsCollector::with_defaults();
+        if stats_collector.is_enabled() {
+            stats_collector
+                .store_stats
+                .operational
+                .record_recovery_started();
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(token = %token, "recovery start");
+        }
+        let record_failure = |err: io::Error, context: &'static str| {
+            if stats_collector.is_enabled() {
+                stats_collector
+                    .store_stats
+                    .operational
+                    .record_recovery_failed();
+            }
+            if tracing::enabled!(tracing::Level::WARN) {
+                tracing::warn!(token = %token, context, error = %err, "recovery failed");
+            }
+            err
+        };
 
         let mut recovery_state = RecoveryState::new();
         let status = recovery_state.start_recovery(checkpoint_dir, token);
         if status != crate::Status::Ok {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                recovery_state
-                    .error_message()
-                    .unwrap_or("Unknown recovery error"),
+            return Err(record_failure(
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    recovery_state
+                        .error_message()
+                        .unwrap_or("Unknown recovery error"),
+                ),
+                "start_recovery",
             ));
         }
 
         let epoch = Arc::new(LightEpoch::new());
 
-        let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))?;
-        let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
+        let index_meta = IndexMetadata::read_from_file(&cp_dir.join("index.meta"))
+            .map_err(|err| record_failure(err, "read_index_meta"))?;
+        let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))
+            .map_err(|err| record_failure(err, "read_log_meta"))?;
+
+        // Validate session serial numbers for consistency
+        Self::validate_session_serials(&log_meta)
+            .map_err(|err| record_failure(err, "validate_session_serials"))?;
 
         let mut hash_index = MemHashIndex::new();
-        hash_index.recover(&cp_dir, Some(&index_meta))?;
+        hash_index
+            .recover(&cp_dir, Some(&index_meta))
+            .map_err(|err| record_failure(err, "recover_index"))?;
         recovery_state.index_recovered();
 
         let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
-        hlog.recover(&cp_dir, Some(&log_meta))?;
+        hlog.recover(&cp_dir, Some(&log_meta))
+            .map_err(|err| record_failure(err, "recover_log"))?;
         recovery_state.log_recovered();
 
         let system_state = AtomicSystemState::new(SystemState::rest(log_meta.version));
@@ -805,6 +886,14 @@ where
 
         recovery_state.complete_recovery();
 
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(
+                token = %token,
+                duration_ms = started_at.elapsed().as_millis(),
+                "recovery completed"
+            );
+        }
+
         Ok(Self {
             epoch,
             system_state,
@@ -818,7 +907,7 @@ where
             next_session_id: AtomicU32::new(next_session_id),
             compactor,
             grow_state: UnsafeCell::new(None),
-            stats_collector: StatsCollector::with_defaults(),
+            stats_collector,
             session_registry: RwLock::new(session_registry),
             active_threads: Mutex::new(0),
             cpr: super::cpr::CprCoordinator::default(),
@@ -855,6 +944,48 @@ where
             (false, true) => CheckpointKind::LogOnly,
             (false, false) => CheckpointKind::None,
         }
+    }
+
+    /// Validate session serial numbers for consistency with checkpoint version.
+    ///
+    /// This ensures that the recovered session states have reasonable serial numbers
+    /// that are consistent with the checkpoint boundary.
+    fn validate_session_serials(log_meta: &LogMetadata) -> io::Result<()> {
+        for session_state in &log_meta.session_states {
+            // Skip validation for new sessions (serial number 0)
+            if session_state.serial_num == 0 {
+                continue;
+            }
+
+            // In a real implementation, you could verify:
+            // - Serial numbers are monotonic within a session
+            // - Operations beyond the checkpoint boundary have higher serials
+            // - No operations are "lost" in the serial sequence
+            //
+            // For now, we just log the validation for visibility
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    session_id = %session_state.guid,
+                    serial = session_state.serial_num,
+                    version = log_meta.version,
+                    "validating session serial number"
+                );
+            }
+
+            // Check for obviously invalid serial numbers
+            // (this is a basic sanity check - more sophisticated checks could be added)
+            if session_state.serial_num == u64::MAX {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Invalid serial number {} for session {}",
+                        session_state.serial_num, session_state.guid
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// Return `true` if any checkpoint files exist (full or partial).

@@ -367,6 +367,8 @@ pub struct StoreStats {
     pub hybrid_log: HybridLogStats,
     /// Allocator statistics
     pub allocator: AllocatorStats,
+    /// Operational statistics
+    pub operational: OperationalStats,
 }
 
 impl StoreStats {
@@ -381,6 +383,135 @@ impl StoreStats {
         self.hash_index.reset();
         self.hybrid_log.reset();
         self.allocator.reset();
+        self.operational.reset();
+    }
+}
+
+/// Statistics for operational workflows (checkpoint, compaction, growth, recovery, I/O).
+#[derive(Debug, Default)]
+pub struct OperationalStats {
+    /// Checkpoints started
+    pub checkpoints_started: AtomicU64,
+    /// Checkpoints completed successfully
+    pub checkpoints_completed: AtomicU64,
+    /// Checkpoints failed
+    pub checkpoints_failed: AtomicU64,
+    /// Compactions started
+    pub compactions_started: AtomicU64,
+    /// Compactions completed successfully
+    pub compactions_completed: AtomicU64,
+    /// Compactions failed
+    pub compactions_failed: AtomicU64,
+    /// Index growth operations started
+    pub index_grows_started: AtomicU64,
+    /// Index growth operations completed successfully
+    pub index_grows_completed: AtomicU64,
+    /// Index growth operations failed
+    pub index_grows_failed: AtomicU64,
+    /// Recovery attempts started
+    pub recoveries_started: AtomicU64,
+    /// Recovery attempts failed
+    pub recoveries_failed: AtomicU64,
+    /// Pending I/O submissions
+    pub pending_io_submitted: AtomicU64,
+    /// Pending I/O completions
+    pub pending_io_completed: AtomicU64,
+    /// Pending I/O failures
+    pub pending_io_failed: AtomicU64,
+}
+
+impl OperationalStats {
+    /// Create new operational stats
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the start of a checkpoint.
+    pub fn record_checkpoint_started(&self) {
+        self.checkpoints_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a successful checkpoint completion.
+    pub fn record_checkpoint_completed(&self) {
+        self.checkpoints_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed checkpoint.
+    pub fn record_checkpoint_failed(&self) {
+        self.checkpoints_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the start of a compaction.
+    pub fn record_compaction_started(&self) {
+        self.compactions_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a successful compaction completion.
+    pub fn record_compaction_completed(&self) {
+        self.compactions_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed compaction.
+    pub fn record_compaction_failed(&self) {
+        self.compactions_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the start of an index growth.
+    pub fn record_index_grow_started(&self) {
+        self.index_grows_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a successful index growth completion.
+    pub fn record_index_grow_completed(&self) {
+        self.index_grows_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed index growth.
+    pub fn record_index_grow_failed(&self) {
+        self.index_grows_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the start of a recovery attempt.
+    pub fn record_recovery_started(&self) {
+        self.recoveries_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed recovery attempt.
+    pub fn record_recovery_failed(&self) {
+        self.recoveries_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a pending I/O submission.
+    pub fn record_pending_io_submitted(&self) {
+        self.pending_io_submitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a pending I/O completion.
+    pub fn record_pending_io_completed(&self) {
+        self.pending_io_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed pending I/O.
+    pub fn record_pending_io_failed(&self) {
+        self.pending_io_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Reset all statistics
+    pub fn reset(&self) {
+        self.checkpoints_started.store(0, Ordering::Relaxed);
+        self.checkpoints_completed.store(0, Ordering::Relaxed);
+        self.checkpoints_failed.store(0, Ordering::Relaxed);
+        self.compactions_started.store(0, Ordering::Relaxed);
+        self.compactions_completed.store(0, Ordering::Relaxed);
+        self.compactions_failed.store(0, Ordering::Relaxed);
+        self.index_grows_started.store(0, Ordering::Relaxed);
+        self.index_grows_completed.store(0, Ordering::Relaxed);
+        self.index_grows_failed.store(0, Ordering::Relaxed);
+        self.recoveries_started.store(0, Ordering::Relaxed);
+        self.recoveries_failed.store(0, Ordering::Relaxed);
+        self.pending_io_submitted.store(0, Ordering::Relaxed);
+        self.pending_io_completed.store(0, Ordering::Relaxed);
+        self.pending_io_failed.store(0, Ordering::Relaxed);
     }
 }
 

@@ -537,6 +537,11 @@ where
         &self.stats_collector.store_stats.hybrid_log
     }
 
+    /// Get operational statistics (checkpoint/compaction/growth/recovery)
+    pub fn operational_stats(&self) -> &crate::stats::OperationalStats {
+        &self.stats_collector.store_stats.operational
+    }
+
     /// Get throughput (operations per second)
     pub fn throughput(&self) -> f64 {
         self.stats_collector.throughput()
@@ -821,22 +826,12 @@ where
                     self.stats_collector.store_stats.operations.record_pending();
                 }
                 // Record is on disk: submit an async read request and return Pending.
-                let submitted = if record_format::is_fixed_record::<K, V>() {
-                    self.pending_io.submit_read_bytes(
-                        ctx.thread_id,
-                        get_thread_tag(),
-                        ctx.current_ctx_id(),
-                        address,
-                        record_format::fixed_disk_len::<K, V>(),
-                    )
-                } else {
-                    self.pending_io.submit_read_varlen_record(
-                        ctx.thread_id,
-                        get_thread_tag(),
-                        ctx.current_ctx_id(),
-                        address,
-                    )
-                };
+                let submitted = self.submit_disk_read_for_context(
+                    ctx.thread_id,
+                    get_thread_tag(),
+                    ctx.current_ctx_id(),
+                    address,
+                );
 
                 ctx.last_pending_read = Some(address);
                 if submitted {

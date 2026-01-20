@@ -77,6 +77,52 @@ fn main() -> std::io::Result<()> {
 
 ---
 
+## Configuration (TOML + Environment)
+
+Use `oxifaster::config::OxifasterConfig` to load a TOML file and apply environment overrides.
+
+Example `oxifaster.toml`:
+
+```toml
+[store]
+table_size = 1048576
+log_memory_size = 536870912
+page_size_bits = 22
+mutable_fraction = 0.9
+
+[compaction]
+target_utilization = 0.5
+min_compact_bytes = 1048576
+max_compact_bytes = 1073741824
+num_threads = 1
+compact_tombstones = true
+
+[cache]
+enabled = true
+mem_size = 268435456
+mutable_fraction = 0.9
+pre_allocate = false
+copy_to_tail = true
+
+[device]
+kind = "single_file"
+path = "oxifaster.db"
+```
+
+Load from `OXIFASTER_CONFIG` and apply overrides such as `OXIFASTER__store__table_size=2097152`:
+
+```rust
+use oxifaster::config::OxifasterConfig;
+
+let config = OxifasterConfig::load_from_env()?;
+let store_config = config.to_faster_kv_config();
+let compaction_config = config.to_compaction_config();
+let cache_config = config.to_read_cache_config();
+let device = config.open_device()?;
+```
+
+---
+
 ## Development Roadmap
 
 Please refer to [DEV.md](DEV.md) for the detailed development roadmap, implementation status, and technical debt analysis.
@@ -338,12 +384,12 @@ drop(handle); // Stops and joins the worker thread
 Standalone high-performance log:
 
 ```rust
-use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
+use oxifaster::log::{FasterLog, FasterLogConfig};
 use oxifaster::device::FileSystemDisk;
 
 let config = FasterLogConfig::default();
 let device = FileSystemDisk::single_file("oxifaster.log")?;
-let log = FasterLog::new(config, device);
+let log = FasterLog::open(config, device)?;
 
 // Append data
 let addr = log.append(b"data")?;

@@ -37,8 +37,31 @@ where
                     result,
                 } => {
                     let parsed = match result {
-                        Ok(bytes) => self.parse_disk_record(&bytes),
-                        Err(_) => Err(Status::IoError),
+                        Ok(bytes) => {
+                            if self.stats_collector.is_enabled() {
+                                self.stats_collector
+                                    .store_stats
+                                    .operational
+                                    .record_pending_io_completed();
+                            }
+                            self.parse_disk_record(&bytes)
+                        }
+                        Err(err) => {
+                            if self.stats_collector.is_enabled() {
+                                self.stats_collector
+                                    .store_stats
+                                    .operational
+                                    .record_pending_io_failed();
+                            }
+                            if tracing::enabled!(tracing::Level::WARN) {
+                                tracing::warn!(
+                                    address = %address,
+                                    error = %err,
+                                    "pending I/O failed"
+                                );
+                            }
+                            Err(Status::IoError)
+                        }
                     };
                     self.disk_read_results
                         .lock()
@@ -101,7 +124,7 @@ where
         ctx_id: u64,
         address: Address,
     ) -> bool {
-        if record_format::is_fixed_record::<K, V>() {
+        let submitted = if record_format::is_fixed_record::<K, V>() {
             self.pending_io.submit_read_bytes(
                 thread_id,
                 thread_tag,
@@ -112,7 +135,19 @@ where
         } else {
             self.pending_io
                 .submit_read_varlen_record(thread_id, thread_tag, ctx_id, address)
+        };
+
+        if submitted && self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operational
+                .record_pending_io_submitted();
         }
+        if submitted && tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(address = %address, "pending I/O submitted");
+        }
+
+        submitted
     }
 
     /// Parse key/value from disk-read record bytes (producing an owned result).
