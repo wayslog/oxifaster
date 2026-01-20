@@ -9,8 +9,8 @@ use super::PersistentMemoryMalloc;
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Flush all pages up to (but not including) the specified address.
     ///
-    /// This writes in-memory pages to the storage device. Callers that need durable
-    /// persistence must invoke `StorageDevice::flush()` separately.
+    /// This writes in-memory pages to the storage device and calls `StorageDevice::flush()`
+    /// to ensure durable persistence on stable storage.
     pub fn flush_until(&self, until_address: Address) -> io::Result<()> {
         let current_flushed = self.get_flushed_until_address();
 
@@ -101,8 +101,11 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         self.flush_shared.advance_safe_read_only(until_address);
 
+        // Ensure durability: flush device buffers to stable storage
+        rt.block_on(async { self.device.flush().await })?;
+
         if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!(until = %until_address, "hybrid log flush completed");
+            tracing::debug!(until = %until_address, "hybrid log flush completed (durable)");
         }
         Ok(())
     }
@@ -111,6 +114,17 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     pub fn flush_to_disk(&self) -> io::Result<()> {
         let tail = self.get_tail_address();
         self.flush_until(tail)
+    }
+
+    /// Flush device buffers to stable storage without writing pages.
+    ///
+    /// This ensures that all previously written data is durable.
+    /// Useful when you want to ensure durability after a series of writes.
+    pub fn flush_device(&self) -> io::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async { self.device.flush().await })
     }
 
     fn pages_to_flush(

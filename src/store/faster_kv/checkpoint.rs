@@ -548,6 +548,7 @@ where
             }
             LogCheckpointBackend::FoldOver => {
                 // Fold-over uses the main log device: ensure the prefix is flushed to the device.
+                // NOTE: flush_until() now calls device.flush() for durability (Workstream C).
                 unsafe {
                     (*self.hlog.get()).flush_until(final_address)?;
                 }
