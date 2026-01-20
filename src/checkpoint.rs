@@ -60,6 +60,7 @@ mod state;
 pub use locks::{
     AtomicCheckpointLock, CheckpointLock, CheckpointLockGuard, CheckpointLocks, LockType,
 };
+pub(crate) use recovery::{build_incremental_chain, validate_incremental_checkpoint};
 pub use recovery::{
     find_latest_checkpoint, list_checkpoints, validate_checkpoint, CheckpointInfo, RecoveryState,
     RecoveryStatus,

@@ -405,6 +405,21 @@ impl AtomicPageOffset {
         PageOffset(self.control.fetch_add(delta, AtomicOrdering::AcqRel))
     }
 
+    /// Compare and exchange the current page offset.
+    #[inline]
+    pub fn compare_exchange(
+        &self,
+        current: PageOffset,
+        new: PageOffset,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+    ) -> Result<PageOffset, PageOffset> {
+        self.control
+            .compare_exchange(current.control(), new.control(), success, failure)
+            .map(PageOffset)
+            .map_err(PageOffset)
+    }
+
     /// Move to a new page
     ///
     /// Returns `true` if some thread advanced the page (this thread or another).

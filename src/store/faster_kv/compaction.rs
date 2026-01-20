@@ -97,18 +97,28 @@ where
             return CompactionResult::failure(status);
         }
 
+        if self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operational
+                .record_compaction_started();
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(target_address = ?target_address, "compaction start");
+        }
+
         let start_time = Instant::now();
+        let result = (|| -> CompactionResult {
+            // SAFETY: These are read-only accesses
+            let begin_address = unsafe { self.hlog().get_begin_address() };
+            let head_address = unsafe { self.hlog().get_head_address() };
 
-        // SAFETY: These are read-only accesses
-        let begin_address = unsafe { self.hlog().get_begin_address() };
-        let head_address = unsafe { self.hlog().get_head_address() };
-
-        // Calculate scan range
-        let scan_range =
-            match self
-                .compactor
-                .calculate_scan_range(begin_address, head_address, target_address)
-            {
+            // Calculate scan range
+            let scan_range = match self.compactor.calculate_scan_range(
+                begin_address,
+                head_address,
+                target_address,
+            ) {
                 Some(range) => range,
                 None => {
                     self.compactor.complete();
@@ -116,111 +126,133 @@ where
                 }
             };
 
-        // Create compaction context
-        let _context = self.compactor.create_context(scan_range);
+            // Create compaction context
+            let _context = self.compactor.create_context(scan_range);
 
-        // Track statistics
-        let mut stats = CompactionStats::default();
-        let mut current_address = scan_range.begin;
-        // Start with the assumption we can reclaim everything up to scan_range.end
-        // This will be adjusted if any record fails to copy
-        let mut new_begin_address = scan_range.end;
-        // Track if we encountered any copy failures - if so, we may need to stop early
-        let mut copy_failed = false;
+            // Track statistics
+            let mut stats = CompactionStats::default();
+            let mut current_address = scan_range.begin;
+            // Start with the assumption we can reclaim everything up to scan_range.end
+            // This will be adjusted if any record fails to copy
+            let mut new_begin_address = scan_range.end;
+            // Track if we encountered any copy failures - if so, we may need to stop early
+            let mut copy_failed = false;
 
-        // Scan records in the range and copy live records to tail
-        while current_address < scan_range.end {
-            // SAFETY: Address is within the valid range
-            let record_ptr = unsafe { self.hlog().get(current_address) };
+            // Scan records in the range and copy live records to tail
+            while current_address < scan_range.end {
+                // SAFETY: Address is within the valid range
+                let record_ptr = unsafe { self.hlog().get(current_address) };
 
-            if let Some(ptr) = record_ptr {
-                let view = match unsafe {
-                    let page_size = self.hlog().page_size();
-                    let limit = page_size.saturating_sub(current_address.offset() as usize);
-                    record_format::record_view_from_memory::<K, V>(
-                        current_address,
-                        ptr.as_ptr(),
-                        limit,
-                    )
-                } {
-                    Ok(v) => v,
-                    Err(status) => {
-                        self.compactor.complete();
-                        return CompactionResult::failure(status);
+                if let Some(ptr) = record_ptr {
+                    let view = match unsafe {
+                        let page_size = self.hlog().page_size();
+                        let limit = page_size.saturating_sub(current_address.offset() as usize);
+                        record_format::record_view_from_memory::<K, V>(
+                            current_address,
+                            ptr.as_ptr(),
+                            limit,
+                        )
+                    } {
+                        Ok(v) => v,
+                        Err(status) => {
+                            self.compactor.complete();
+                            return CompactionResult::failure(status);
+                        }
+                    };
+
+                    let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+                    let record_alloc_len = if record_format::is_fixed_record::<K, V>() {
+                        record_format::fixed_alloc_len::<K, V>()
+                    } else {
+                        record_format::varlen_alloc_len(view.key_bytes().len(), view.value_len())
+                    } as u64;
+
+                    if info.is_invalid() {
+                        current_address += record_alloc_len;
+                        continue;
                     }
-                };
 
-                let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
-                let record_alloc_len = if record_format::is_fixed_record::<K, V>() {
-                    record_format::fixed_alloc_len::<K, V>()
-                } else {
-                    record_format::varlen_alloc_len(view.key_bytes().len(), view.value_len())
-                } as u64;
+                    stats.records_scanned += 1;
+                    stats.bytes_scanned += record_alloc_len;
 
-                if info.is_invalid() {
-                    current_address += record_alloc_len;
-                    continue;
-                }
+                    // Check if this is a tombstone
+                    let is_tombstone = view.is_tombstone();
+                    if is_tombstone {
+                        stats.tombstones_found += 1;
+                    }
 
-                stats.records_scanned += 1;
-                stats.bytes_scanned += record_alloc_len;
+                    // Get the key and check if this record is the latest version
+                    let hash =
+                        KeyHash::new(<K as PersistKey>::Codec::hash_encoded(view.key_bytes()));
+                    let index_result = self.hash_index.find_entry(hash);
 
-                // Check if this is a tombstone
-                let is_tombstone = view.is_tombstone();
-                if is_tombstone {
-                    stats.tombstones_found += 1;
-                }
+                    if index_result.found() {
+                        let index_address = index_result.entry.address();
 
-                // Get the key and check if this record is the latest version
-                let hash = KeyHash::new(<K as PersistKey>::Codec::hash_encoded(view.key_bytes()));
-                let index_result = self.hash_index.find_entry(hash);
+                        // Check if record should be compacted (moved to tail)
+                        if self.compactor.should_compact_record(
+                            current_address,
+                            index_address,
+                            is_tombstone,
+                        ) {
+                            // This record is still live - MUST copy to tail before reclaiming
+                            if !is_tombstone {
+                                // Copy live record to the tail of the log
+                                let value_bytes = match view.value_bytes() {
+                                    Some(b) => b,
+                                    None => {
+                                        self.compactor.complete();
+                                        return CompactionResult::failure(Status::Corruption);
+                                    }
+                                };
+                                match self.copy_record_to_tail(view.key_bytes(), value_bytes, hash)
+                                {
+                                    Ok(new_addr) => {
+                                        // Successfully copied - update index to point to new location
+                                        // Use CAS to atomically update the index entry
+                                        let update_result = self.hash_index.try_update_address(
+                                            hash,
+                                            current_address,
+                                            new_addr,
+                                        );
 
-                if index_result.found() {
-                    let index_address = index_result.entry.address();
-
-                    // Check if record should be compacted (moved to tail)
-                    if self.compactor.should_compact_record(
-                        current_address,
-                        index_address,
-                        is_tombstone,
-                    ) {
-                        // This record is still live - MUST copy to tail before reclaiming
-                        if !is_tombstone {
-                            // Copy live record to the tail of the log
-                            let value_bytes = match view.value_bytes() {
-                                Some(b) => b,
-                                None => {
-                                    self.compactor.complete();
-                                    return CompactionResult::failure(Status::Corruption);
-                                }
-                            };
-                            match self.copy_record_to_tail(view.key_bytes(), value_bytes, hash) {
-                                Ok(new_addr) => {
-                                    // Successfully copied - update index to point to new location
-                                    // Use CAS to atomically update the index entry
-                                    let update_result = self.hash_index.try_update_address(
-                                        hash,
-                                        current_address,
-                                        new_addr,
-                                    );
-
-                                    if update_result == Status::Ok {
-                                        // Index successfully updated to point to new location
-                                        stats.records_compacted += 1;
-                                        stats.bytes_compacted += record_alloc_len;
-                                    } else {
-                                        // CAS failed - index was modified concurrently
-                                        // CRITICAL: We copied the record but couldn't update the index.
-                                        // The index might still point to the old address, OR another
-                                        // thread might have updated it to point elsewhere.
+                                        if update_result == Status::Ok {
+                                            // Index successfully updated to point to new location
+                                            stats.records_compacted += 1;
+                                            stats.bytes_compacted += record_alloc_len;
+                                        } else {
+                                            // CAS failed - index was modified concurrently
+                                            // CRITICAL: We copied the record but couldn't update the index.
+                                            // The index might still point to the old address, OR another
+                                            // thread might have updated it to point elsewhere.
+                                            //
+                                            // For safety, we must preserve the original record because:
+                                            // - If index still points to old address, reclaiming would corrupt data
+                                            // - The new copy at new_addr becomes a "garbage" record that will
+                                            //   eventually be compacted away
+                                            //
+                                            // This is the conservative approach - we lose some space but
+                                            // guarantee data integrity.
+                                            if !copy_failed {
+                                                new_begin_address = current_address;
+                                                copy_failed = true;
+                                            }
+                                            stats.records_skipped += 1;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Failed to copy - cannot reclaim this record
+                                        // CRITICAL: Adjust new_begin_address to preserve this record
                                         //
-                                        // For safety, we must preserve the original record because:
-                                        // - If index still points to old address, reclaiming would corrupt data
-                                        // - The new copy at new_addr becomes a "garbage" record that will
-                                        //   eventually be compacted away
+                                        // We only need to record the FIRST failure's address because:
+                                        // 1. Records are scanned in ascending address order
+                                        // 2. shift_begin_address(X) only reclaims addresses < X
+                                        // 3. All addresses >= X (including any later failures) are
+                                        //    automatically preserved
                                         //
-                                        // This is the conservative approach - we lose some space but
-                                        // guarantee data integrity.
+                                        // Example: if failures occur at addresses 140 and 160,
+                                        // setting new_begin_address=140 preserves BOTH records
+                                        // because shift_begin_address(140) keeps everything >= 140
                                         if !copy_failed {
                                             new_begin_address = current_address;
                                             copy_failed = true;
@@ -228,65 +260,75 @@ where
                                         stats.records_skipped += 1;
                                     }
                                 }
-                                Err(_) => {
-                                    // Failed to copy - cannot reclaim this record
-                                    // CRITICAL: Adjust new_begin_address to preserve this record
-                                    //
-                                    // We only need to record the FIRST failure's address because:
-                                    // 1. Records are scanned in ascending address order
-                                    // 2. shift_begin_address(X) only reclaims addresses < X
-                                    // 3. All addresses >= X (including any later failures) are
-                                    //    automatically preserved
-                                    //
-                                    // Example: if failures occur at addresses 140 and 160,
-                                    // setting new_begin_address=140 preserves BOTH records
-                                    // because shift_begin_address(140) keeps everything >= 140
-                                    if !copy_failed {
-                                        new_begin_address = current_address;
-                                        copy_failed = true;
-                                    }
-                                    stats.records_skipped += 1;
-                                }
+                            } else {
+                                // Tombstone that is still the latest - can be reclaimed
+                                // (tombstones don't need to be preserved during compaction)
+                                stats.tombstones_found += 1;
+                                stats.bytes_reclaimed += record_alloc_len;
                             }
                         } else {
-                            // Tombstone that is still the latest - can be reclaimed
-                            // (tombstones don't need to be preserved during compaction)
-                            stats.tombstones_found += 1;
+                            // Record is obsolete (superseded by newer version) - can be reclaimed
+                            stats.records_skipped += 1;
                             stats.bytes_reclaimed += record_alloc_len;
                         }
                     } else {
-                        // Record is obsolete (superseded by newer version) - can be reclaimed
+                        // Key not in index - record can be reclaimed
                         stats.records_skipped += 1;
                         stats.bytes_reclaimed += record_alloc_len;
                     }
-                } else {
-                    // Key not in index - record can be reclaimed
-                    stats.records_skipped += 1;
-                    stats.bytes_reclaimed += record_alloc_len;
-                }
 
-                // Move to next record
-                current_address =
-                    Address::from_control(current_address.control() + record_alloc_len);
+                    // Move to next record
+                    current_address =
+                        Address::from_control(current_address.control() + record_alloc_len);
+                } else {
+                    // No more records in this page, move to next page
+                    let page_size = unsafe { self.hlog().page_size() } as u64;
+                    let next_page = (current_address.control() / page_size + 1) * page_size;
+                    current_address = Address::from_control(next_page);
+                }
+            }
+
+            // Now safe to shift begin address - all live records before new_begin_address
+            // have either been copied or the address has been adjusted to preserve them
+            unsafe { self.hlog_mut().shift_begin_address(new_begin_address) };
+
+            // Garbage collect index entries pointing to reclaimed region
+            self.hash_index.garbage_collect(new_begin_address);
+
+            stats.duration_ms = start_time.elapsed().as_millis() as u64;
+
+            self.compactor.complete();
+            CompactionResult::success(new_begin_address, stats)
+        })();
+
+        if self.stats_collector.is_enabled() {
+            if result.status == Status::Ok {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_compaction_completed();
             } else {
-                // No more records in this page, move to next page
-                let page_size = unsafe { self.hlog().page_size() } as u64;
-                let next_page = (current_address.control() / page_size + 1) * page_size;
-                current_address = Address::from_control(next_page);
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_compaction_failed();
+            }
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            let duration_ms = start_time.elapsed().as_millis();
+            if result.status == Status::Ok {
+                tracing::info!(
+                    duration_ms,
+                    bytes_reclaimed = result.stats.bytes_reclaimed,
+                    records_scanned = result.stats.records_scanned,
+                    "compaction completed"
+                );
+            } else {
+                tracing::warn!(duration_ms, status = ?result.status, "compaction failed");
             }
         }
 
-        // Now safe to shift begin address - all live records before new_begin_address
-        // have either been copied or the address has been adjusted to preserve them
-        unsafe { self.hlog_mut().shift_begin_address(new_begin_address) };
-
-        // Garbage collect index entries pointing to reclaimed region
-        self.hash_index.garbage_collect(new_begin_address);
-
-        stats.duration_ms = start_time.elapsed().as_millis() as u64;
-
-        self.compactor.complete();
-        CompactionResult::success(new_begin_address, stats)
+        result
     }
 
     /// Copy a record to the tail of the log during compaction

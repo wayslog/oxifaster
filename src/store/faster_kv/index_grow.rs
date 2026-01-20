@@ -34,6 +34,12 @@ where
     pub fn start_grow(&self, new_size: u64) -> Result<(), Status> {
         // Check if grow is already in progress
         if self.is_grow_in_progress() {
+            if self.stats_collector.is_enabled() {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_index_grow_failed();
+            }
             return Err(Status::Aborted);
         }
 
@@ -41,9 +47,21 @@ where
 
         // Validate new size
         if new_size <= current_size {
+            if self.stats_collector.is_enabled() {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_index_grow_failed();
+            }
             return Err(Status::InvalidArgument);
         }
         if !new_size.is_power_of_two() {
+            if self.stats_collector.is_enabled() {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_index_grow_failed();
+            }
             return Err(Status::InvalidArgument);
         }
 
@@ -59,6 +77,16 @@ where
             *self.grow_state.get() = Some(state);
         }
 
+        if self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operational
+                .record_index_grow_started();
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(old_size = current_size, new_size, "index growth started");
+        }
+
         Ok(())
     }
 
@@ -69,10 +97,39 @@ where
         // SAFETY: Access to grow_state
         let state = unsafe { (*self.grow_state.get()).take() };
 
-        match state {
+        let result = match state {
             Some(grow_state) => grow_state.complete(),
             None => GrowResult::failure(Status::InvalidOperation),
+        };
+
+        if self.stats_collector.is_enabled() {
+            if result.success {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_index_grow_completed();
+            } else {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_index_grow_failed();
+            }
         }
+        if tracing::enabled!(tracing::Level::INFO) {
+            if result.success {
+                tracing::info!(
+                    old_size = result.old_size,
+                    new_size = result.new_size,
+                    entries_migrated = result.entries_migrated,
+                    duration_ms = result.duration_ms,
+                    "index growth completed"
+                );
+            } else {
+                tracing::warn!(status = ?result.status, "index growth failed");
+            }
+        }
+
+        result
     }
 
     /// Get grow progress (completed chunks / total chunks)

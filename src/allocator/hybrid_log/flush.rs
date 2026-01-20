@@ -17,6 +17,17 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         let Some(pages_to_flush) = Self::pages_to_flush(current_flushed, until_address) else {
             return Ok(());
         };
+        let start_page = *pages_to_flush.start();
+        let end_page = *pages_to_flush.end();
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let pages = end_page.saturating_sub(start_page) + 1;
+            tracing::debug!(
+                from = %current_flushed,
+                until = %until_address,
+                pages,
+                "hybrid log flush start"
+            );
+        }
 
         // Create a dedicated runtime for synchronous I/O.
         //
@@ -62,11 +73,17 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                     if let Some(page_data) = self.pages.get_page(page) {
                         if let Err(e) = write_page_sync(page, page_data) {
                             self.flush_shared.mark_page_dirty_after_error(page);
+                            if tracing::enabled!(tracing::Level::WARN) {
+                                tracing::warn!(page, error = %e, "hybrid log flush failed");
+                            }
                             return Err(e);
                         }
                         self.flush_shared.mark_page_flushed(page);
                     } else {
                         self.flush_shared.mark_page_dirty_after_error(page);
+                        if tracing::enabled!(tracing::Level::WARN) {
+                            tracing::warn!(page, "hybrid log flush failed: missing page");
+                        }
                         return Err(io::Error::other(format!(
                             "missing in-memory page {page} during flush"
                         )));
@@ -84,6 +101,9 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         self.flush_shared.advance_safe_read_only(until_address);
 
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(until = %until_address, "hybrid log flush completed");
+        }
         Ok(())
     }
 

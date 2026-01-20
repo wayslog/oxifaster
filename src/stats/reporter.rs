@@ -166,6 +166,52 @@ impl StatsReporter {
                 &mut output,
                 format_args!("  Pages Flushed: {}", snapshot.pages_flushed),
             );
+            output.push('\n');
+
+            push_line(&mut output, format_args!("Maintenance:"));
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Checkpoints: {} started / {} ok / {} failed",
+                    snapshot.checkpoints_started,
+                    snapshot.checkpoints_completed,
+                    snapshot.checkpoints_failed
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Compactions: {} started / {} ok / {} failed",
+                    snapshot.compactions_started,
+                    snapshot.compactions_completed,
+                    snapshot.compactions_failed
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Index Growth: {} started / {} ok / {} failed",
+                    snapshot.index_grows_started,
+                    snapshot.index_grows_completed,
+                    snapshot.index_grows_failed
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Recovery: {} started / {} failed",
+                    snapshot.recoveries_started, snapshot.recoveries_failed
+                ),
+            );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Pending I/O: {} submitted / {} completed / {} failed",
+                    snapshot.pending_io_submitted,
+                    snapshot.pending_io_completed,
+                    snapshot.pending_io_failed
+                ),
+            );
         }
 
         output
@@ -255,6 +301,51 @@ impl StatsReporter {
             &mut output,
             format_args!("    \"pages_flushed\": {}", snapshot.pages_flushed),
         );
+        push_line(&mut output, format_args!("  }},"));
+        push_line(&mut output, format_args!("  \"maintenance\": {{"));
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"checkpoints\": {{ \"started\": {}, \"completed\": {}, \"failed\": {} }},",
+                snapshot.checkpoints_started,
+                snapshot.checkpoints_completed,
+                snapshot.checkpoints_failed
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"compactions\": {{ \"started\": {}, \"completed\": {}, \"failed\": {} }},",
+                snapshot.compactions_started,
+                snapshot.compactions_completed,
+                snapshot.compactions_failed
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"index_growth\": {{ \"started\": {}, \"completed\": {}, \"failed\": {} }},",
+                snapshot.index_grows_started,
+                snapshot.index_grows_completed,
+                snapshot.index_grows_failed
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"recovery\": {{ \"started\": {}, \"failed\": {} }},",
+                snapshot.recoveries_started, snapshot.recoveries_failed
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"pending_io\": {{ \"submitted\": {}, \"completed\": {}, \"failed\": {} }}",
+                snapshot.pending_io_submitted,
+                snapshot.pending_io_completed,
+                snapshot.pending_io_failed
+            ),
+        );
         push_line(&mut output, format_args!("  }}"));
         push_line(&mut output, format_args!("}}"));
 
@@ -263,7 +354,7 @@ impl StatsReporter {
 
     fn format_csv(&self, snapshot: &StatsSnapshot) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{:.2},{:.4},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{:.2},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             snapshot.elapsed.as_millis(),
             snapshot.total_operations,
             snapshot.reads,
@@ -278,7 +369,21 @@ impl StatsReporter {
             snapshot.bytes_allocated,
             snapshot.memory_in_use,
             snapshot.peak_memory,
-            snapshot.pages_flushed
+            snapshot.pages_flushed,
+            snapshot.checkpoints_started,
+            snapshot.checkpoints_completed,
+            snapshot.checkpoints_failed,
+            snapshot.compactions_started,
+            snapshot.compactions_completed,
+            snapshot.compactions_failed,
+            snapshot.index_grows_started,
+            snapshot.index_grows_completed,
+            snapshot.index_grows_failed,
+            snapshot.recoveries_started,
+            snapshot.recoveries_failed,
+            snapshot.pending_io_submitted,
+            snapshot.pending_io_completed,
+            snapshot.pending_io_failed
         )
     }
 
@@ -295,7 +400,7 @@ impl StatsReporter {
 
     /// Get CSV header line
     pub fn csv_header() -> &'static str {
-        "elapsed_ms,total_ops,reads,read_hits,upserts,rmws,deletes,pending,throughput,hit_rate,index_entries,bytes_allocated,memory_in_use,peak_memory,pages_flushed"
+        "elapsed_ms,total_ops,reads,read_hits,upserts,rmws,deletes,pending,throughput,hit_rate,index_entries,bytes_allocated,memory_in_use,peak_memory,pages_flushed,checkpoints_started,checkpoints_completed,checkpoints_failed,compactions_started,compactions_completed,compactions_failed,index_grows_started,index_grows_completed,index_grows_failed,recoveries_started,recoveries_failed,pending_io_submitted,pending_io_completed,pending_io_failed"
     }
 }
 
@@ -323,6 +428,20 @@ mod tests {
             pages_flushed: 10,
             memory_in_use: 524288,
             peak_memory: 1048576,
+            checkpoints_started: 2,
+            checkpoints_completed: 2,
+            checkpoints_failed: 0,
+            compactions_started: 1,
+            compactions_completed: 1,
+            compactions_failed: 0,
+            index_grows_started: 1,
+            index_grows_completed: 1,
+            index_grows_failed: 0,
+            recoveries_started: 1,
+            recoveries_failed: 0,
+            pending_io_submitted: 10,
+            pending_io_completed: 9,
+            pending_io_failed: 1,
         }
     }
 
@@ -358,7 +477,7 @@ mod tests {
         // CSV should be a single line with comma-separated values
         assert!(!output.contains('\n'));
         let values: Vec<&str> = output.split(',').collect();
-        assert_eq!(values.len(), 15);
+        assert_eq!(values.len(), 29);
     }
 
     #[test]
@@ -376,7 +495,7 @@ mod tests {
     fn test_csv_header() {
         let header = StatsReporter::csv_header();
         let fields: Vec<&str> = header.split(',').collect();
-        assert_eq!(fields.len(), 15);
+        assert_eq!(fields.len(), 29);
         assert!(header.contains("elapsed_ms"));
         assert!(header.contains("throughput"));
     }

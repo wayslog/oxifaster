@@ -77,6 +77,52 @@ fn main() -> std::io::Result<()> {
 
 ---
 
+## 配置（TOML + 环境变量）
+
+使用 `oxifaster::config::OxifasterConfig` 读取 TOML 配置并应用环境变量覆盖。
+
+示例 `oxifaster.toml`：
+
+```toml
+[store]
+table_size = 1048576
+log_memory_size = 536870912
+page_size_bits = 22
+mutable_fraction = 0.9
+
+[compaction]
+target_utilization = 0.5
+min_compact_bytes = 1048576
+max_compact_bytes = 1073741824
+num_threads = 1
+compact_tombstones = true
+
+[cache]
+enabled = true
+mem_size = 268435456
+mutable_fraction = 0.9
+pre_allocate = false
+copy_to_tail = true
+
+[device]
+kind = "single_file"
+path = "oxifaster.db"
+```
+
+通过 `OXIFASTER_CONFIG` 指定配置文件路径，并使用 `OXIFASTER__store__table_size=2097152` 进行覆盖：
+
+```rust
+use oxifaster::config::OxifasterConfig;
+
+let config = OxifasterConfig::load_from_env()?;
+let store_config = config.to_faster_kv_config();
+let compaction_config = config.to_compaction_config();
+let cache_config = config.to_read_cache_config();
+let device = config.open_device()?;
+```
+
+---
+
 ## 开发路线图
 
 请参考 [DEV.md](DEV.md) 了解详细的开发路线图、实现状态和技术债分析。
@@ -338,12 +384,12 @@ drop(handle); // Stops and joins the worker thread
 独立的高性能日志:
 
 ```rust
-use oxifaster::log::faster_log::{FasterLog, FasterLogConfig};
+use oxifaster::log::{FasterLog, FasterLogConfig};
 use oxifaster::device::FileSystemDisk;
 
 let config = FasterLogConfig::default();
 let device = FileSystemDisk::single_file("oxifaster.log")?;
-let log = FasterLog::new(config, device);
+let log = FasterLog::open(config, device)?;
 
 // 追加数据
 let addr = log.append(b"data")?;

@@ -19,7 +19,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     };
 
     // 2. 创建日志
-    let log = FasterLog::new(config, device);
+    let log = FasterLog::open(config, device).expect("failed to open faster log");
     println!("日志创建成功!");
 
     // 3. 追加条目

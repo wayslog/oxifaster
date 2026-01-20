@@ -175,6 +175,76 @@ impl StatsCollector {
                 .allocator
                 .peak_usage
                 .load(Ordering::Relaxed),
+            checkpoints_started: self
+                .store_stats
+                .operational
+                .checkpoints_started
+                .load(Ordering::Relaxed),
+            checkpoints_completed: self
+                .store_stats
+                .operational
+                .checkpoints_completed
+                .load(Ordering::Relaxed),
+            checkpoints_failed: self
+                .store_stats
+                .operational
+                .checkpoints_failed
+                .load(Ordering::Relaxed),
+            compactions_started: self
+                .store_stats
+                .operational
+                .compactions_started
+                .load(Ordering::Relaxed),
+            compactions_completed: self
+                .store_stats
+                .operational
+                .compactions_completed
+                .load(Ordering::Relaxed),
+            compactions_failed: self
+                .store_stats
+                .operational
+                .compactions_failed
+                .load(Ordering::Relaxed),
+            index_grows_started: self
+                .store_stats
+                .operational
+                .index_grows_started
+                .load(Ordering::Relaxed),
+            index_grows_completed: self
+                .store_stats
+                .operational
+                .index_grows_completed
+                .load(Ordering::Relaxed),
+            index_grows_failed: self
+                .store_stats
+                .operational
+                .index_grows_failed
+                .load(Ordering::Relaxed),
+            recoveries_started: self
+                .store_stats
+                .operational
+                .recoveries_started
+                .load(Ordering::Relaxed),
+            recoveries_failed: self
+                .store_stats
+                .operational
+                .recoveries_failed
+                .load(Ordering::Relaxed),
+            pending_io_submitted: self
+                .store_stats
+                .operational
+                .pending_io_submitted
+                .load(Ordering::Relaxed),
+            pending_io_completed: self
+                .store_stats
+                .operational
+                .pending_io_completed
+                .load(Ordering::Relaxed),
+            pending_io_failed: self
+                .store_stats
+                .operational
+                .pending_io_failed
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -216,6 +286,34 @@ pub struct StatsSnapshot {
     pub memory_in_use: u64,
     /// Peak memory usage
     pub peak_memory: u64,
+    /// Checkpoints started
+    pub checkpoints_started: u64,
+    /// Checkpoints completed successfully
+    pub checkpoints_completed: u64,
+    /// Checkpoints failed
+    pub checkpoints_failed: u64,
+    /// Compactions started
+    pub compactions_started: u64,
+    /// Compactions completed successfully
+    pub compactions_completed: u64,
+    /// Compactions failed
+    pub compactions_failed: u64,
+    /// Index growth operations started
+    pub index_grows_started: u64,
+    /// Index growth operations completed successfully
+    pub index_grows_completed: u64,
+    /// Index growth operations failed
+    pub index_grows_failed: u64,
+    /// Recovery attempts started
+    pub recoveries_started: u64,
+    /// Recovery attempts failed
+    pub recoveries_failed: u64,
+    /// Pending I/O submissions
+    pub pending_io_submitted: u64,
+    /// Pending I/O completions
+    pub pending_io_completed: u64,
+    /// Pending I/O failures
+    pub pending_io_failed: u64,
 }
 
 impl StatsSnapshot {
