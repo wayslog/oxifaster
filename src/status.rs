@@ -236,17 +236,24 @@ pub enum OperationType {
     Recovery,
 }
 
+impl OperationType {
+    /// Get the operation type as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            OperationType::Read => "Read",
+            OperationType::Rmw => "RMW",
+            OperationType::Upsert => "Upsert",
+            OperationType::Insert => "Insert",
+            OperationType::Delete => "Delete",
+            OperationType::ConditionalInsert => "ConditionalInsert",
+            OperationType::Recovery => "Recovery",
+        }
+    }
+}
+
 impl fmt::Display for OperationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OperationType::Read => write!(f, "Read"),
-            OperationType::Rmw => write!(f, "RMW"),
-            OperationType::Upsert => write!(f, "Upsert"),
-            OperationType::Insert => write!(f, "Insert"),
-            OperationType::Delete => write!(f, "Delete"),
-            OperationType::ConditionalInsert => write!(f, "ConditionalInsert"),
-            OperationType::Recovery => write!(f, "Recovery"),
-        }
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -261,6 +268,17 @@ pub enum IndexOperationType {
     Retrieve,
     /// Update entry
     Update,
+}
+
+impl IndexOperationType {
+    /// Get the index operation type as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            IndexOperationType::None => "None",
+            IndexOperationType::Retrieve => "Retrieve",
+            IndexOperationType::Update => "Update",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +462,20 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_type_as_str() {
+        assert_eq!(OperationType::Read.as_str(), "Read");
+        assert_eq!(OperationType::Rmw.as_str(), "RMW");
+        assert_eq!(OperationType::Upsert.as_str(), "Upsert");
+        assert_eq!(OperationType::Insert.as_str(), "Insert");
+        assert_eq!(OperationType::Delete.as_str(), "Delete");
+        assert_eq!(
+            OperationType::ConditionalInsert.as_str(),
+            "ConditionalInsert"
+        );
+        assert_eq!(OperationType::Recovery.as_str(), "Recovery");
+    }
+
+    #[test]
     fn test_operation_type_display() {
         assert_eq!(format!("{}", OperationType::Read), "Read");
         assert_eq!(format!("{}", OperationType::Rmw), "RMW");
@@ -460,6 +492,13 @@ mod tests {
     #[test]
     fn test_index_operation_type_default() {
         assert_eq!(IndexOperationType::default(), IndexOperationType::None);
+    }
+
+    #[test]
+    fn test_index_operation_type_as_str() {
+        assert_eq!(IndexOperationType::None.as_str(), "None");
+        assert_eq!(IndexOperationType::Retrieve.as_str(), "Retrieve");
+        assert_eq!(IndexOperationType::Update.as_str(), "Update");
     }
 
     #[test]

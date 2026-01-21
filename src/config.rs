@@ -80,46 +80,46 @@ impl OxifasterConfig {
 
             match parts.as_slice() {
                 ["store", "table_size"] => {
-                    self.store_mut().table_size = Some(parse_u64(&key, &value)?);
+                    self.store_mut().table_size = Some(parse_value(&key, &value)?);
                 }
                 ["store", "log_memory_size"] => {
-                    self.store_mut().log_memory_size = Some(parse_u64(&key, &value)?);
+                    self.store_mut().log_memory_size = Some(parse_value(&key, &value)?);
                 }
                 ["store", "page_size_bits"] => {
-                    self.store_mut().page_size_bits = Some(parse_u32(&key, &value)?);
+                    self.store_mut().page_size_bits = Some(parse_value(&key, &value)?);
                 }
                 ["store", "mutable_fraction"] => {
-                    self.store_mut().mutable_fraction = Some(parse_f64(&key, &value)?);
+                    self.store_mut().mutable_fraction = Some(parse_value(&key, &value)?);
                 }
                 ["compaction", "target_utilization"] => {
-                    self.compaction_mut().target_utilization = Some(parse_f64(&key, &value)?);
+                    self.compaction_mut().target_utilization = Some(parse_value(&key, &value)?);
                 }
                 ["compaction", "min_compact_bytes"] => {
-                    self.compaction_mut().min_compact_bytes = Some(parse_u64(&key, &value)?);
+                    self.compaction_mut().min_compact_bytes = Some(parse_value(&key, &value)?);
                 }
                 ["compaction", "max_compact_bytes"] => {
-                    self.compaction_mut().max_compact_bytes = Some(parse_u64(&key, &value)?);
+                    self.compaction_mut().max_compact_bytes = Some(parse_value(&key, &value)?);
                 }
                 ["compaction", "num_threads"] => {
-                    self.compaction_mut().num_threads = Some(parse_usize(&key, &value)?);
+                    self.compaction_mut().num_threads = Some(parse_value(&key, &value)?);
                 }
                 ["compaction", "compact_tombstones"] => {
-                    self.compaction_mut().compact_tombstones = Some(parse_bool(&key, &value)?);
+                    self.compaction_mut().compact_tombstones = Some(parse_value(&key, &value)?);
                 }
                 ["cache", "enabled"] => {
-                    self.cache_mut().enabled = Some(parse_bool(&key, &value)?);
+                    self.cache_mut().enabled = Some(parse_value(&key, &value)?);
                 }
                 ["cache", "mem_size"] => {
-                    self.cache_mut().mem_size = Some(parse_u64(&key, &value)?);
+                    self.cache_mut().mem_size = Some(parse_value(&key, &value)?);
                 }
                 ["cache", "mutable_fraction"] => {
-                    self.cache_mut().mutable_fraction = Some(parse_f64(&key, &value)?);
+                    self.cache_mut().mutable_fraction = Some(parse_value(&key, &value)?);
                 }
                 ["cache", "pre_allocate"] => {
-                    self.cache_mut().pre_allocate = Some(parse_bool(&key, &value)?);
+                    self.cache_mut().pre_allocate = Some(parse_value(&key, &value)?);
                 }
                 ["cache", "copy_to_tail"] => {
-                    self.cache_mut().copy_to_tail = Some(parse_bool(&key, &value)?);
+                    self.cache_mut().copy_to_tail = Some(parse_value(&key, &value)?);
                 }
                 ["device", "kind"] => {
                     self.device_mut().kind = Some(value.to_string());
@@ -134,7 +134,7 @@ impl OxifasterConfig {
                     self.device_mut().prefix = Some(value.to_string());
                 }
                 ["device", "segment_size"] => {
-                    self.device_mut().segment_size = Some(parse_u64(&key, &value)?);
+                    self.device_mut().segment_size = Some(parse_value(&key, &value)?);
                 }
                 _ => return Err(ConfigError::UnknownKey(key)),
             }
@@ -425,35 +425,7 @@ impl DeviceConfig {
     }
 }
 
-fn parse_u64(key: &str, value: &str) -> Result<u64, ConfigError> {
-    value.parse().map_err(|_| ConfigError::InvalidValue {
-        key: key.to_string(),
-        value: value.to_string(),
-    })
-}
-
-fn parse_u32(key: &str, value: &str) -> Result<u32, ConfigError> {
-    value.parse().map_err(|_| ConfigError::InvalidValue {
-        key: key.to_string(),
-        value: value.to_string(),
-    })
-}
-
-fn parse_usize(key: &str, value: &str) -> Result<usize, ConfigError> {
-    value.parse().map_err(|_| ConfigError::InvalidValue {
-        key: key.to_string(),
-        value: value.to_string(),
-    })
-}
-
-fn parse_f64(key: &str, value: &str) -> Result<f64, ConfigError> {
-    value.parse().map_err(|_| ConfigError::InvalidValue {
-        key: key.to_string(),
-        value: value.to_string(),
-    })
-}
-
-fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
+fn parse_value<T: std::str::FromStr>(key: &str, value: &str) -> Result<T, ConfigError> {
     value.parse().map_err(|_| ConfigError::InvalidValue {
         key: key.to_string(),
         value: value.to_string(),

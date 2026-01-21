@@ -33,6 +33,18 @@ pub enum LogPageStatus {
     Unavailable = 3,
 }
 
+impl LogPageStatus {
+    /// Get the status as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            LogPageStatus::Uninitialized => "Uninitialized",
+            LogPageStatus::Ready => "Ready",
+            LogPageStatus::Pending => "Pending",
+            LogPageStatus::Unavailable => "Unavailable",
+        }
+    }
+}
+
 /// A range to scan in the log
 #[derive(Debug, Clone, Copy)]
 pub struct ScanRange {

@@ -67,15 +67,13 @@ struct PageArray {
 impl PageArray {
     fn new(buffer_size: u32) -> Self {
         let mut buffers = Vec::with_capacity(buffer_size as usize);
-        let info = Arc::new(vec![PageInfo::new(); buffer_size as usize]);
-
         for _ in 0..buffer_size {
             buffers.push(None);
         }
 
         Self {
             buffers,
-            info,
+            info: Arc::new(vec![PageInfo::new(); buffer_size as usize]),
             buffer_size,
         }
     }
@@ -459,32 +457,23 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
     /// Shift the head address
     pub fn shift_head_address(&self, new_address: Address) {
-        loop {
-            let current = self.head_address.load(Ordering::Acquire);
-            if new_address <= current {
-                return;
-            }
-
-            if self
-                .head_address
-                .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return;
-            }
-        }
+        Self::try_advance_address(&self.head_address, new_address);
     }
 
     /// Shift the begin address
     pub fn shift_begin_address(&self, new_address: Address) {
+        Self::try_advance_address(&self.begin_address, new_address);
+    }
+
+    /// Helper: atomically advance an address if the new value is greater.
+    fn try_advance_address(target: &AtomicAddress, new_address: Address) {
         loop {
-            let current = self.begin_address.load(Ordering::Acquire);
+            let current = target.load(Ordering::Acquire);
             if new_address <= current {
                 return;
             }
 
-            if self
-                .begin_address
+            if target
                 .compare_exchange(current, new_address, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {

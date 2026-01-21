@@ -34,6 +34,14 @@ pub enum DeltaLogEntryType {
 }
 
 impl DeltaLogEntryType {
+    /// Get the entry type as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            DeltaLogEntryType::Delta => "Delta",
+            DeltaLogEntryType::CheckpointMetadata => "CheckpointMetadata",
+        }
+    }
+
     /// Convert from i32
     pub fn from_i32(value: i32) -> Option<Self> {
         match value {
@@ -263,6 +271,15 @@ mod tests {
 
         assert_eq!(DeltaLogEntryType::Delta.to_i32(), 0);
         assert_eq!(DeltaLogEntryType::CheckpointMetadata.to_i32(), 1);
+    }
+
+    #[test]
+    fn test_entry_type_as_str() {
+        assert_eq!(DeltaLogEntryType::Delta.as_str(), "Delta");
+        assert_eq!(
+            DeltaLogEntryType::CheckpointMetadata.as_str(),
+            "CheckpointMetadata"
+        );
     }
 
     #[test]

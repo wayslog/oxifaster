@@ -497,6 +497,18 @@ where
 
     // ============ Statistics Collection API ============
 
+    /// Record read operation statistics
+    #[inline]
+    fn record_read_stats(&self, hit: bool, start: Instant) {
+        if self.stats_collector.is_enabled() {
+            self.stats_collector.store_stats.operations.record_read(hit);
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_latency(start.elapsed());
+        }
+    }
+
     /// Get the statistics collector
     pub fn stats_collector(&self) -> &StatsCollector {
         &self.stats_collector
@@ -733,17 +745,7 @@ where
         let result = self.hash_index.find_entry(hash);
 
         if !result.found() {
-            // Record miss statistics
-            if self.stats_collector.is_enabled() {
-                self.stats_collector
-                    .store_stats
-                    .operations
-                    .record_read(false);
-                self.stats_collector
-                    .store_stats
-                    .operations
-                    .record_latency(start.elapsed());
-            }
+            self.record_read_stats(false, start);
             return Ok(None);
         }
 
@@ -752,17 +754,7 @@ where
         // Check read cache first if enabled
         if address.in_readcache() {
             if let Some(value) = self.try_read_from_cache(address, key) {
-                // Record hit statistics
-                if self.stats_collector.is_enabled() {
-                    self.stats_collector
-                        .store_stats
-                        .operations
-                        .record_read(true);
-                    self.stats_collector
-                        .store_stats
-                        .operations
-                        .record_latency(start.elapsed());
-                }
+                self.record_read_stats(true, start);
                 return Ok(Some(value));
             }
             // If cache miss, skip to underlying HybridLog address
@@ -774,17 +766,7 @@ where
             // Check read cache for chain entries
             if address.in_readcache() {
                 if let Some(value) = self.try_read_from_cache(address, key) {
-                    // Record hit statistics
-                    if self.stats_collector.is_enabled() {
-                        self.stats_collector
-                            .store_stats
-                            .operations
-                            .record_read(true);
-                        self.stats_collector
-                            .store_stats
-                            .operations
-                            .record_latency(start.elapsed());
-                    }
+                    self.record_read_stats(true, start);
                     return Ok(Some(value));
                 }
                 // Skip to underlying address
@@ -801,17 +783,7 @@ where
                     match result.parsed {
                         Ok(parsed) => {
                             if parsed.key.as_ref() == Some(key) {
-                                // The cache stores tombstone(None) or value(Some) after a read completes.
-                                if self.stats_collector.is_enabled() {
-                                    self.stats_collector
-                                        .store_stats
-                                        .operations
-                                        .record_read(parsed.value.is_some());
-                                    self.stats_collector
-                                        .store_stats
-                                        .operations
-                                        .record_latency(start.elapsed());
-                                }
+                                self.record_read_stats(parsed.value.is_some(), start);
                                 return Ok(parsed.value);
                             }
                             address = parsed.previous_address;
@@ -860,17 +832,7 @@ where
                 if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
                     // Check for tombstone
                     if view.is_tombstone() {
-                        // Record miss (tombstone found)
-                        if self.stats_collector.is_enabled() {
-                            self.stats_collector
-                                .store_stats
-                                .operations
-                                .record_read(false);
-                            self.stats_collector
-                                .store_stats
-                                .operations
-                                .record_latency(start.elapsed());
-                        }
+                        self.record_read_stats(false, start);
                         return Ok(None);
                     }
 
@@ -886,18 +848,7 @@ where
                         let _ = self.try_insert_into_cache(key, &value, address);
                     }
 
-                    // Record hit statistics
-                    if self.stats_collector.is_enabled() {
-                        self.stats_collector
-                            .store_stats
-                            .operations
-                            .record_read(true);
-                        self.stats_collector
-                            .store_stats
-                            .operations
-                            .record_latency(start.elapsed());
-                    }
-
+                    self.record_read_stats(true, start);
                     return Ok(Some(value));
                 }
 
@@ -908,17 +859,7 @@ where
             }
         }
 
-        // Record miss statistics
-        if self.stats_collector.is_enabled() {
-            self.stats_collector
-                .store_stats
-                .operations
-                .record_read(false);
-            self.stats_collector
-                .store_stats
-                .operations
-                .record_latency(start.elapsed());
-        }
+        self.record_read_stats(false, start);
         Ok(None)
     }
 

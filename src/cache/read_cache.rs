@@ -435,12 +435,7 @@ where
         let current_head = self.head_address.load(Ordering::Acquire);
         let current_tail = self.tail_address.load(Ordering::Acquire);
         let target_size = self.config.mutable_size();
-
-        let new_head = if current_tail > target_size {
-            current_tail - target_size
-        } else {
-            current_head
-        };
+        let new_head = current_tail.saturating_sub(target_size).max(current_head);
 
         if new_head > current_head {
             // Evict records from current_head to new_head

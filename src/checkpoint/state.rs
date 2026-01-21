@@ -296,6 +296,18 @@ pub enum CheckpointType {
 }
 
 impl CheckpointType {
+    /// Get the checkpoint type as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            CheckpointType::FoldOver => "FoldOver",
+            CheckpointType::Snapshot => "Snapshot",
+            CheckpointType::Full => "Full",
+            CheckpointType::IndexOnly => "IndexOnly",
+            CheckpointType::HybridLogOnly => "HybridLogOnly",
+            CheckpointType::IncrementalSnapshot => "IncrementalSnapshot",
+        }
+    }
+
     /// Check if this checkpoint type uses a snapshot file
     pub fn uses_snapshot_file(&self) -> bool {
         matches!(
@@ -654,6 +666,19 @@ mod tests {
             Some(CheckpointType::IncrementalSnapshot)
         );
         assert_eq!(CheckpointType::from_u8(99), None);
+    }
+
+    #[test]
+    fn test_checkpoint_type_as_str() {
+        assert_eq!(CheckpointType::FoldOver.as_str(), "FoldOver");
+        assert_eq!(CheckpointType::Snapshot.as_str(), "Snapshot");
+        assert_eq!(CheckpointType::Full.as_str(), "Full");
+        assert_eq!(CheckpointType::IndexOnly.as_str(), "IndexOnly");
+        assert_eq!(CheckpointType::HybridLogOnly.as_str(), "HybridLogOnly");
+        assert_eq!(
+            CheckpointType::IncrementalSnapshot.as_str(),
+            "IncrementalSnapshot"
+        );
     }
 
     #[test]
