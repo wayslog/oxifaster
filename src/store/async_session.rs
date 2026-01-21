@@ -82,6 +82,21 @@ where
     V: PersistValue,
     D: StorageDevice,
 {
+    /// Helper to retry an operation that returns Status until it succeeds or retries are exhausted.
+    async fn retry_status_op<F>(&mut self, mut op: F) -> Status
+    where
+        F: FnMut(&mut Session<K, V, D>) -> Status,
+    {
+        for _ in 0..=MAX_PENDING_RETRIES {
+            let status = op(&mut self.inner);
+            if status != Status::Pending {
+                return status;
+            }
+            self.drive_pending_once().await;
+        }
+        Status::Pending
+    }
+
     async fn drive_pending_once(&mut self) {
         self.inner.complete_pending(false);
         tokio_yield().await;
@@ -203,18 +218,8 @@ where
     /// - `Status::Pending` if the operation couldn't complete after retries
     /// - Other status for errors
     pub async fn upsert_async(&mut self, key: K, value: V) -> Status {
-        let mut retries = 0u32;
-        loop {
-            let status = self.inner.upsert(key.clone(), value.clone());
-            if status != Status::Pending {
-                return status;
-            }
-            retries += 1;
-            if retries > MAX_PENDING_RETRIES {
-                return Status::Pending;
-            }
-            self.drive_pending_once().await;
-        }
+        self.retry_status_op(|session| session.upsert(key.clone(), value.clone()))
+            .await
     }
 
     /// Async delete operation
@@ -227,18 +232,9 @@ where
     /// - `Status::Pending` if the operation couldn't complete after retries
     /// - Other status for errors
     pub async fn delete_async(&mut self, key: &K) -> Status {
-        let mut retries = 0u32;
-        loop {
-            let status = self.inner.delete(key);
-            if status != Status::Pending {
-                return status;
-            }
-            retries += 1;
-            if retries > MAX_PENDING_RETRIES {
-                return Status::Pending;
-            }
-            self.drive_pending_once().await;
-        }
+        let key_clone = key.clone();
+        self.retry_status_op(|session| session.delete(&key_clone))
+            .await
     }
 
     /// Async RMW (read-modify-write) operation
@@ -255,18 +251,8 @@ where
     where
         F: FnMut(&mut V) -> bool + Clone,
     {
-        let mut retries = 0u32;
-        loop {
-            let status = self.inner.rmw(key.clone(), modifier.clone());
-            if status != Status::Pending {
-                return status;
-            }
-            retries += 1;
-            if retries > MAX_PENDING_RETRIES {
-                return Status::Pending;
-            }
-            self.drive_pending_once().await;
-        }
+        self.retry_status_op(|session| session.rmw(key.clone(), modifier.clone()))
+            .await
     }
 
     /// Complete all pending operations asynchronously
@@ -275,17 +261,13 @@ where
     /// - `true` if all pending operations completed
     /// - `false` if retries exhausted with operations still pending
     pub async fn complete_pending_async(&mut self) -> bool {
-        let mut retries = 0u32;
-        loop {
+        for _ in 0..=MAX_PENDING_RETRIES {
             if self.inner.complete_pending(false) {
                 return true;
             }
-            retries += 1;
-            if retries > MAX_PENDING_RETRIES {
-                return false;
-            }
             self.drive_pending_once().await;
         }
+        false
     }
 
     // ==================== Sync Fallback Operations ====================

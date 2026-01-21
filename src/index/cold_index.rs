@@ -575,18 +575,7 @@ impl ColdIndex {
     ///
     /// Returns the entry if found, or NotFound status if not present.
     pub fn find_entry(&self, hash: KeyHash) -> ColdIndexFindResult {
-        let chunk_key = self.compute_chunk_key(hash);
-        let pos = self.compute_chunk_pos(hash);
-
-        let chunk = self.get_chunk(chunk_key.chunk_id);
-        let entry = chunk.get_entry(pos);
-
-        let result = if entry.is_unused() {
-            ColdIndexFindResult::not_found(pos, chunk_key)
-        } else {
-            ColdIndexFindResult::found(entry, pos, chunk_key)
-        };
-
+        let result = self.lookup_entry(hash);
         self.stats.record_find_entry(result.status);
         result
     }
@@ -595,21 +584,32 @@ impl ColdIndex {
     ///
     /// If the entry doesn't exist, creates a new empty entry.
     pub fn find_or_create_entry(&self, hash: KeyHash) -> ColdIndexFindResult {
+        let result = self.lookup_entry(hash);
+        self.stats.record_find_or_create(Status::Ok);
+        result
+    }
+
+    /// Internal helper: lookup an entry for the given hash
+    fn lookup_entry(&self, hash: KeyHash) -> ColdIndexFindResult {
         let chunk_key = self.compute_chunk_key(hash);
         let pos = self.compute_chunk_pos(hash);
-
         let chunk = self.get_chunk(chunk_key.chunk_id);
         let entry = chunk.get_entry(pos);
 
-        let result = if entry.is_unused() {
-            // Entry doesn't exist, but we've "created" it (it's now accessible)
+        if entry.is_unused() {
             ColdIndexFindResult::not_found(pos, chunk_key)
         } else {
             ColdIndexFindResult::found(entry, pos, chunk_key)
-        };
+        }
+    }
 
-        self.stats.record_find_or_create(Status::Ok);
-        result
+    /// Helper: get chunk and position for a hash
+    #[inline]
+    fn chunk_and_pos(&self, hash: KeyHash) -> (&DefaultHashIndexChunk, HashIndexChunkPos) {
+        let chunk_key = self.compute_chunk_key(hash);
+        let pos = self.compute_chunk_pos(hash);
+        let chunk = self.get_chunk(chunk_key.chunk_id);
+        (chunk, pos)
     }
 
     /// Try to update an entry atomically
@@ -621,10 +621,7 @@ impl ColdIndex {
         expected: HashBucketEntry,
         new_address: Address,
     ) -> Status {
-        let chunk_key = self.compute_chunk_key(hash);
-        let pos = self.compute_chunk_pos(hash);
-
-        let chunk = self.get_chunk(chunk_key.chunk_id);
+        let (chunk, pos) = self.chunk_and_pos(hash);
         let new_entry = HashBucketEntry::new(new_address);
 
         let status = match chunk.cas_entry(pos, expected, new_entry) {
@@ -638,10 +635,7 @@ impl ColdIndex {
 
     /// Update an entry unconditionally
     pub fn update_entry(&self, hash: KeyHash, new_address: Address) -> Status {
-        let chunk_key = self.compute_chunk_key(hash);
-        let pos = self.compute_chunk_pos(hash);
-
-        let chunk = self.get_chunk(chunk_key.chunk_id);
+        let (chunk, pos) = self.chunk_and_pos(hash);
         let new_entry = HashBucketEntry::new(new_address);
         chunk.set_entry(pos, new_entry);
 

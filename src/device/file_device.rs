@@ -204,6 +204,16 @@ enum FileSystemDiskInner {
     Segmented(SegmentedFile),
 }
 
+impl FileSystemDiskInner {
+    /// Delegate to the underlying storage device
+    fn as_device(&self) -> &dyn SyncStorageDevice {
+        match self {
+            FileSystemDiskInner::SingleFile(f) => f,
+            FileSystemDiskInner::Segmented(s) => s,
+        }
+    }
+}
+
 impl FileSystemDisk {
     /// Create a single-file disk
     pub fn single_file(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -228,38 +238,23 @@ impl FileSystemDisk {
 
 impl SyncStorageDevice for FileSystemDisk {
     fn read_sync(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        match &self.inner {
-            FileSystemDiskInner::SingleFile(f) => f.read_sync(offset, buf),
-            FileSystemDiskInner::Segmented(s) => s.read_sync(offset, buf),
-        }
+        self.inner.as_device().read_sync(offset, buf)
     }
 
     fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        match &self.inner {
-            FileSystemDiskInner::SingleFile(f) => f.write_sync(offset, buf),
-            FileSystemDiskInner::Segmented(s) => s.write_sync(offset, buf),
-        }
+        self.inner.as_device().write_sync(offset, buf)
     }
 
     fn flush_sync(&self) -> io::Result<()> {
-        match &self.inner {
-            FileSystemDiskInner::SingleFile(f) => f.flush_sync(),
-            FileSystemDiskInner::Segmented(s) => s.flush_sync(),
-        }
+        self.inner.as_device().flush_sync()
     }
 
     fn truncate_sync(&self, size: u64) -> io::Result<()> {
-        match &self.inner {
-            FileSystemDiskInner::SingleFile(f) => f.truncate_sync(size),
-            FileSystemDiskInner::Segmented(s) => s.truncate_sync(size),
-        }
+        self.inner.as_device().truncate_sync(size)
     }
 
     fn size_sync(&self) -> io::Result<u64> {
-        match &self.inner {
-            FileSystemDiskInner::SingleFile(f) => f.size_sync(),
-            FileSystemDiskInner::Segmented(s) => s.size_sync(),
-        }
+        self.inner.as_device().size_sync()
     }
 }
 

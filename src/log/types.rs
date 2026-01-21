@@ -153,6 +153,19 @@ pub enum LogErrorKind {
     Corruption,
 }
 
+impl LogErrorKind {
+    /// Get the error kind as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            LogErrorKind::Io => "Io",
+            LogErrorKind::Metadata => "Metadata",
+            LogErrorKind::Entry => "Entry",
+            LogErrorKind::Config => "Config",
+            LogErrorKind::Corruption => "Corruption",
+        }
+    }
+}
+
 pub(crate) fn status_from_error(error: &LogError) -> Status {
     match error.kind {
         LogErrorKind::Io => Status::IoError,

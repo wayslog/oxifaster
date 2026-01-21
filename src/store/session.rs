@@ -376,132 +376,139 @@ where
         let head_address = self.store.head_address();
         let thread_id = self.ctx.thread_id;
 
-        let mut should_remove = false;
-        if let Some(requests) = self.pending_reads.get_mut(&ctx_id) {
-            let mut i = 0usize;
-            while i < requests.len() {
-                let address = requests[i].address;
+        let Some(requests) = self.pending_reads.get_mut(&ctx_id) else {
+            return;
+        };
 
-                if requests[i].cancelled {
-                    if self.store.take_disk_read_result(address).is_some() {
-                        let _ = requests.swap_remove(i);
-                        continue;
-                    }
+        let mut i = 0usize;
+        while i < requests.len() {
+            let address = requests[i].address;
+
+            // Handle cancelled requests
+            if requests[i].cancelled {
+                if self.store.take_disk_read_result(address).is_some() {
+                    let _ = requests.swap_remove(i);
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Check if disk read completed - need to extract result to avoid borrow conflicts
+            let parsed = match self.store.take_disk_read_result(address) {
+                Some(p) => p,
+                None => {
                     i += 1;
                     continue;
                 }
+            };
 
-                let Some(parsed) = self.store.take_disk_read_result(address) else {
-                    i += 1;
-                    continue;
-                };
-
-                match parsed {
-                    Err(status) => {
+            match parsed {
+                Err(status) => {
+                    let req = requests.swap_remove(i);
+                    self.completed_reads
+                        .entry(req.hash)
+                        .or_default()
+                        .push(CompletedRead {
+                            key: req.key,
+                            result: Err(status),
+                        });
+                    if req.retry_tracked {
+                        self.ctx.on_retry_request_consumed(req.ctx_id);
+                    }
+                }
+                Ok(disk) => {
+                    // Check if this is the key we're looking for
+                    if disk.key.as_ref() == Some(&requests[i].key) {
                         let req = requests.swap_remove(i);
                         self.completed_reads
                             .entry(req.hash)
                             .or_default()
                             .push(CompletedRead {
                                 key: req.key,
-                                result: Err(status),
+                                result: Ok(disk.value),
                             });
                         if req.retry_tracked {
                             self.ctx.on_retry_request_consumed(req.ctx_id);
                         }
                         continue;
                     }
-                    Ok(disk) => {
-                        if disk.key.as_ref() == Some(&requests[i].key) {
+
+                    // Key mismatch - need to follow the chain
+                    let next = disk.previous_address;
+                    if !next.is_valid() {
+                        let req = requests.swap_remove(i);
+                        self.completed_reads
+                            .entry(req.hash)
+                            .or_default()
+                            .push(CompletedRead {
+                                key: req.key,
+                                result: Ok(None),
+                            });
+                        if req.retry_tracked {
+                            self.ctx.on_retry_request_consumed(req.ctx_id);
+                        }
+                        continue;
+                    }
+
+                    // Continue searching the chain
+                    if !next.in_readcache() && next < head_address {
+                        // Next record is on disk
+                        let submitted = self
+                            .store
+                            .submit_disk_read_for_context(thread_id, thread_tag, ctx_id, next);
+                        if submitted {
+                            self.ctx.on_pending_io_submitted_for_ctx(ctx_id);
+                        }
+                        requests[i].address = next;
+                        i += 1;
+                        continue;
+                    }
+
+                    // Try to read from memory
+                    match self.store.read_chain_from_memory(&requests[i].key, next) {
+                        Ok(ChainReadOutcome::Completed(value)) => {
                             let req = requests.swap_remove(i);
                             self.completed_reads
                                 .entry(req.hash)
                                 .or_default()
                                 .push(CompletedRead {
                                     key: req.key,
-                                    result: Ok(disk.value),
+                                    result: Ok(value),
                                 });
                             if req.retry_tracked {
                                 self.ctx.on_retry_request_consumed(req.ctx_id);
                             }
-                            continue;
                         }
-
-                        let next = disk.previous_address;
-                        if !next.is_valid() {
-                            let req = requests.swap_remove(i);
-                            self.completed_reads
-                                .entry(req.hash)
-                                .or_default()
-                                .push(CompletedRead {
-                                    key: req.key,
-                                    result: Ok(None),
-                                });
-                            if req.retry_tracked {
-                                self.ctx.on_retry_request_consumed(req.ctx_id);
-                            }
-                            continue;
-                        }
-
-                        if !next.in_readcache() && next < head_address {
-                            let submitted = self
-                                .store
-                                .submit_disk_read_for_context(thread_id, thread_tag, ctx_id, next);
+                        Ok(ChainReadOutcome::NeedDiskRead(disk_addr)) => {
+                            let submitted = self.store.submit_disk_read_for_context(
+                                thread_id, thread_tag, ctx_id, disk_addr,
+                            );
                             if submitted {
                                 self.ctx.on_pending_io_submitted_for_ctx(ctx_id);
                             }
-                            requests[i].address = next;
+                            requests[i].address = disk_addr;
                             i += 1;
-                            continue;
                         }
-
-                        match self.store.read_chain_from_memory(&requests[i].key, next) {
-                            Ok(ChainReadOutcome::Completed(resumed)) => {
-                                let req = requests.swap_remove(i);
-                                self.completed_reads.entry(req.hash).or_default().push(
-                                    CompletedRead {
-                                        key: req.key,
-                                        result: Ok(resumed),
-                                    },
-                                );
-                                if req.retry_tracked {
-                                    self.ctx.on_retry_request_consumed(req.ctx_id);
-                                }
-                                continue;
-                            }
-                            Ok(ChainReadOutcome::NeedDiskRead(address)) => {
-                                let submitted = self.store.submit_disk_read_for_context(
-                                    thread_id, thread_tag, ctx_id, address,
-                                );
-                                if submitted {
-                                    self.ctx.on_pending_io_submitted_for_ctx(ctx_id);
-                                }
-                                requests[i].address = address;
-                                i += 1;
-                                continue;
-                            }
-                            Err(status) => {
-                                let req = requests.swap_remove(i);
-                                self.completed_reads.entry(req.hash).or_default().push(
-                                    CompletedRead {
-                                        key: req.key,
-                                        result: Err(status),
-                                    },
-                                );
-                                if req.retry_tracked {
-                                    self.ctx.on_retry_request_consumed(req.ctx_id);
-                                }
-                                continue;
+                        Err(status) => {
+                            let req = requests.swap_remove(i);
+                            self.completed_reads
+                                .entry(req.hash)
+                                .or_default()
+                                .push(CompletedRead {
+                                    key: req.key,
+                                    result: Err(status),
+                                });
+                            if req.retry_tracked {
+                                self.ctx.on_retry_request_consumed(req.ctx_id);
                             }
                         }
                     }
                 }
             }
-
-            should_remove = requests.is_empty();
         }
 
-        if should_remove {
+        if requests.is_empty() {
             self.pending_reads.remove(&ctx_id);
         }
     }

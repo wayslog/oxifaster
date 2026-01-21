@@ -573,48 +573,16 @@ where
         if self.checkpoint.hot_store_status.load(Ordering::Acquire)
             == StoreCheckpointStatus::Requested
         {
-            // Issue hot store checkpoint
             self.checkpoint
                 .hot_store_status
                 .store(StoreCheckpointStatus::Active, Ordering::Release);
 
-            // Actually checkpoint hot store - index first
-            let token = self.checkpoint.token();
-            let checkpoint_version = self.checkpoint.version();
-            let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
-                let hot_dir = cp_dir.join(token.to_string()).join("hot");
-                let dir_created = std::fs::create_dir_all(&hot_dir).is_ok();
+            let success = self.checkpoint_store(&self.hot_store, "hot");
 
-                if dir_created {
-                    // Checkpoint hot store index
-                    let index_ok = self
-                        .hot_store
-                        .hash_index
-                        .checkpoint(&hot_dir, token)
-                        .is_ok();
-
-                    // Checkpoint hot store hybrid log (writes both metadata and snapshot)
-                    let log_ok = self
-                        .hot_store
-                        .hlog()
-                        .checkpoint(&hot_dir, token, checkpoint_version)
-                        .is_ok();
-
-                    index_ok && log_ok
-                } else {
-                    false
-                }
-            } else {
-                // No checkpoint directory configured - cannot checkpoint without a directory.
-                false
-            };
-
-            if checkpoint_success {
+            if success {
                 self.checkpoint
                     .hot_store_status
                     .store(StoreCheckpointStatus::Finished, Ordering::Release);
-
-                // Move to cold store checkpoint phase
                 self.checkpoint
                     .phase
                     .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
@@ -622,7 +590,6 @@ where
                     .cold_store_status
                     .store(StoreCheckpointStatus::Requested, Ordering::Release);
             } else {
-                // Checkpoint failed - mark as failed and reset phase
                 self.checkpoint
                     .hot_store_status
                     .store(StoreCheckpointStatus::Failed, Ordering::Release);
@@ -636,60 +603,24 @@ where
         if self.checkpoint.cold_store_status.load(Ordering::Acquire)
             == StoreCheckpointStatus::Requested
         {
-            // Issue cold store checkpoint
             self.checkpoint
                 .cold_store_status
                 .store(StoreCheckpointStatus::Active, Ordering::Release);
 
-            // Actually checkpoint cold store
-            let token = self.checkpoint.token();
-            let checkpoint_version = self.checkpoint.version();
-            let checkpoint_success = if let Some(cp_dir) = self.checkpoint_dir.as_ref() {
-                let cold_dir = cp_dir.join(token.to_string()).join("cold");
-                let dir_created = std::fs::create_dir_all(&cold_dir).is_ok();
+            let success = self.checkpoint_store(&self.cold_store, "cold");
 
-                if dir_created {
-                    // Checkpoint cold store index
-                    let index_ok = self
-                        .cold_store
-                        .hash_index
-                        .checkpoint(&cold_dir, token)
-                        .is_ok();
-
-                    // Checkpoint cold store hybrid log (writes both metadata and snapshot)
-                    let log_ok = self
-                        .cold_store
-                        .hlog()
-                        .checkpoint(&cold_dir, token, checkpoint_version)
-                        .is_ok();
-
-                    index_ok && log_ok
-                } else {
-                    false
-                }
-            } else {
-                // No checkpoint directory configured - cannot checkpoint without a directory.
-                false
-            };
-
-            if checkpoint_success {
+            if success {
                 self.checkpoint
                     .cold_store_status
                     .store(StoreCheckpointStatus::Finished, Ordering::Release);
-
-                // Move back to REST
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::Rest, Ordering::Release);
             } else {
-                // Checkpoint failed - mark as failed and reset phase
                 self.checkpoint
                     .cold_store_status
                     .store(StoreCheckpointStatus::Failed, Ordering::Release);
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::Rest, Ordering::Release);
             }
+            self.checkpoint
+                .phase
+                .store(F2CheckpointPhase::Rest, Ordering::Release);
         }
 
         // Hot-cold compaction
@@ -701,6 +632,28 @@ where
         if let Some(until_addr) = self.should_compact_cold_log() {
             let _ = self.compact_cold_log(until_addr);
         }
+    }
+
+    /// Checkpoint a single store (hot or cold).
+    ///
+    /// Returns true if checkpoint succeeded, false otherwise.
+    fn checkpoint_store(&self, store: &InternalStore<D>, subdir: &str) -> bool {
+        let Some(cp_dir) = self.checkpoint_dir.as_ref() else {
+            return false;
+        };
+
+        let token = self.checkpoint.token();
+        let version = self.checkpoint.version();
+        let store_dir = cp_dir.join(token.to_string()).join(subdir);
+
+        if std::fs::create_dir_all(&store_dir).is_err() {
+            return false;
+        }
+
+        let index_ok = store.hash_index.checkpoint(&store_dir, token).is_ok();
+        let log_ok = store.hlog().checkpoint(&store_dir, token, version).is_ok();
+
+        index_ok && log_ok
     }
 
     /// Stop the background worker thread
