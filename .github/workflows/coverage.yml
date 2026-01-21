@@ -8,10 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MIN_COVERAGE: 80.0
 
 jobs:
   coverage:
-    name: Code Coverage
+    name: Code Coverage (≥80%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +22,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
       - name: Generate coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(cargo llvm-cov --all-features --summary-only 2>/dev/null | grep "^TOTAL" | awk '{print $4}' | sed 's/%//')
+          echo "Total Coverage: ${COVERAGE}%"
+          echo "Minimum Required: ${MIN_COVERAGE}%"
+          if (( $(echo "$COVERAGE < $MIN_COVERAGE" | bc -l) )); then
+            echo "❌ Coverage ${COVERAGE}% is below minimum ${MIN_COVERAGE}%"
+            exit 1
+          else
+            echo "✅ Coverage ${COVERAGE}% meets minimum ${MIN_COVERAGE}%"
+          fi
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: true
+
+      - name: Generate HTML report
+        if: always()
+        run: cargo llvm-cov --all-features --html --output-dir target/coverage
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-report
+          path: target/coverage/
+          retention-days: 30
