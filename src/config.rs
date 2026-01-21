@@ -590,10 +590,10 @@ mod tests {
     #[test]
     fn test_parse_value_bool() {
         let result: Result<bool, ConfigError> = parse_value("test_key", "true");
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         let result: Result<bool, ConfigError> = parse_value("test_key", "false");
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(compaction_config.min_compact_bytes, 2048);
         assert_eq!(compaction_config.max_compact_bytes, 1 << 20);
         assert_eq!(compaction_config.num_threads, 4);
-        assert_eq!(compaction_config.compact_tombstones, true);
+        assert!(compaction_config.compact_tombstones);
     }
 
     #[test]
@@ -685,7 +685,7 @@ mod tests {
 
         assert_eq!(cache_config.mem_size, 1 << 22);
         assert_eq!(cache_config.mutable_fraction, 0.9);
-        assert_eq!(cache_config.pre_allocate, true);
+        assert!(cache_config.pre_allocate);
     }
 
     #[test]

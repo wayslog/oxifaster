@@ -1,8 +1,6 @@
 //! 测试 ops 模块功能
 
-use oxifaster::ops::{
-    CheckpointIssue, CheckpointSelfCheckOptions, CheckpointSelfCheckReport,
-};
+use oxifaster::ops::{CheckpointIssue, CheckpointSelfCheckOptions, CheckpointSelfCheckReport};
 use uuid::Uuid;
 
 #[test]
@@ -206,7 +204,7 @@ fn test_checkpoint_issue_multiple() {
         reason: "Error 2".to_string(),
     };
 
-    let issues = vec![issue1, issue2];
+    let issues = [issue1, issue2];
 
     assert_eq!(issues.len(), 2);
     assert_eq!(issues[0].token, token1);

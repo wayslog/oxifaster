@@ -18,8 +18,7 @@ fn test_bincode_basic_i32() {
     let mut buf = vec![0u8; len];
     <SerdeBincodeCodec<i32> as ValueCodec<Bincode<i32>>>::encode_into(&value, &mut buf).unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<i32> as ValueCodec<Bincode<i32>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<i32> as ValueCodec<Bincode<i32>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, 42i32);
 }
 
@@ -30,8 +29,7 @@ fn test_bincode_basic_i64() {
     let mut buf = vec![0u8; len];
     <SerdeBincodeCodec<i64> as ValueCodec<Bincode<i64>>>::encode_into(&value, &mut buf).unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<i64> as ValueCodec<Bincode<i64>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<i64> as ValueCodec<Bincode<i64>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, 9876543210i64);
 }
 
@@ -42,8 +40,7 @@ fn test_bincode_basic_u64() {
     let mut buf = vec![0u8; len];
     <SerdeBincodeCodec<u64> as ValueCodec<Bincode<u64>>>::encode_into(&value, &mut buf).unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<u64> as ValueCodec<Bincode<u64>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<u64> as ValueCodec<Bincode<u64>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, u64::MAX);
 }
 
@@ -56,8 +53,7 @@ fn test_bincode_string() {
     <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::encode_into(&value, &mut buf)
         .unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, "Hello, FASTER!");
 }
 
@@ -70,8 +66,7 @@ fn test_bincode_empty_string() {
     <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::encode_into(&value, &mut buf)
         .unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, "");
 }
 
@@ -182,14 +177,11 @@ fn test_bincode_symmetry_roundtrip() {
 #[test]
 fn test_bincode_key_codec_encode_decode() {
     let key = Bincode(String::from("test_key"));
-    let len =
-        <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::encoded_len(&key).unwrap();
+    let len = <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::encoded_len(&key).unwrap();
     let mut buf = vec![0u8; len];
-    <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::encode_into(&key, &mut buf)
-        .unwrap();
+    <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::encode_into(&key, &mut buf).unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<String> as KeyCodec<Bincode<String>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, "test_key");
 }
 
@@ -205,11 +197,9 @@ fn test_bincode_key_codec_equals() {
     assert!(equals);
 
     let different_key = Bincode(99u64);
-    let not_equals = <SerdeBincodeCodec<u64> as KeyCodec<Bincode<u64>>>::equals_encoded(
-        &buf,
-        &different_key,
-    )
-    .unwrap();
+    let not_equals =
+        <SerdeBincodeCodec<u64> as KeyCodec<Bincode<u64>>>::equals_encoded(&buf, &different_key)
+            .unwrap();
     assert!(!not_equals);
 }
 
@@ -265,8 +255,7 @@ fn test_bincode_large_string() {
     <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::encode_into(&value, &mut buf)
         .unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<String> as ValueCodec<Bincode<String>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0.len(), 100_000);
     assert_eq!(decoded.0, large_str);
 }
@@ -296,19 +285,17 @@ fn test_bincode_nested_struct() {
     <SerdeBincodeCodec<Outer> as ValueCodec<Bincode<Outer>>>::encode_into(&value, &mut buf)
         .unwrap();
 
-    let decoded =
-        <SerdeBincodeCodec<Outer> as ValueCodec<Bincode<Outer>>>::decode(&buf).unwrap();
+    let decoded = <SerdeBincodeCodec<Outer> as ValueCodec<Bincode<Outer>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, value.0);
 }
 
 #[test]
 fn test_bincode_option_type() {
     let some_value = Bincode(Some(42i32));
-    let len =
-        <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encoded_len(
-            &some_value,
-        )
-        .unwrap();
+    let len = <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encoded_len(
+        &some_value,
+    )
+    .unwrap();
     let mut buf = vec![0u8; len];
     <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encode_into(
         &some_value,
@@ -316,18 +303,15 @@ fn test_bincode_option_type() {
     )
     .unwrap();
 
-    let decoded = <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::decode(
-        &buf,
-    )
-    .unwrap();
+    let decoded =
+        <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::decode(&buf).unwrap();
     assert_eq!(decoded.0, Some(42i32));
 
     let none_value: Bincode<Option<i32>> = Bincode(None);
-    let len2 =
-        <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encoded_len(
-            &none_value,
-        )
-        .unwrap();
+    let len2 = <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encoded_len(
+        &none_value,
+    )
+    .unwrap();
     let mut buf2 = vec![0u8; len2];
     <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::encode_into(
         &none_value,
@@ -335,9 +319,8 @@ fn test_bincode_option_type() {
     )
     .unwrap();
 
-    let decoded2 = <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::decode(
-        &buf2,
-    )
-    .unwrap();
+    let decoded2 =
+        <SerdeBincodeCodec<Option<i32>> as ValueCodec<Bincode<Option<i32>>>>::decode(&buf2)
+            .unwrap();
     assert_eq!(decoded2.0, None);
 }
