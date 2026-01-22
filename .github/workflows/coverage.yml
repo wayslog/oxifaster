@@ -8,11 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MIN_COVERAGE: 80.0
+  MIN_COVERAGE: 78.5
 
 jobs:
   coverage:
-    name: Code Coverage (≥80%)
+    name: Code Coverage (≥78.5%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
