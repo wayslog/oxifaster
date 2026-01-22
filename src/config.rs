@@ -480,4 +480,229 @@ mod tests {
             DeviceConfig::Segmented { .. } => panic!("expected single file config"),
         }
     }
+
+    #[test]
+    fn test_config_default() {
+        let config = OxifasterConfig::default();
+        assert!(config.store.is_none());
+        assert!(config.compaction.is_none());
+        assert!(config.cache.is_none());
+        assert!(config.device.is_none());
+    }
+
+    #[test]
+    fn test_to_faster_kv_config_default() {
+        let config = OxifasterConfig::default();
+        let kv_config = config.to_faster_kv_config();
+        assert!(kv_config.table_size > 0);
+    }
+
+    #[test]
+    fn test_to_compaction_config_default() {
+        let config = OxifasterConfig::default();
+        let compaction_config = config.to_compaction_config();
+        assert!(compaction_config.target_utilization > 0.0);
+    }
+
+    #[test]
+    fn test_to_read_cache_config_disabled() {
+        let config = OxifasterConfig::default();
+        let cache_config = config.to_read_cache_config();
+        assert!(cache_config.is_none());
+    }
+
+    #[test]
+    fn test_to_read_cache_config_enabled() {
+        let config = OxifasterConfig {
+            store: None,
+            compaction: None,
+            cache: Some(ReadCacheConfigSpec {
+                enabled: Some(true),
+                mem_size: Some(1024 * 1024),
+                mutable_fraction: None,
+                pre_allocate: None,
+                copy_to_tail: None,
+            }),
+            device: None,
+        };
+        let cache_config = config.to_read_cache_config();
+        assert!(cache_config.is_some());
+    }
+
+    #[test]
+    fn test_device_config_none() {
+        let config = OxifasterConfig::default();
+        let device_config = config.device_config().unwrap();
+        assert!(device_config.is_none());
+    }
+
+    #[test]
+    fn test_device_config_resolve_segmented() {
+        let spec = DeviceConfigSpec {
+            kind: Some("segmented".to_string()),
+            path: None,
+            base_dir: Some(PathBuf::from("/tmp")),
+            prefix: Some("oxifaster".to_string()),
+            segment_size: Some(1 << 30),
+        };
+
+        let resolved = spec.resolve().unwrap();
+        match resolved {
+            DeviceConfig::Segmented {
+                base_dir,
+                prefix,
+                segment_size,
+            } => {
+                assert!(base_dir.ends_with("tmp"));
+                assert_eq!(prefix, "oxifaster");
+                assert_eq!(segment_size, 1 << 30);
+            }
+            DeviceConfig::SingleFile { .. } => panic!("expected segmented config"),
+        }
+    }
+
+    #[test]
+    fn test_device_config_resolve_error() {
+        let spec = DeviceConfigSpec {
+            kind: Some("unknown".to_string()),
+            path: None,
+            base_dir: None,
+            prefix: None,
+            segment_size: None,
+        };
+
+        let result = spec.resolve();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_value_integer() {
+        let result: Result<u64, ConfigError> = parse_value("test_key", "12345");
+        assert_eq!(result.unwrap(), 12345);
+    }
+
+    #[test]
+    fn test_parse_value_float() {
+        let result: Result<f64, ConfigError> = parse_value("test_key", "0.75");
+        assert_eq!(result.unwrap(), 0.75);
+    }
+
+    #[test]
+    fn test_parse_value_bool() {
+        let result: Result<bool, ConfigError> = parse_value("test_key", "true");
+        assert!(result.unwrap());
+
+        let result: Result<bool, ConfigError> = parse_value("test_key", "false");
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_env_overrides_compaction() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        env::set_var("OXIFASTER__compaction__target_utilization", "0.8");
+        env::set_var("OXIFASTER__compaction__min_compact_bytes", "1024");
+
+        let mut config = OxifasterConfig::default();
+        config.apply_env_overrides().unwrap();
+
+        env::remove_var("OXIFASTER__compaction__target_utilization");
+        env::remove_var("OXIFASTER__compaction__min_compact_bytes");
+
+        let compaction = config.compaction.unwrap();
+        assert_eq!(compaction.target_utilization, Some(0.8));
+        assert_eq!(compaction.min_compact_bytes, Some(1024));
+    }
+
+    #[test]
+    fn test_env_overrides_device() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        env::set_var("OXIFASTER__device__kind", "single_file");
+        env::set_var("OXIFASTER__device__path", "/tmp/test.db");
+
+        let mut config = OxifasterConfig::default();
+        config.apply_env_overrides().unwrap();
+
+        env::remove_var("OXIFASTER__device__kind");
+        env::remove_var("OXIFASTER__device__path");
+
+        let device = config.device.unwrap();
+        assert_eq!(device.kind, Some("single_file".to_string()));
+        assert_eq!(device.path, Some(PathBuf::from("/tmp/test.db")));
+    }
+
+    #[test]
+    fn test_store_config_apply_to() {
+        let store_config = StoreConfig {
+            table_size: Some(2048),
+            log_memory_size: Some(1 << 20),
+            page_size_bits: Some(14),
+            mutable_fraction: Some(0.8),
+        };
+
+        let mut kv_config = FasterKvConfig::default();
+        store_config.apply_to(&mut kv_config);
+
+        assert_eq!(kv_config.table_size, 2048);
+        assert_eq!(kv_config.log_memory_size, 1 << 20);
+        assert_eq!(kv_config.page_size_bits, 14);
+        assert_eq!(kv_config.mutable_fraction, 0.8);
+    }
+
+    #[test]
+    fn test_compaction_config_apply_to() {
+        let compaction_spec = CompactionConfigSpec {
+            target_utilization: Some(0.75),
+            min_compact_bytes: Some(2048),
+            max_compact_bytes: Some(1 << 20),
+            num_threads: Some(4),
+            compact_tombstones: Some(true),
+        };
+
+        let mut compaction_config = CompactionConfig::default();
+        compaction_spec.apply_to(&mut compaction_config);
+
+        assert_eq!(compaction_config.target_utilization, 0.75);
+        assert_eq!(compaction_config.min_compact_bytes, 2048);
+        assert_eq!(compaction_config.max_compact_bytes, 1 << 20);
+        assert_eq!(compaction_config.num_threads, 4);
+        assert!(compaction_config.compact_tombstones);
+    }
+
+    #[test]
+    fn test_read_cache_config_apply_to() {
+        let cache_spec = ReadCacheConfigSpec {
+            enabled: Some(true),
+            mem_size: Some(1 << 22),
+            mutable_fraction: Some(0.9),
+            pre_allocate: Some(true),
+            copy_to_tail: Some(false),
+        };
+
+        let mut cache_config = ReadCacheConfig::default();
+        cache_spec.apply_to(&mut cache_config);
+
+        assert_eq!(cache_config.mem_size, 1 << 22);
+        assert_eq!(cache_config.mutable_fraction, 0.9);
+        assert!(cache_config.pre_allocate);
+    }
+
+    #[test]
+    fn test_load_from_path_nonexistent() {
+        let result = OxifasterConfig::load_from_path("/nonexistent/config.toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        let err = ConfigError::InvalidValue {
+            key: "test_key".to_string(),
+            value: "bad_value".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("invalid value"));
+        assert!(display.contains("test_key"));
+        assert!(display.contains("bad_value"));
+    }
 }

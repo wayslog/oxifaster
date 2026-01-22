@@ -34,11 +34,12 @@ cargo bench
 
 ### Code Quality Checks
 
-**CRITICAL: After ANY code changes, you MUST run these three scripts:**
+**CRITICAL: After ANY code changes, you MUST run these four scripts:**
 ```bash
 ./scripts/check-fmt.sh       # Format check (REQUIRED)
 ./scripts/check-clippy.sh    # Clippy with -D warnings (REQUIRED)
 ./scripts/check-test.sh      # Run all tests (REQUIRED)
+./scripts/check-coverage.sh  # Coverage check ≥80% (REQUIRED)
 ```
 
 **Additional CI scripts:**
@@ -233,14 +234,19 @@ f2 = []                          # F2 two-tier hot-cold architecture
 
 ### MSRV & Tooling
 - **MSRV**: Rust 1.92.0 (enforced in `Cargo.toml`)
-- **CI must stay green**: All PRs must pass fmt, clippy (with `-D warnings`), tests, and feature matrix
+- **CI must stay green**: All PRs must pass fmt, clippy (with `-D warnings`), tests, coverage check (≥80%), and feature matrix
 - **No warnings allowed**: `cargo clippy` configured with `-D warnings`
+- **Coverage requirement**: ≥80% line coverage enforced by CI
 
 ### Code Standards
 - Run `cargo fmt --all` before committing (CI enforces this)
 - Fix all clippy warnings before submitting PR
 - Add tests for new functionality
 - Maintain MSRV compatibility
+- **Maintain ≥80% code coverage** (CI enforces this)
+  - Run `./scripts/check-coverage.sh` to verify coverage
+  - All new code must be tested adequately
+  - See `COVERAGE_PLAN.md` for coverage improvement strategy
 
 ### Testing Priorities
 Current gaps (from DEV.md):
