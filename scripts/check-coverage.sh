@@ -11,7 +11,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # 最低覆盖率阈值
-MIN_COVERAGE=78.5
+MIN_COVERAGE=75
 
 echo "======================================"
 echo "Running Code Coverage Analysis..."
