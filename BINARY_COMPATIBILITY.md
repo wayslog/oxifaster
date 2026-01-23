@@ -10,9 +10,8 @@
 
 本文档详细记录了 oxifaster (Rust实现) 与 Microsoft FASTER (C++/C#实现) 之间的二进制兼容性状态。目标是使两个实现能够互操作：
 
-- ✅ 使用 FASTER 创建的数据可以由 oxifaster 读取
-- ✅ 使用 oxifaster 创建的数据可以由 FASTER 读取
-- ✅ 可以在两个实现之间反复切换
+- ✅ 已覆盖元数据/格式层的互操作
+- ⚠️ 索引/日志数据的端到端互操作仍需补齐验证
 
 ## 兼容性状态总览
 
@@ -20,13 +19,13 @@
 |------|------|------|
 | RecordInfo 结构 | ✅ 完全兼容 | 8字节控制字，位布局完全一致 |
 | Address 系统 | ✅ 完全兼容 | 48位逻辑地址，相同的页/偏移划分 |
-| Hash Bucket 结构 | ✅ 完全兼容 | 64字节缓存行对齐 |
+| Hash Bucket 结构 | ✅ 完全兼容 | 64字节对齐，布局/偏移测试覆盖 |
 | 字节序 | ✅ 完全兼容 | 都使用小端字节序 |
-| Checkpoint 元数据 | ✅ 已实现兼容 | 支持C二进制格式和JSON格式 |
-| Hash 函数 | ✅ 已实现兼容 | 支持xxHash和FasterCompat哈希 |
+| Checkpoint 元数据 | ✅ 完全兼容 | 支持C二进制格式和JSON格式，GUID 使用 Windows 字节序 |
+| Hash 函数 | ✅ 完全兼容 | 支持xxHash3/xxHash64/FasterCompat |
 | 格式版本标识 | ✅ 已实现 | 通用格式头和自动检测 |
 | SpanByte 格式 | ✅ 完全兼容 | 与C# FASTER格式一致 |
-| F2 格式 | ✅ 完全兼容 | 枚举值和逻辑架构兼容 |
+| F2 格式 | ✅ 已验证 | 枚举值一致，复用基础格式 |
 
 ## 详细兼容性分析
 
@@ -96,12 +95,16 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - ✅ 对齐: 缓存行对齐
 - ✅ 条目数量: Hot Log 7+1, Cold Log 8
 - ✅ Tag 系统: 14位标签
+- ✅ 布局与偏移测试覆盖 (overflow 指针位于 56 字节偏移)
 
 **C++ 参考**:
 - 文件: `/Users/xuesong.zhao/repo/cpp/FASTER/cc/src/index/hash_bucket.h`
 
 **oxifaster 实现**:
 - 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/index/hash_bucket.rs`
+
+**测试文件**:
+- `tests/compatibility/test_hash_index.rs`
 
 ### 4. 字节序 (✅ 完全兼容)
 
@@ -148,23 +151,28 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
   ```
 
 **oxifaster 实现**:
-- **支持多种格式**:
+- **支持两种格式**:
   - C 二进制格式 (FASTER 兼容): `src/checkpoint/binary_format.rs`
   - JSON 格式 (oxifaster 原生): `src/checkpoint/serialization.rs`
-- **自动格式检测**: 读取时自动识别格式类型
-- **可配置写入格式**: 通过配置选择输出格式
+- **自动格式检测**: `src/format/detector.rs` 支持 JSON / C 二进制识别
+- **GUID 字节序**: C 二进制格式使用 Windows GUID 布局 (`Uuid::to_bytes_le()` / `from_bytes_le()`)
 
 **验证结果**:
 - ✅ C 二进制格式实现完成
 - ✅ 序列化/反序列化测试通过
-- ✅ 所有字段布局验证正确
+- ✅ 字段布局与字节序验证正确
+- ✅ GUID 字节序与 Windows GUID 一致
 - ✅ 支持往返转换
 
 **实现文件**:
 - `src/checkpoint/binary_format.rs`: C 风格序列化实现
-- `tests/compatibility/test_checkpoint_format.rs`: 格式兼容性测试
+- `src/checkpoint/serialization.rs`: JSON 序列化实现
+- `src/format/detector.rs`: 格式自动检测
 
-**测试结果**: 10个测试全部通过
+**测试文件**:
+- `tests/compatibility/test_checkpoint_format.rs`
+- `tests/compatibility/test_roundtrip.rs`
+- `tests/guid_byteorder_test.rs`
 
 ### 6. Hash 函数 (✅ 已实现兼容)
 
@@ -190,24 +198,21 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - `src/codec/multi_hash.rs`: 多哈希算法支持
 - `tests/compatibility/test_hash.rs`: 哈希兼容性测试
 
-**测试结果**: 10个测试全部通过
-
-### 7. 格式版本标识 (⚠️ 部分兼容 - Phase 4 修复目标)
+### 7. 格式版本标识 (✅ 已实现)
 
 **oxifaster**:
-- Log 格式魔数: `"OXFLOG1\0"` (8 字节)
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/log/format.rs:54-55`
+- 通用格式头: 24 字节 (magic/version/flags/checksum)
+- 格式魔数: `OXFLOG1\0` / `FASTER01` / `OXFCKPT1` / `OXFIDX1`
+- 自动检测: `FormatDetector` 支持格式头、魔数、JSON 与 C 二进制识别
+- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/format/header.rs`
+- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/format/detector.rs`
+- Log 元数据仍使用 `OXFLOG1\0` 魔数: `/Users/xuesong.zhao/repo/rust/oxifaster/src/log/format.rs:54-55`
 
 **C++ FASTER**:
-- 未找到明确的格式魔数
-- 可能在运行时验证
+- Checkpoint 文件本身无统一魔数
+- 自动检测基于字段合理性 (version/table_size)
 
-**修复计划** (Phase 4):
-1. 设计通用格式头
-2. 实现格式自动检测
-3. 支持读取两种格式
-
-### 8. SpanByte 格式 (⚠️ 待验证 - Phase 5 验证目标)
+### 8. SpanByte 格式 (✅ 完全兼容)
 
 **oxifaster SpanByte**:
 - 4 字节头部 (长度)
@@ -215,15 +220,13 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - 可变长度数据
 - 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/varlen/span_byte.rs`
 
-**待验证**:
-- C++ FASTER 的 SpanByte 头部格式
-- 元数据字段是否一致
-- 对齐规则是否相同
+**验证结果**:
+- ✅ 头部位布局与 C# FASTER 一致
+- ✅ 元数据标志位与 8 字节 metadata 对齐一致
+- ✅ 小端序与最大长度约束一致
 
-**验证计划** (Phase 5):
-1. 详细对比 C++ FASTER 的 SpanByte 实现
-2. 创建跨实现测试
-3. 必要时调整格式
+**测试文件**:
+- `tests/compatibility/test_span_byte.rs`
 
 ## 测试基础设施
 
@@ -259,8 +262,13 @@ cargo run --bin format_inspector --features clap -- file.dat --hex-dump
 
 **测试文件**:
 - `tests/compatibility/test_record_format.rs`: RecordInfo 格式测试
-- `tests/compatibility/test_checkpoint_format.rs`: Checkpoint 格式测试 (待实现)
-- `tests/compatibility/test_hash_index.rs`: Hash Index 测试 (待实现)
+- `tests/compatibility/test_checkpoint_format.rs`: Checkpoint C 二进制格式测试
+- `tests/compatibility/test_hash.rs`: 哈希兼容性测试
+- `tests/compatibility/test_format_detection.rs`: 格式头与自动检测测试
+- `tests/compatibility/test_span_byte.rs`: SpanByte 兼容性测试
+- `tests/compatibility/test_f2.rs`: F2 枚举兼容性测试
+- `tests/compatibility/test_roundtrip.rs`: 往返测试
+- `tests/compatibility/test_hash_index.rs`: Hash Index 布局测试
 
 **运行测试**:
 ```bash
@@ -276,119 +284,43 @@ cargo test --test compatibility test_record_info
 - ✅ RecordInfo 位布局
 - ✅ RecordInfo 字节序
 - ✅ RecordInfo C++ 兼容性
-- ⏳ Checkpoint 元数据格式 (待实现)
-- ⏳ Hash Index 布局 (待实现)
-- ⏳ SpanByte 格式 (待实现)
+- ✅ Checkpoint 元数据格式 (C 二进制)
+- ✅ Hash 函数兼容
+- ✅ 格式头与自动检测
+- ✅ SpanByte 格式
+- ✅ F2 枚举值一致性
+- ✅ 往返测试
+- ✅ Hash Index 布局
 
-## 配置系统
+## 兼容性使用方式
 
-### 兼容性配置 (计划中)
+目前没有统一的兼容性配置结构体，兼容性能力通过 API 与特性开关使用：
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompatibilityConfig {
-    /// 启用 FASTER C++ 兼容模式
-    pub faster_compat_mode: bool,
+- C 二进制 checkpoint 元数据: `CIndexMetadata` / `CLogMetadata`
+- 哈希算法: `HashAlgorithm` (FasterCompat / XXHash3 / XXHash64)
+- 格式检测: `FormatDetector` / `UniversalFormatHeader`
+- 哈希特性: `hash-xxh3` / `hash-xxh64`
 
-    /// Checkpoint 格式
-    pub checkpoint_format: CheckpointFormat,
+## 互操作与验证
 
-    /// 哈希算法
-    pub hash_algorithm: HashAlgorithm,
+### 兼容性验证工具
 
-    /// 严格兼容性检查
-    pub strict_compatibility: bool,
-}
+**工具**: `tools/verify_compatibility.rs`
 
-pub enum CheckpointFormat {
-    /// JSON 格式 (oxifaster 原生)
-    Json,
-    /// C 二进制格式 (FASTER 兼容)
-    CBinary,
-}
-
-pub enum HashAlgorithm {
-    XXHash3,        // oxifaster 默认
-    XXHash64,       // 可选
-    FasterCompat,   // FASTER C++ 兼容模式
-}
-```
-
-### TOML 配置示例
-
-```toml
-[compatibility]
-faster_compat_mode = true
-checkpoint_format = "c_binary"
-hash_algorithm = "faster_compat"
-strict_compatibility = true
-```
-
-### 环境变量覆盖
-
+**用法**:
 ```bash
-OXIFASTER__compatibility__faster_compat_mode=true
-OXIFASTER__compatibility__checkpoint_format=c_binary
-OXIFASTER__compatibility__hash_algorithm=faster_compat
+cargo build --bin verify_compatibility --features clap
+
+cargo run --bin verify_compatibility --features clap -- \
+  --index-metadata index.meta \
+  --log-metadata log.meta \
+  --index-file index.dat \
+  --log-file log.dat \
+  --verbose
 ```
 
-## 迁移指南
-
-### 从 C++ FASTER 迁移到 oxifaster
-
-**步骤 1: 转换 Checkpoint 元数据** (Phase 2 后可用)
-```bash
-# 使用转换工具
-cargo run --bin convert_checkpoint -- \
-    --input faster_checkpoint.dat \
-    --output oxifaster_checkpoint.json \
-    --format c-to-json
-```
-
-**步骤 2: 重建索引** (如果哈希不兼容)
-```bash
-# 使用重建工具 (Phase 3 后可用)
-cargo run --bin rehash_index -- \
-    --input faster_index.dat \
-    --output oxifaster_index.dat \
-    --from-hash faster \
-    --to-hash xxh3
-```
-
-**步骤 3: 验证兼容性**
-```bash
-# 使用验证工具 (Phase 7)
-cargo run --bin verify_compatibility -- \
-    --faster-dir /path/to/faster/data \
-    --oxifaster-dir /path/to/oxifaster/data
-```
-
-### 从 oxifaster 迁移到 C++ FASTER
-
-**步骤 1: 启用兼容模式**
-```toml
-[compatibility]
-faster_compat_mode = true
-checkpoint_format = "c_binary"
-hash_algorithm = "faster_compat"
-```
-
-**步骤 2: 创建新的 Checkpoint**
-```rust
-use oxifaster::config::OxifasterConfig;
-
-let mut config = OxifasterConfig::default();
-config.compatibility.faster_compat_mode = true;
-
-// 创建 store 并执行 checkpoint
-// checkpoint 将以 C++ FASTER 兼容格式保存
-```
-
-**步骤 3: 验证数据**
-```bash
-# 使用 C++ FASTER 打开数据库
-# 验证读取正确性
-```
+**说明**:
+- 目前未提供自动转换/重建索引工具
 
 ## 性能影响
 
@@ -406,83 +338,44 @@ config.compatibility.faster_compat_mode = true;
 
 ## 实施路线图
 
-### Phase 1: 测试基础设施 ✅ (已完成)
-- ✅ 创建 `tests/compatibility/` 目录
-- ✅ 实现格式检查工具 `tools/format_inspector.rs`
-- ✅ RecordInfo 格式测试完成
-- ✅ 创建此文档
+### 已完成
+- ✅ 兼容性测试基础设施与格式检查工具
+- ✅ Checkpoint C 二进制兼容与自动检测
+- ✅ 多哈希算法与 FasterCompat 哈希
+- ✅ 通用格式头与格式检测
+- ✅ SpanByte 兼容性验证
+- ✅ F2 枚举兼容性验证
+- ✅ 往返测试与兼容性验证工具
 
-### Phase 2: Checkpoint 元数据兼容 (进行中)
-- ⏳ 实现 C 风格二进制序列化
-- ⏳ 添加格式自动检测
-- ⏳ 兼容性测试
-
-预计时间: 5-7 天
-
-### Phase 3: Hash 函数兼容
-- ⏳ 调研 C++ FASTER 哈希实现
-- ⏳ 实现多哈希支持
-- ⏳ 添加配置选项
-
-预计时间: 3-5 天
-
-### Phase 4: 格式版本和识别
-- ⏳ 实现通用格式头
-- ⏳ 格式自动检测
-- ⏳ 版本检查
-
-预计时间: 2-3 天
-
-### Phase 5: SpanByte 格式验证
-- ⏳ 详细对比 C++ 实现
-- ⏳ 创建验证测试
-- ⏳ 必要的修改
-
-预计时间: 2-3 天
-
-### Phase 6: F2 格式兼容
-- ⏳ F2 hot-cold 索引验证
-- ⏳ 冷数据块格式
-- ⏳ 兼容性测试
-
-预计时间: 3-4 天
-
-### Phase 7: 综合测试和工具
-- ⏳ 完整的往返测试
-- ⏳ 迁移工具
-- ⏳ 文档更新
-
-预计时间: 5-7 天
-
-**总计预计时间**: 23-34 天
+### 待完成
+- 暂无
 
 ## 成功标准
 
 ### 功能性
-- ✅ 可以互相读取所有数据格式
-- ⏳ Checkpoint 互操作
-- ⏳ 索引互操作
-- ⏳ Log 互操作
+- ✅ Checkpoint 元数据互操作
+- ⚠️ 索引互操作 (布局已验证，仍待 C++ 数据实测)
+- ⚠️ Log 互操作 (SpanByte 已验证，完整 log 文件待与 C++ 数据对照)
 
 ### 正确性
-- ✅ RecordInfo 格式测试通过
-- ⏳ Checkpoint 格式测试通过
-- ⏳ 往返测试无数据损坏
-- ⏳ 零数据兼容性错误
+- ✅ RecordInfo/Checkpoint/SpanByte/格式检测测试通过
+- ✅ 往返测试覆盖
+- ✅ Hash Index 布局验证
 
 ### 性能
 - ⏳ 兼容模式开销 < 5%
 - ⏳ 基准测试验证
 
 ### 文档
-- ✅ 二进制兼容性文档完成
-- ⏳ 迁移指南完成
-- ⏳ API 文档更新
+- ✅ 二进制兼容性文档更新
+- ✅ 格式检查/验证工具说明
+- ⏳ 自动迁移工具文档 (如后续提供)
 
 ### 可维护性
 - ✅ 清晰的测试结构
 - ✅ 格式检查工具
-- ⏳ 迁移工具完成
+- ✅ 兼容性验证工具
+- ⏳ Hash Index 兼容性测试补齐
 
 ## 已知限制
 
@@ -497,7 +390,7 @@ config.compatibility.faster_compat_mode = true;
 
 3. **特性限制**:
    - 某些高级特性可能需要额外兼容性工作
-   - F2 模式需要单独验证
+   - F2 模式仅验证枚举值，底层格式复用基础实现
 
 ## 参考资料
 
@@ -523,11 +416,13 @@ config.compatibility.faster_compat_mode = true;
 ## 更新日志
 
 ### 2026-01-23
-- ✅ 创建初始文档
-- ✅ 完成 Phase 1: 测试基础设施
-- ✅ RecordInfo 格式测试全部通过
-- ✅ 创建格式检查工具
-- 开始 Phase 2: Checkpoint 元数据兼容
+- ✅ 完成 C 二进制 checkpoint 元数据兼容与 GUID 字节序处理
+- ✅ 多哈希算法与 FasterCompat 哈希实现
+- ✅ 通用格式头与自动检测
+- ✅ SpanByte 兼容性验证
+- ✅ F2 枚举兼容性验证
+- ✅ 新增往返测试与兼容性验证工具
+- ✅ Hash Bucket 布局与偏移测试覆盖
 
 ---
 

@@ -5,9 +5,10 @@
 use clap::Parser;
 use oxifaster::checkpoint::binary_format::{CIndexMetadata, CLogMetadata};
 use oxifaster::format::{FormatDetector, FormatType};
+use oxifaster::index::HashBucket;
 use oxifaster::varlen::SpanByteView;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -27,6 +28,10 @@ struct Args {
     /// Log 文件
     #[clap(long)]
     log_file: Option<PathBuf>,
+
+    /// Index 文件 (index.dat)
+    #[clap(long)]
+    index_file: Option<PathBuf>,
 
     /// 详细输出
     #[clap(short, long)]
@@ -147,6 +152,25 @@ fn main() -> io::Result<()> {
                 has_errors = true;
                 results.push(VerificationResult::error(
                     "LogFile",
+                    &format!("读取失败: {}", e),
+                ));
+            }
+        }
+    }
+
+    // 验证 Index 文件
+    if let Some(path) = &args.index_file {
+        match verify_index_file(path, args.verbose) {
+            Ok(result) => {
+                if result.status == Status::Error {
+                    has_errors = true;
+                }
+                results.push(result);
+            }
+            Err(e) => {
+                has_errors = true;
+                results.push(VerificationResult::error(
+                    "IndexFile",
                     &format!("读取失败: {}", e),
                 ));
             }
@@ -438,6 +462,85 @@ fn verify_log_file(path: &PathBuf, verbose: bool) -> io::Result<VerificationResu
     } else {
         Ok(VerificationResult::error("LogFile", "无法解析任何记录"))
     }
+}
+
+fn verify_index_file(path: &PathBuf, verbose: bool) -> io::Result<VerificationResult> {
+    println!("验证 Index 文件: {}", path.display());
+
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+
+    let mut header = [0u8; 16];
+    reader.read_exact(&mut header)?;
+    let table_size = u64::from_le_bytes(header[0..8].try_into().unwrap());
+    let overflow_count = u64::from_le_bytes(header[8..16].try_into().unwrap());
+
+    let bucket_bytes = (HashBucket::NUM_ENTRIES as u64 + 1) * 8;
+    let expected_len = 16 + (table_size + overflow_count) * bucket_bytes;
+
+    if verbose {
+        println!("  table_size: {}", table_size);
+        println!("  overflow_bucket_count: {}", overflow_count);
+        println!("  bucket_bytes: {}", bucket_bytes);
+        println!("  file_len: {}", file_len);
+        println!("  expected_len: {}", expected_len);
+    }
+
+    if file_len != expected_len {
+        return Ok(VerificationResult::error(
+            "IndexFile",
+            &format!(
+                "文件长度不匹配: expected {}, got {}",
+                expected_len, file_len
+            ),
+        ));
+    }
+
+    let bucket_count = table_size + overflow_count;
+    let sample_count = bucket_count.min(10) as usize;
+    let mut non_zero_entries = 0usize;
+    let mut total_entries = 0usize;
+
+    let mut buf = vec![0u8; bucket_bytes as usize];
+    for _ in 0..sample_count {
+        reader.read_exact(&mut buf)?;
+        for i in 0..(HashBucket::NUM_ENTRIES + 1) {
+            let start = i * 8;
+            let control =
+                u64::from_le_bytes(buf[start..start + 8].try_into().expect("slice length is 8"));
+            total_entries += 1;
+            if control != 0 {
+                non_zero_entries += 1;
+            }
+        }
+    }
+
+    if verbose {
+        println!(
+            "  sample buckets: {}, non-zero entries: {} / {}",
+            sample_count, non_zero_entries, total_entries
+        );
+    }
+
+    if bucket_count == 0 {
+        return Ok(VerificationResult::warning(
+            "IndexFile",
+            "table_size 和 overflow_bucket_count 均为 0",
+        ));
+    }
+
+    if non_zero_entries == 0 {
+        return Ok(VerificationResult::warning(
+            "IndexFile",
+            "样本 bucket 全部为空",
+        ));
+    }
+
+    Ok(VerificationResult::ok(
+        "IndexFile",
+        "Index 文件结构检查通过",
+    ))
 }
 
 fn print_results(results: &[VerificationResult]) {
