@@ -93,10 +93,12 @@ fn test_log_metadata_roundtrip() {
         guids: [0u128; 96],
     };
 
-    // 填充测试数据
+    // 填充测试数据 - 使用实际的 UUID
     for i in 0..10 {
         original.monotonic_serial_nums[i] = i as u64 * 1000;
-        original.guids[i] = (i as u128) << 64 | (i as u128);
+        // 创建一个 UUID 并存储为 u128
+        let uuid = uuid::Uuid::new_v4();
+        original.guids[i] = uuid.as_u128();
     }
 
     // 序列化
@@ -118,7 +120,21 @@ fn test_log_metadata_roundtrip() {
             deserialized.monotonic_serial_nums[i],
             original.monotonic_serial_nums[i]
         );
-        assert_eq!(deserialized.guids[i], original.guids[i]);
+        // 验证 GUID 往返
+        assert_eq!(
+            deserialized.guids[i], original.guids[i],
+            "GUID mismatch at index {}",
+            i
+        );
+
+        // 额外验证：转换回 UUID 字符串应该相同
+        let original_uuid = uuid::Uuid::from_u128(original.guids[i]);
+        let deserialized_uuid = uuid::Uuid::from_u128(deserialized.guids[i]);
+        assert_eq!(
+            original_uuid, deserialized_uuid,
+            "UUID mismatch at index {}: {} != {}",
+            i, original_uuid, deserialized_uuid
+        );
     }
 }
 
@@ -307,10 +323,11 @@ fn test_complete_checkpoint_roundtrip() {
         guids: [0u128; 96],
     };
 
-    // 填充会话数据
+    // 填充会话数据 - 使用实际的 UUID
     for i in 0..16 {
         log_meta.monotonic_serial_nums[i] = i as u64 * 10000;
-        log_meta.guids[i] = (i as u128) << 64 | ((i + 1) as u128);
+        let uuid = uuid::Uuid::new_v4();
+        log_meta.guids[i] = uuid.as_u128();
     }
 
     // 序列化索引元数据

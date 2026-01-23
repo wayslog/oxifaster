@@ -334,6 +334,8 @@ impl CLogMetadata {
                 break;
             }
             result.monotonic_serial_nums[i] = session.serial_num;
+            // 注意：这里仍然使用 as_u128() 存储到内部字段
+            // 序列化时会正确转换为 Windows GUID 格式
             result.guids[i] = session.guid.as_u128();
         }
 
@@ -413,8 +415,10 @@ impl CLogMetadata {
         }
 
         // guids (1536 字节 = 96 * 16)
+        // 使用 Uuid::to_bytes_le() 以匹配 Windows GUID 布局（混合字节序）
         for i in 0..96 {
-            bytes[offset..offset + 16].copy_from_slice(&self.guids[i].to_le_bytes());
+            let uuid = Uuid::from_u128(self.guids[i]);
+            bytes[offset..offset + 16].copy_from_slice(&uuid.to_bytes_le());
             offset += 16;
         }
 
@@ -507,8 +511,9 @@ impl CLogMetadata {
         }
 
         // guids
+        // 使用 Uuid::from_bytes_le() 以匹配 Windows GUID 布局（混合字节序）
         for i in 0..96 {
-            result.guids[i] = u128::from_le_bytes([
+            let guid_bytes: [u8; 16] = [
                 bytes[offset],
                 bytes[offset + 1],
                 bytes[offset + 2],
@@ -525,7 +530,9 @@ impl CLogMetadata {
                 bytes[offset + 13],
                 bytes[offset + 14],
                 bytes[offset + 15],
-            ]);
+            ];
+            let uuid = Uuid::from_bytes_le(guid_bytes);
+            result.guids[i] = uuid.as_u128();
             offset += 16;
         }
 
@@ -682,6 +689,10 @@ mod tests {
             guids: [0; 96],
         };
 
+        let mut meta = meta;
+        let uuid = Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap();
+        meta.guids[0] = uuid.as_u128();
+
         let bytes = meta.serialize();
 
         // 验证小端字节序
@@ -704,6 +715,14 @@ mod tests {
         assert_eq!(bytes[9], 0x07);
         assert_eq!(bytes[10], 0x06);
         assert_eq!(bytes[11], 0x05);
+
+        // GUIDs start after the header and monotonic serial numbers.
+        let guid_offset = 1 + 3 + 4 + 4 + 4 + 8 + 8 + (CLogMetadata::MAX_SESSIONS * 8);
+        let expected = [
+            0xa4, 0xa3, 0xa2, 0xa1, 0xb2, 0xb1, 0xc2, 0xc1, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6,
+            0xd7, 0xd8,
+        ];
+        assert_eq!(&bytes[guid_offset..guid_offset + 16], expected.as_slice());
     }
 
     #[test]
