@@ -52,6 +52,8 @@
 //! )?;
 //! ```
 
+/// C-style binary format serialization for FASTER C++ compatibility
+pub mod binary_format;
 mod locks;
 mod recovery;
 pub mod serialization;
