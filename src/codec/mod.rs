@@ -8,8 +8,12 @@ mod bincode;
 mod bytes;
 mod hash;
 
+/// Multi-algorithm hash support for FASTER C++ compatibility
+pub mod multi_hash;
+
 pub use bincode::Bincode;
 pub use hash::hash64;
+pub use multi_hash::{hash_faster_compat_u64, HashAlgorithm};
 
 use crate::status::Status;
 

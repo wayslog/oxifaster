@@ -186,6 +186,7 @@ pub mod device;
 pub mod epoch;
 #[cfg(feature = "f2")]
 pub mod f2;
+pub mod format;
 pub mod index;
 pub mod log;
 pub mod ops;

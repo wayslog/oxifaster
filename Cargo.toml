@@ -35,6 +35,7 @@ toml = "0.8"
 bincode = "1"
 bytemuck = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", optional = true, default-features = false }
+clap = { version = "4", features = ["derive"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6", optional = true }
@@ -50,6 +51,21 @@ rayon = "1.10"
 [[bench]]
 name = "ycsb"
 harness = false
+
+[[bin]]
+name = "format_inspector"
+path = "tools/format_inspector.rs"
+required-features = ["clap"]
+
+[[bin]]
+name = "verify_compatibility"
+path = "tools/verify_compatibility.rs"
+required-features = ["clap"]
+
+[[bin]]
+name = "interop_index_tool"
+path = "tools/interop_index_tool.rs"
+required-features = ["clap"]
 
 [profile.release]
 lto = true

@@ -21,6 +21,7 @@ criterion/
 
 # Temporary local analysis directories
 FASTER/
+data/
 
 .gemini/
 gha-creds-*.json
