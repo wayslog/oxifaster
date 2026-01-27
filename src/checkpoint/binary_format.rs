@@ -100,6 +100,9 @@ impl CIndexMetadata {
         bytes[offset..offset + 4].copy_from_slice(&self.version.to_le_bytes());
         offset += 4;
 
+        // padding (4 字节)
+        offset += 4;
+
         // table_size (8 字节)
         bytes[offset..offset + 8].copy_from_slice(&self.table_size.to_le_bytes());
         offset += 8;
@@ -148,6 +151,9 @@ impl CIndexMetadata {
             bytes[offset + 2],
             bytes[offset + 3],
         ]);
+        offset += 4;
+
+        // padding
         offset += 4;
 
         // table_size
@@ -665,14 +671,14 @@ mod tests {
         assert_eq!(bytes[3], 0x01);
 
         // table_size (8 字节)
-        assert_eq!(bytes[4], 0x08);
-        assert_eq!(bytes[5], 0x07);
-        assert_eq!(bytes[6], 0x06);
-        assert_eq!(bytes[7], 0x05);
-        assert_eq!(bytes[8], 0x04);
-        assert_eq!(bytes[9], 0x03);
-        assert_eq!(bytes[10], 0x02);
-        assert_eq!(bytes[11], 0x01);
+        assert_eq!(bytes[8], 0x08);
+        assert_eq!(bytes[9], 0x07);
+        assert_eq!(bytes[10], 0x06);
+        assert_eq!(bytes[11], 0x05);
+        assert_eq!(bytes[12], 0x04);
+        assert_eq!(bytes[13], 0x03);
+        assert_eq!(bytes[14], 0x02);
+        assert_eq!(bytes[15], 0x01);
     }
 
     #[test]

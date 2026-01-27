@@ -47,13 +47,13 @@ Bit 63:      Final bit
 - ✅ 字节序: 小端序
 
 **C++ 参考**:
-- 文件: `/Users/xuesong.zhao/repo/cpp/FASTER/cc/src/core/record.h:39-57`
+- 文件: `FASTER/cc/src/core/record.h:39-57`
 
 **oxifaster 实现**:
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/record.rs:28-44`
+- 文件: `src/record.rs:28-44`
 
 **测试文件**:
-- `/Users/xuesong.zhao/repo/rust/oxifaster/tests/compatibility/test_record_format.rs`
+- `tests/compatibility/test_record_format.rs`
 
 ### 2. Address 系统 (✅ 完全兼容)
 
@@ -70,10 +70,10 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - ✅ 地址空间: 256 PB (理论最大)
 
 **C++ 参考**:
-- 文件: `/Users/xuesong.zhao/repo/cpp/FASTER/cc/src/core/address.h`
+- 文件: `FASTER/cc/src/core/address.h`
 
 **oxifaster 实现**:
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/address.rs`
+- 文件: `src/address.rs`
 
 ### 3. Hash Bucket 结构 (✅ 完全兼容)
 
@@ -96,12 +96,13 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - ✅ 条目数量: Hot Log 7+1, Cold Log 8
 - ✅ Tag 系统: 14位标签
 - ✅ 布局与偏移测试覆盖 (overflow 指针位于 56 字节偏移)
+- ✅ C++ `ht.dat` / `ofb.dat` 真实数据抽样验证通过
 
 **C++ 参考**:
-- 文件: `/Users/xuesong.zhao/repo/cpp/FASTER/cc/src/index/hash_bucket.h`
+- 文件: `FASTER/cc/src/index/hash_bucket.h`
 
 **oxifaster 实现**:
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/index/hash_bucket.rs`
+- 文件: `src/index/hash_bucket.rs`
 
 **测试文件**:
 - `tests/compatibility/test_hash_index.rs`
@@ -124,6 +125,7 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
   ```c
   struct IndexMetadata {
       uint32_t version;                    // 4 字节
+      uint32_t _padding0;                  // 4 字节对齐填充
       uint64_t table_size;                 // 8 字节
       uint64_t num_ht_bytes;              // 8 字节
       uint64_t num_ofb_bytes;             // 8 字节
@@ -163,6 +165,7 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - ✅ 字段布局与字节序验证正确
 - ✅ GUID 字节序与 Windows GUID 一致
 - ✅ 支持往返转换
+- ✅ 使用 C++ demo 生成 info.dat/ht.dat/ofb.dat 实测通过
 
 **实现文件**:
 - `src/checkpoint/binary_format.rs`: C 风格序列化实现
@@ -173,6 +176,7 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - `tests/compatibility/test_checkpoint_format.rs`
 - `tests/compatibility/test_roundtrip.rs`
 - `tests/guid_byteorder_test.rs`
+- `tools/faster_cpp_demo.cpp`
 
 ### 6. Hash 函数 (✅ 已实现兼容)
 
@@ -181,12 +185,12 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
   - xxHash3 (默认，通过 `hash-xxh3` 特性)
   - xxHash64 (可选，通过 `hash-xxh64` 特性)
   - FasterCompat (FASTER兼容哈希，总是可用)
-- 实现文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/codec/multi_hash.rs`
+- 实现文件: `src/codec/multi_hash.rs`
 
 **C++ FASTER**:
 - **FasterHash 实现**: 在 `utility.h` 中定义
 - **算法**: 乘法哈希，魔数 40343，右旋转 6 位
-- 参考文件: `/Users/xuesong.zhao/repo/cpp/FASTER/cc/src/core/utility.h`
+- 参考文件: `FASTER/cc/src/core/utility.h`
 
 **验证结果**:
 - ✅ FasterCompat 哈希与 C++ 实现完全一致
@@ -204,9 +208,9 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - 通用格式头: 24 字节 (magic/version/flags/checksum)
 - 格式魔数: `OXFLOG1\0` / `FASTER01` / `OXFCKPT1` / `OXFIDX1`
 - 自动检测: `FormatDetector` 支持格式头、魔数、JSON 与 C 二进制识别
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/format/header.rs`
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/format/detector.rs`
-- Log 元数据仍使用 `OXFLOG1\0` 魔数: `/Users/xuesong.zhao/repo/rust/oxifaster/src/log/format.rs:54-55`
+- 文件: `src/format/header.rs`
+- 文件: `src/format/detector.rs`
+- Log 元数据仍使用 `OXFLOG1\0` 魔数: `src/log/format.rs:54-55`
 
 **C++ FASTER**:
 - Checkpoint 文件本身无统一魔数
@@ -218,7 +222,7 @@ Bits 25-47:  Page number (23 位, ~8 million 页)
 - 4 字节头部 (长度)
 - 可选 8 字节元数据
 - 可变长度数据
-- 文件: `/Users/xuesong.zhao/repo/rust/oxifaster/src/varlen/span_byte.rs`
+- 文件: `src/varlen/span_byte.rs`
 
 **验证结果**:
 - ✅ 头部位布局与 C# FASTER 一致
@@ -317,10 +321,59 @@ cargo run --bin verify_compatibility --features clap -- \
   --index-file index.dat \
   --log-file log.dat \
   --verbose
+
+# C++ checkpoint 目录验证
+cargo run --bin verify_compatibility --features clap -- \
+  --cpp-index-dir /path/to/index-checkpoints/<token> \
+  --log-metadata /path/to/cpr-checkpoints/<token>/info.dat \
+  --verbose
 ```
 
 **说明**:
-- 目前未提供自动转换/重建索引工具
+- C++ 索引 checkpoint 文件为 `ht.dat` + `ofb.dat`，oxifaster 使用 `index.dat`
+- 互操作流程可直接使用下方 demo 工具与脚本
+
+### 索引互操作流程 (✅ 已实测)
+
+**工具**:
+- C++: `tools/faster_cpp_demo.cpp`
+- Rust: `tools/interop_index_tool.rs`
+- 脚本: `tools/run_interop_flows.sh`
+
+**一键脚本**:
+```bash
+# 默认尝试 ../../cpp/FASTER 或 ../cpp/FASTER，可通过 FASTER_CPP_ROOT 覆盖
+tools/run_interop_flows.sh
+```
+
+**流程 A: C++ 生成 -> Rust 操作 -> C++ 二次打开**:
+```bash
+clang++ -std=c++17 -I/path/to/FASTER/cc/src \
+  tools/faster_cpp_demo.cpp -o data/faster_cpp_demo
+
+data/faster_cpp_demo generate --out data/cpp_gen
+cargo run --bin interop_index_tool --features clap -- \
+  verify --dir data/cpp_gen
+cargo run --bin interop_index_tool --features clap -- \
+  update --dir data/cpp_gen --out data/cpp_updated --entries 100=4096,200=8192
+data/faster_cpp_demo verify --dir data/cpp_updated
+```
+
+**流程 B: Rust 生成 -> C++ 操作 -> Rust 二次打开**:
+```bash
+cargo run --bin interop_index_tool --features clap -- \
+  generate --out data/rust_gen
+data/faster_cpp_demo verify --dir data/rust_gen
+data/faster_cpp_demo update --dir data/rust_gen --out data/rust_updated --entries 100=4096,200=8192
+cargo run --bin interop_index_tool --features clap -- \
+  verify --dir data/rust_updated
+```
+
+**说明**:
+- `data/` 目录用于互操作验证，已加入 `.gitignore`
+- demo 会写入 `manifest.txt` 与 `token.txt` 作为查找验证依据
+- `100=4096,200=8192` 为示例更新项，确保与默认 manifest 不冲突
+```
 
 ## 性能影响
 
@@ -346,6 +399,7 @@ cargo run --bin verify_compatibility --features clap -- \
 - ✅ SpanByte 兼容性验证
 - ✅ F2 枚举兼容性验证
 - ✅ 往返测试与兼容性验证工具
+- ✅ C++/Rust 索引 checkpoint 双向互操作流程
 
 ### 待完成
 - 暂无
@@ -354,7 +408,8 @@ cargo run --bin verify_compatibility --features clap -- \
 
 ### 功能性
 - ✅ Checkpoint 元数据互操作
-- ⚠️ 索引互操作 (布局已验证，仍待 C++ 数据实测)
+- ✅ 索引互操作 (ht.dat/ofb.dat 双向生成、更新、查找验证)
+- ⚠️ Log 互操作 (SpanByte 已验证，完整 log 文件待与 C++ 数据对照)
 - ⚠️ Log 互操作 (SpanByte 已验证，完整 log 文件待与 C++ 数据对照)
 
 ### 正确性
@@ -423,6 +478,7 @@ cargo run --bin verify_compatibility --features clap -- \
 - ✅ F2 枚举兼容性验证
 - ✅ 新增往返测试与兼容性验证工具
 - ✅ Hash Bucket 布局与偏移测试覆盖
+- ✅ C++ demo 数据实测与对齐填充修正
 
 ---
 

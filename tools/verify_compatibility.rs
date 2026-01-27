@@ -9,7 +9,7 @@ use oxifaster::index::HashBucket;
 use oxifaster::varlen::SpanByteView;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -32,6 +32,10 @@ struct Args {
     /// Index 文件 (index.dat)
     #[clap(long)]
     index_file: Option<PathBuf>,
+
+    /// C++ index checkpoint 目录 (包含 info.dat/ht.dat/ofb.dat)
+    #[clap(long)]
+    cpp_index_dir: Option<PathBuf>,
 
     /// 详细输出
     #[clap(short, long)]
@@ -171,6 +175,25 @@ fn main() -> io::Result<()> {
                 has_errors = true;
                 results.push(VerificationResult::error(
                     "IndexFile",
+                    &format!("读取失败: {}", e),
+                ));
+            }
+        }
+    }
+
+    // 验证 C++ Index checkpoint 目录
+    if let Some(path) = &args.cpp_index_dir {
+        match verify_cpp_index_dir(path, args.verbose) {
+            Ok(result) => {
+                if result.status == Status::Error {
+                    has_errors = true;
+                }
+                results.push(result);
+            }
+            Err(e) => {
+                has_errors = true;
+                results.push(VerificationResult::error(
+                    "CppIndex",
                     &format!("读取失败: {}", e),
                 ));
             }
@@ -540,6 +563,121 @@ fn verify_index_file(path: &PathBuf, verbose: bool) -> io::Result<VerificationRe
     Ok(VerificationResult::ok(
         "IndexFile",
         "Index 文件结构检查通过",
+    ))
+}
+
+fn verify_cpp_index_dir(path: &Path, verbose: bool) -> io::Result<VerificationResult> {
+    println!("验证 C++ Index 目录: {}", path.display());
+
+    let info_path = path.join("info.dat");
+    let ht_path = path.join("ht.dat");
+    let ofb_path = path.join("ofb.dat");
+
+    let info_bytes = std::fs::read(&info_path)?;
+    let metadata = CIndexMetadata::deserialize(&info_bytes)?;
+
+    let bucket_bytes = (HashBucket::NUM_ENTRIES as u64 + 1) * 8;
+    let expected_ht = metadata.table_size * bucket_bytes;
+    let expected_ofb = metadata.ofb_count * bucket_bytes;
+
+    let ht_len = std::fs::metadata(&ht_path)?.len();
+    let ofb_len = if ofb_path.exists() {
+        std::fs::metadata(&ofb_path)?.len()
+    } else {
+        0
+    };
+
+    if verbose {
+        println!("  table_size: {}", metadata.table_size);
+        println!("  ofb_count: {}", metadata.ofb_count);
+        println!("  bucket_bytes: {}", bucket_bytes);
+        println!("  ht.dat: {} (expected {})", ht_len, expected_ht);
+        println!("  ofb.dat: {} (expected {})", ofb_len, expected_ofb);
+    }
+
+    if ht_len != expected_ht {
+        return Ok(VerificationResult::error(
+            "CppIndex",
+            &format!(
+                "ht.dat 长度不匹配: expected {}, got {}",
+                expected_ht, ht_len
+            ),
+        ));
+    }
+
+    if expected_ofb == 0 {
+        if ofb_len != 0 {
+            return Ok(VerificationResult::warning(
+                "CppIndex",
+                "ofb_count 为 0 但 ofb.dat 非空",
+            ));
+        }
+    } else if ofb_len != expected_ofb {
+        return Ok(VerificationResult::error(
+            "CppIndex",
+            &format!(
+                "ofb.dat 长度不匹配: expected {}, got {}",
+                expected_ofb, ofb_len
+            ),
+        ));
+    }
+
+    let mut ht_reader = BufReader::new(File::open(&ht_path)?);
+    let sample_count = metadata.table_size.min(10) as usize;
+    let mut buf = vec![0u8; bucket_bytes as usize];
+    let mut non_zero_entries = 0usize;
+    let mut total_entries = 0usize;
+
+    for _ in 0..sample_count {
+        ht_reader.read_exact(&mut buf)?;
+        for i in 0..(HashBucket::NUM_ENTRIES + 1) {
+            let start = i * 8;
+            let control =
+                u64::from_le_bytes(buf[start..start + 8].try_into().expect("slice length is 8"));
+            total_entries += 1;
+            if control != 0 {
+                non_zero_entries += 1;
+            }
+        }
+    }
+
+    if verbose {
+        println!(
+            "  ht.dat sample buckets: {}, non-zero entries: {} / {}",
+            sample_count, non_zero_entries, total_entries
+        );
+    }
+
+    if metadata.ofb_count > 0 && ofb_len > 0 {
+        let mut ofb_reader = BufReader::new(File::open(&ofb_path)?);
+        let ofb_sample = metadata.ofb_count.min(5) as usize;
+        let mut ofb_non_zero = 0usize;
+        let mut ofb_total = 0usize;
+        for _ in 0..ofb_sample {
+            ofb_reader.read_exact(&mut buf)?;
+            for i in 0..(HashBucket::NUM_ENTRIES + 1) {
+                let start = i * 8;
+                let control = u64::from_le_bytes(
+                    buf[start..start + 8].try_into().expect("slice length is 8"),
+                );
+                ofb_total += 1;
+                if control != 0 {
+                    ofb_non_zero += 1;
+                }
+            }
+        }
+
+        if verbose {
+            println!(
+                "  ofb.dat sample buckets: {}, non-zero entries: {} / {}",
+                ofb_sample, ofb_non_zero, ofb_total
+            );
+        }
+    }
+
+    Ok(VerificationResult::ok(
+        "CppIndex",
+        "C++ index 文件结构检查通过",
     ))
 }
 

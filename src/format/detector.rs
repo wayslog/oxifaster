@@ -168,9 +168,9 @@ impl FormatDetector {
             return false;
         }
 
-        // 读取 table_size 字段（接下来 8 字节）
+        // 读取 table_size 字段（跳过 4 字节对齐填充）
         let table_size = u64::from_le_bytes([
-            buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
+            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
         ]);
 
         // table_size 应该是 2 的幂
@@ -248,8 +248,9 @@ mod tests {
         let mut buf = vec![0u8; 64];
         // version = 1
         buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        // padding 4 bytes
         // table_size = 1024 (2^10, 2的幂)
-        buf[4..12].copy_from_slice(&1024u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&1024u64.to_le_bytes());
 
         let result = FormatDetector::detect_from_bytes(&buf).unwrap();
 
@@ -287,13 +288,13 @@ mod tests {
         // 版本号为 0
         let mut buf = vec![0u8; 64];
         buf[0..4].copy_from_slice(&0u32.to_le_bytes());
-        buf[4..12].copy_from_slice(&1024u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&1024u64.to_le_bytes());
         assert!(!FormatDetector::is_c_binary_checkpoint(&buf));
 
         // table_size 不是 2 的幂
         let mut buf = vec![0u8; 64];
         buf[0..4].copy_from_slice(&1u32.to_le_bytes());
-        buf[4..12].copy_from_slice(&1000u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&1000u64.to_le_bytes());
         assert!(!FormatDetector::is_c_binary_checkpoint(&buf));
 
         // 缓冲区太小

@@ -70,12 +70,13 @@ fn test_detect_c_binary_checkpoint() {
     let mut buf = vec![0u8; 64];
     // version = 1
     buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+    // padding 4 bytes
     // table_size = 1024 (2^10)
-    buf[4..12].copy_from_slice(&1024u64.to_le_bytes());
+    buf[8..16].copy_from_slice(&1024u64.to_le_bytes());
     // num_ht_bytes
-    buf[12..20].copy_from_slice(&(1024u64 * 64).to_le_bytes());
+    buf[16..24].copy_from_slice(&(1024u64 * 64).to_le_bytes());
     // num_ofb_bytes
-    buf[20..28].copy_from_slice(&0u64.to_le_bytes());
+    buf[24..32].copy_from_slice(&0u64.to_le_bytes());
 
     let result = FormatDetector::detect_from_bytes(&buf).unwrap();
 

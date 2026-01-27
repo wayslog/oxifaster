@@ -36,23 +36,23 @@ fn test_c_index_metadata_layout() {
     // version (offset 0, 4 bytes)
     assert_eq!(&bytes[0..4], &0x01020304u32.to_le_bytes());
 
-    // table_size (offset 4, 8 bytes)
-    assert_eq!(&bytes[4..12], &0x1122334455667788u64.to_le_bytes());
+    // table_size (offset 8, 8 bytes)
+    assert_eq!(&bytes[8..16], &0x1122334455667788u64.to_le_bytes());
 
-    // num_ht_bytes (offset 12, 8 bytes)
-    assert_eq!(&bytes[12..20], &0xAABBCCDDEEFF0011u64.to_le_bytes());
+    // num_ht_bytes (offset 16, 8 bytes)
+    assert_eq!(&bytes[16..24], &0xAABBCCDDEEFF0011u64.to_le_bytes());
 
-    // num_ofb_bytes (offset 20, 8 bytes)
-    assert_eq!(&bytes[20..28], &0x2233445566778899u64.to_le_bytes());
+    // num_ofb_bytes (offset 24, 8 bytes)
+    assert_eq!(&bytes[24..32], &0x2233445566778899u64.to_le_bytes());
 
-    // ofb_count (offset 28, 8 bytes)
-    assert_eq!(&bytes[28..36], &0x0011223344556677u64.to_le_bytes());
+    // ofb_count (offset 32, 8 bytes)
+    assert_eq!(&bytes[32..40], &0x0011223344556677u64.to_le_bytes());
 
-    // log_begin_address (offset 36, 8 bytes)
-    assert_eq!(&bytes[36..44], &0xFFEEDDCCBBAA9988u64.to_le_bytes());
+    // log_begin_address (offset 40, 8 bytes)
+    assert_eq!(&bytes[40..48], &0xFFEEDDCCBBAA9988u64.to_le_bytes());
 
-    // checkpoint_start_address (offset 44, 8 bytes)
-    assert_eq!(&bytes[44..52], &0x1122334455667788u64.to_le_bytes());
+    // checkpoint_start_address (offset 48, 8 bytes)
+    assert_eq!(&bytes[48..56], &0x1122334455667788u64.to_le_bytes());
 }
 
 #[test]
@@ -308,6 +308,9 @@ fn test_binary_compatibility_with_cpp() {
 
     // version = 1
     cpp_index_bytes[offset..offset + 4].copy_from_slice(&1u32.to_le_bytes());
+    offset += 4;
+
+    // padding (4 bytes)
     offset += 4;
 
     // table_size = 1024

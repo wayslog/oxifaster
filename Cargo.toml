@@ -62,6 +62,11 @@ name = "verify_compatibility"
 path = "tools/verify_compatibility.rs"
 required-features = ["clap"]
 
+[[bin]]
+name = "interop_index_tool"
+path = "tools/interop_index_tool.rs"
+required-features = ["clap"]
+
 [profile.release]
 lto = true
 codegen-units = 1

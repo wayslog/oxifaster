@@ -138,6 +138,7 @@ impl FileInspector {
         // 尝试解析 IndexMetadata (56 字节)
         println!("--- IndexMetadata (56 字节) ---");
         let version = self.read_u32_le()?;
+        let _padding = self.read_bytes(4)?;
         let table_size = self.read_u64_le()?;
         let num_ht_bytes = self.read_u64_le()?;
         let num_ofb_bytes = self.read_u64_le()?;
