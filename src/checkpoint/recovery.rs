@@ -56,6 +56,53 @@ impl RecoveryStatus {
     }
 }
 
+/// Fine-grained recovery status for individual pages.
+/// Based on C++ FASTER's five-phase page recovery tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum PageRecoveryStatus {
+    /// Page recovery not started
+    #[default]
+    NotStarted = 0,
+    /// Read request issued for this page
+    IssuedRead = 1,
+    /// Read completed, data available
+    ReadDone = 2,
+    /// Flush request issued for recovered data
+    IssuedFlush = 3,
+    /// Flush completed, page is durable
+    FlushDone = 4,
+}
+
+impl PageRecoveryStatus {
+    /// Get the status as a string
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PageRecoveryStatus::NotStarted => "NotStarted",
+            PageRecoveryStatus::IssuedRead => "IssuedRead",
+            PageRecoveryStatus::ReadDone => "ReadDone",
+            PageRecoveryStatus::IssuedFlush => "IssuedFlush",
+            PageRecoveryStatus::FlushDone => "FlushDone",
+        }
+    }
+
+    /// Check if the page has been fully recovered
+    pub const fn is_done(&self) -> bool {
+        matches!(self, PageRecoveryStatus::FlushDone)
+    }
+
+    /// Check if a read is in progress or completed
+    pub const fn read_started(&self) -> bool {
+        !matches!(self, PageRecoveryStatus::NotStarted)
+    }
+}
+
+impl std::fmt::Display for PageRecoveryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Information about a checkpoint for recovery
 #[derive(Debug, Clone)]
 pub struct CheckpointInfo {
@@ -643,5 +690,48 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let result = validate_checkpoint(temp_dir.path());
         assert!(result.is_err());
+    }
+
+    // ============ PageRecoveryStatus Tests ============
+
+    #[test]
+    fn test_page_recovery_status_default() {
+        assert_eq!(
+            PageRecoveryStatus::default(),
+            PageRecoveryStatus::NotStarted
+        );
+    }
+
+    #[test]
+    fn test_page_recovery_status_as_str() {
+        assert_eq!(PageRecoveryStatus::NotStarted.as_str(), "NotStarted");
+        assert_eq!(PageRecoveryStatus::IssuedRead.as_str(), "IssuedRead");
+        assert_eq!(PageRecoveryStatus::ReadDone.as_str(), "ReadDone");
+        assert_eq!(PageRecoveryStatus::IssuedFlush.as_str(), "IssuedFlush");
+        assert_eq!(PageRecoveryStatus::FlushDone.as_str(), "FlushDone");
+    }
+
+    #[test]
+    fn test_page_recovery_status_is_done() {
+        assert!(!PageRecoveryStatus::NotStarted.is_done());
+        assert!(!PageRecoveryStatus::IssuedRead.is_done());
+        assert!(!PageRecoveryStatus::ReadDone.is_done());
+        assert!(!PageRecoveryStatus::IssuedFlush.is_done());
+        assert!(PageRecoveryStatus::FlushDone.is_done());
+    }
+
+    #[test]
+    fn test_page_recovery_status_read_started() {
+        assert!(!PageRecoveryStatus::NotStarted.read_started());
+        assert!(PageRecoveryStatus::IssuedRead.read_started());
+        assert!(PageRecoveryStatus::ReadDone.read_started());
+        assert!(PageRecoveryStatus::IssuedFlush.read_started());
+        assert!(PageRecoveryStatus::FlushDone.read_started());
+    }
+
+    #[test]
+    fn test_page_recovery_status_display() {
+        assert_eq!(format!("{}", PageRecoveryStatus::NotStarted), "NotStarted");
+        assert_eq!(format!("{}", PageRecoveryStatus::FlushDone), "FlushDone");
     }
 }

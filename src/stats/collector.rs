@@ -145,6 +145,16 @@ impl StatsCollector {
             upserts: self.store_stats.operations.upserts.load(Ordering::Relaxed),
             rmws: self.store_stats.operations.rmws.load(Ordering::Relaxed),
             deletes: self.store_stats.operations.deletes.load(Ordering::Relaxed),
+            conditional_inserts: self
+                .store_stats
+                .operations
+                .conditional_inserts
+                .load(Ordering::Relaxed),
+            conditional_insert_exists: self
+                .store_stats
+                .operations
+                .conditional_insert_exists
+                .load(Ordering::Relaxed),
             pending: self.store_stats.operations.pending.load(Ordering::Relaxed),
             hit_rate: self.store_stats.operations.hit_rate(),
             throughput: self.throughput(),
@@ -266,6 +276,10 @@ pub struct StatsSnapshot {
     pub rmws: u64,
     /// Delete operations
     pub deletes: u64,
+    /// Conditional insert operations
+    pub conditional_inserts: u64,
+    /// Conditional insert exists (key already existed)
+    pub conditional_insert_exists: u64,
     /// Pending operations
     pub pending: u64,
     /// Hit rate

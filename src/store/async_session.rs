@@ -255,6 +255,15 @@ where
             .await
     }
 
+    /// Async conditional insert operation
+    ///
+    /// Inserts the key-value pair only if the key does not already exist.
+    /// Returns `Status::Ok` if inserted, `Status::Aborted` if key already exists.
+    pub async fn conditional_insert_async(&mut self, key: K, value: V) -> Status {
+        self.retry_status_op(|session| session.conditional_insert(key.clone(), value.clone()))
+            .await
+    }
+
     /// Complete all pending operations asynchronously
     ///
     /// # Returns
@@ -294,6 +303,11 @@ where
         F: FnMut(&mut V) -> bool,
     {
         self.inner.rmw(key, modifier)
+    }
+
+    /// Synchronous conditional insert (delegates to inner session)
+    pub fn conditional_insert(&mut self, key: K, value: V) -> Status {
+        self.inner.conditional_insert(key, value)
     }
 
     /// Complete pending operations synchronously

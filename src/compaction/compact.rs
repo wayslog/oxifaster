@@ -68,6 +68,52 @@ impl CompactionConfig {
     }
 }
 
+/// Configuration for compacting records to another store.
+#[derive(Debug, Clone)]
+pub struct CompactToOtherStoreConfig {
+    /// Whether to shift the begin address after compaction
+    pub shift_begin_address: bool,
+    /// Number of threads for concurrent compaction
+    pub num_threads: usize,
+    /// Whether to checkpoint after compaction
+    pub checkpoint_after: bool,
+}
+
+impl Default for CompactToOtherStoreConfig {
+    fn default() -> Self {
+        Self {
+            shift_begin_address: true,
+            num_threads: 1,
+            checkpoint_after: false,
+        }
+    }
+}
+
+impl CompactToOtherStoreConfig {
+    /// Create a new configuration with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether to shift the begin address after compaction
+    pub fn with_shift_begin_address(mut self, shift: bool) -> Self {
+        self.shift_begin_address = shift;
+        self
+    }
+
+    /// Set the number of threads for concurrent compaction
+    pub fn with_num_threads(mut self, num: usize) -> Self {
+        self.num_threads = num.max(1);
+        self
+    }
+
+    /// Set whether to checkpoint after compaction
+    pub fn with_checkpoint_after(mut self, checkpoint: bool) -> Self {
+        self.checkpoint_after = checkpoint;
+        self
+    }
+}
+
 /// Result of a compaction operation
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
@@ -393,5 +439,69 @@ mod tests {
 
         // Non-tombstone should still be compacted
         assert!(compactor.should_compact_record(addr, addr, false));
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_default() {
+        let config = CompactToOtherStoreConfig::default();
+        assert!(config.shift_begin_address);
+        assert_eq!(config.num_threads, 1);
+        assert!(!config.checkpoint_after);
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_new() {
+        let config = CompactToOtherStoreConfig::new();
+        assert!(config.shift_begin_address);
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_builder() {
+        let config = CompactToOtherStoreConfig::new()
+            .with_shift_begin_address(false)
+            .with_num_threads(4)
+            .with_checkpoint_after(true);
+        assert!(!config.shift_begin_address);
+        assert_eq!(config.num_threads, 4);
+        assert!(config.checkpoint_after);
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_num_threads_min() {
+        let config = CompactToOtherStoreConfig::new().with_num_threads(0);
+        assert_eq!(config.num_threads, 1); // Minimum 1
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_clone() {
+        let config = CompactToOtherStoreConfig::new()
+            .with_shift_begin_address(false)
+            .with_num_threads(2);
+        let cloned = config.clone();
+        assert!(!cloned.shift_begin_address);
+        assert_eq!(cloned.num_threads, 2);
+    }
+
+    #[test]
+    fn test_compact_to_other_store_config_debug() {
+        let config = CompactToOtherStoreConfig::new();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("CompactToOtherStoreConfig"));
+    }
+
+    #[test]
+    fn test_compaction_result_success() {
+        let addr = Address::new(5, 0);
+        let stats = CompactionStats::default();
+        let result = CompactionResult::success(addr, stats);
+        assert_eq!(result.status, Status::Ok);
+        assert_eq!(result.new_begin_address, addr);
+    }
+
+    #[test]
+    fn test_compaction_result_failure() {
+        let result = CompactionResult::failure(Status::Aborted);
+        assert_eq!(result.status, Status::Aborted);
+        assert!(result.new_begin_address.is_invalid());
     }
 }

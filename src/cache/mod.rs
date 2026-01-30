@@ -57,7 +57,7 @@ mod read_cache;
 mod record_info;
 mod stats;
 
-pub use config::ReadCacheConfig;
+pub use config::{EvictCallback, ReadCacheConfig};
 pub use read_cache::ReadCache;
 pub use record_info::ReadCacheRecordInfo;
 pub use stats::ReadCacheStats;

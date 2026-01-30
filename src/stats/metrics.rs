@@ -20,6 +20,10 @@ pub struct OperationStats {
     pub rmws: AtomicU64,
     /// Delete operation count
     pub deletes: AtomicU64,
+    /// Conditional insert operation count
+    pub conditional_inserts: AtomicU64,
+    /// Conditional insert exists count (key already existed)
+    pub conditional_insert_exists: AtomicU64,
     /// Pending operations
     pub pending: AtomicU64,
     /// Retry count
@@ -71,6 +75,15 @@ impl OperationStats {
         self.retries.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a conditional insert operation
+    pub fn record_conditional_insert(&self, inserted: bool) {
+        self.conditional_inserts.fetch_add(1, Ordering::Relaxed);
+        if !inserted {
+            self.conditional_insert_exists
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Record operation latency
     pub fn record_latency(&self, duration: Duration) {
         self.total_latency_ns
@@ -84,6 +97,7 @@ impl OperationStats {
             + self.upserts.load(Ordering::Relaxed)
             + self.rmws.load(Ordering::Relaxed)
             + self.deletes.load(Ordering::Relaxed)
+            + self.conditional_inserts.load(Ordering::Relaxed)
     }
 
     /// Get average latency
@@ -113,6 +127,8 @@ impl OperationStats {
         self.upserts.store(0, Ordering::Relaxed);
         self.rmws.store(0, Ordering::Relaxed);
         self.deletes.store(0, Ordering::Relaxed);
+        self.conditional_inserts.store(0, Ordering::Relaxed);
+        self.conditional_insert_exists.store(0, Ordering::Relaxed);
         self.pending.store(0, Ordering::Relaxed);
         self.retries.store(0, Ordering::Relaxed);
         self.total_latency_ns.store(0, Ordering::Relaxed);

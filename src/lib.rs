@@ -176,6 +176,7 @@
 
 pub mod address;
 pub mod allocator;
+pub mod buffer_pool;
 pub mod cache;
 pub mod checkpoint;
 pub mod codec;
@@ -187,6 +188,7 @@ pub mod epoch;
 #[cfg(feature = "f2")]
 pub mod f2;
 pub mod format;
+pub mod gc;
 pub mod index;
 pub mod log;
 pub mod ops;
@@ -232,10 +234,128 @@ pub mod size {
     pub const GIB: u64 = 1024 * MIB;
 }
 
+/// Thread pool configuration for background operations
+#[derive(Debug, Clone)]
+pub struct ThreadPoolConfig {
+    /// Number of worker threads (0 = use number of CPUs)
+    pub num_threads: usize,
+    /// Thread name prefix
+    pub thread_name_prefix: String,
+}
+
+impl Default for ThreadPoolConfig {
+    fn default() -> Self {
+        Self {
+            num_threads: 0,
+            thread_name_prefix: "oxifaster-worker".to_string(),
+        }
+    }
+}
+
+impl ThreadPoolConfig {
+    /// Create a new thread pool configuration with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of worker threads
+    ///
+    /// If set to 0, the number of CPUs will be used.
+    pub fn with_num_threads(mut self, num: usize) -> Self {
+        self.num_threads = num;
+        self
+    }
+
+    /// Set the thread name prefix
+    pub fn with_thread_name_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.thread_name_prefix = prefix.into();
+        self
+    }
+
+    /// Get the effective number of threads
+    ///
+    /// Returns `num_threads` if non-zero, otherwise the number of CPUs.
+    pub fn effective_threads(&self) -> usize {
+        if self.num_threads == 0 {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+        } else {
+            self.num_threads
+        }
+    }
+}
+
 /// Prelude module for common imports
 pub mod prelude {
     pub use crate::address::{Address, AtomicAddress};
     pub use crate::record::RecordInfo;
     pub use crate::status::{OperationStatus, Status};
     pub use crate::store::FasterKv;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_size_constants() {
+        assert_eq!(size::KIB, 1024);
+        assert_eq!(size::MIB, 1024 * 1024);
+        assert_eq!(size::GIB, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_thread_pool_config_default() {
+        let config = ThreadPoolConfig::default();
+        assert_eq!(config.num_threads, 0);
+        assert_eq!(config.thread_name_prefix, "oxifaster-worker");
+    }
+
+    #[test]
+    fn test_thread_pool_config_new() {
+        let config = ThreadPoolConfig::new();
+        assert_eq!(config.num_threads, 0);
+    }
+
+    #[test]
+    fn test_thread_pool_config_with_num_threads() {
+        let config = ThreadPoolConfig::new().with_num_threads(4);
+        assert_eq!(config.num_threads, 4);
+    }
+
+    #[test]
+    fn test_thread_pool_config_with_thread_name_prefix() {
+        let config = ThreadPoolConfig::new().with_thread_name_prefix("my-worker");
+        assert_eq!(config.thread_name_prefix, "my-worker");
+    }
+
+    #[test]
+    fn test_thread_pool_config_effective_threads() {
+        // Test with explicit thread count
+        let config = ThreadPoolConfig::new().with_num_threads(8);
+        assert_eq!(config.effective_threads(), 8);
+
+        // Test with default (0 = use CPU count)
+        let config = ThreadPoolConfig::new();
+        assert!(config.effective_threads() > 0);
+    }
+
+    #[test]
+    fn test_thread_pool_config_clone() {
+        let config = ThreadPoolConfig::new()
+            .with_num_threads(4)
+            .with_thread_name_prefix("test");
+        let cloned = config.clone();
+        assert_eq!(cloned.num_threads, 4);
+        assert_eq!(cloned.thread_name_prefix, "test");
+    }
+
+    #[test]
+    fn test_thread_pool_config_debug() {
+        let config = ThreadPoolConfig::new();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("ThreadPoolConfig"));
+        assert!(debug_str.contains("num_threads"));
+    }
 }

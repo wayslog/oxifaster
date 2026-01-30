@@ -405,3 +405,87 @@ fn test_log_page_status_clone_copy_debug() {
     let debug_str = format!("{status:?}");
     assert!(debug_str.contains("Ready"));
 }
+
+// ============ ConcurrentLogScanIterator Tests ============
+
+#[test]
+fn test_concurrent_log_scan_iterator_new() {
+    let range = ScanRange::new(Address::new(0, 0), Address::new(5, 0));
+    let iter = ConcurrentLogScanIterator::new(range, 4096);
+
+    assert_eq!(iter.range().begin, range.begin);
+    assert_eq!(iter.range().end, range.end);
+    assert_eq!(iter.page_size(), 4096);
+    assert_eq!(iter.total_pages(), 6); // Pages 0, 1, 2, 3, 4, 5
+    assert!(!iter.is_complete());
+}
+
+#[test]
+fn test_concurrent_log_scan_iterator_empty_range() {
+    let range = ScanRange::new(Address::new(5, 0), Address::new(5, 0));
+    let iter = ConcurrentLogScanIterator::new(range, 4096);
+
+    assert!(range.is_empty());
+    assert_eq!(iter.total_pages(), 0);
+}
+
+#[test]
+fn test_concurrent_log_scan_iterator_get_next_page() {
+    let range = ScanRange::new(Address::new(0, 100), Address::new(2, 200));
+    let iter = ConcurrentLogScanIterator::new(range, 4096);
+
+    // First page
+    let (idx, begin, end) = iter.get_next_page().unwrap();
+    assert_eq!(idx, 0);
+    assert_eq!(begin, Address::new(0, 100)); // Start at range.begin
+    assert_eq!(end, Address::new(1, 0));
+
+    // Second page
+    let (idx, begin, end) = iter.get_next_page().unwrap();
+    assert_eq!(idx, 1);
+    assert_eq!(begin, Address::new(1, 0));
+    assert_eq!(end, Address::new(2, 0));
+
+    // Third page (last)
+    let (idx, begin, end) = iter.get_next_page().unwrap();
+    assert_eq!(idx, 2);
+    assert_eq!(begin, Address::new(2, 0));
+    assert_eq!(end, Address::new(2, 200)); // End at range.end
+
+    // No more pages
+    assert!(iter.get_next_page().is_none());
+    assert!(iter.is_complete());
+}
+
+#[test]
+fn test_concurrent_log_scan_iterator_progress() {
+    let range = ScanRange::new(Address::new(0, 0), Address::new(4, 0));
+    let iter = ConcurrentLogScanIterator::new(range, 4096);
+
+    let (distributed, total) = iter.progress();
+    assert_eq!(distributed, 0);
+    assert_eq!(total, 5); // Pages 0, 1, 2, 3, 4
+
+    // Claim some pages
+    iter.get_next_page();
+    iter.get_next_page();
+
+    let (distributed, total) = iter.progress();
+    assert_eq!(distributed, 2);
+    assert_eq!(total, 5);
+}
+
+#[test]
+fn test_concurrent_log_scan_iterator_single_page() {
+    let range = ScanRange::new(Address::new(3, 100), Address::new(3, 500));
+    let iter = ConcurrentLogScanIterator::new(range, 4096);
+
+    assert_eq!(iter.total_pages(), 1);
+
+    let (idx, begin, end) = iter.get_next_page().unwrap();
+    assert_eq!(idx, 0);
+    assert_eq!(begin, Address::new(3, 100));
+    assert_eq!(end, Address::new(3, 500));
+
+    assert!(iter.get_next_page().is_none());
+}

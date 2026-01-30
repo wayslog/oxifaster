@@ -63,8 +63,8 @@ pub use cold_index::{
     IndexOperationType, DEFAULT_NUM_BUCKETS_PER_CHUNK, ENTRIES_PER_BUCKET,
 };
 pub use grow::{
-    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState,
-    HASH_TABLE_CHUNK_SIZE,
+    calculate_num_chunks, get_chunk_bounds, GrowCompleteCallback, GrowConfig, GrowResult,
+    GrowState, HASH_TABLE_CHUNK_SIZE,
 };
 pub use hash_bucket::{
     AtomicHashBucketEntry, ColdHashBucket, HashBucket, HashBucketEntry, HashBucketOverflowEntry,

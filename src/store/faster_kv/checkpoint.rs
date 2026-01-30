@@ -50,6 +50,139 @@ where
         self.checkpoint_with_action(checkpoint_dir, Action::CheckpointFull)
     }
 
+    /// Create a full checkpoint with optional persistence callbacks.
+    ///
+    /// This method allows callers to be notified when index and/or hybrid log
+    /// persistence completes. This corresponds to C++ FASTER's checkpoint with
+    /// persistence callbacks.
+    ///
+    /// # Arguments
+    /// * `checkpoint_dir` - Directory to store checkpoint files
+    /// * `index_callback` - Optional callback invoked when index persistence completes
+    /// * `log_callback` - Optional callback invoked when hybrid log persistence completes
+    ///
+    /// # Returns
+    /// The checkpoint token on success
+    ///
+    /// # Example
+    /// ```ignore
+    /// use oxifaster::checkpoint::{IndexPersistenceCallback, HybridLogPersistenceCallback};
+    ///
+    /// let index_cb: Option<IndexPersistenceCallback> = Some(Box::new(|status| {
+    ///     println!("Index persistence completed with status: {:?}", status);
+    /// }));
+    /// let log_cb: Option<HybridLogPersistenceCallback> = Some(Box::new(|status, serial| {
+    ///     println!("Log persistence completed with status: {:?}, serial: {}", status, serial);
+    /// }));
+    /// let token = store.checkpoint_with_callbacks(&checkpoint_dir, index_cb, log_cb)?;
+    /// ```
+    pub fn checkpoint_with_callbacks(
+        &self,
+        checkpoint_dir: &Path,
+        index_callback: Option<crate::checkpoint::IndexPersistenceCallback>,
+        log_callback: Option<crate::checkpoint::HybridLogPersistenceCallback>,
+    ) -> io::Result<CheckpointToken> {
+        let token = Uuid::new_v4();
+        let durability = self.checkpoint_durability();
+        let start_result = self.system_state.try_start_action(Action::CheckpointFull);
+        let start_state = match start_result {
+            Ok(prev) => prev,
+            Err(current_state) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "Cannot start checkpoint: action {:?} phase {:?} already in progress",
+                        current_state.action, current_state.phase
+                    ),
+                ));
+            }
+        };
+        let start_version = start_state.version;
+        let started_at = Instant::now();
+
+        if self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operational
+                .record_checkpoint_started();
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            tracing::info!(action = ?Action::CheckpointFull, token = %token, "checkpoint start (with callbacks)");
+        }
+
+        let result = create_checkpoint_directory(checkpoint_dir, token).and_then(|cp_dir| {
+            if durability == CheckpointDurability::FsyncOnCheckpoint {
+                fsync_dir_best_effort(checkpoint_dir);
+            }
+            self.execute_checkpoint_state_machine(&cp_dir, token, Action::CheckpointFull, None)
+        });
+
+        // Invoke callbacks based on result
+        let status = if result.is_ok() {
+            crate::Status::Ok
+        } else {
+            crate::Status::Corruption
+        };
+
+        // Invoke index persistence callback
+        if let Some(callback) = index_callback {
+            callback(status);
+        }
+
+        // Invoke log persistence callback with highest serial number
+        if let Some(callback) = log_callback {
+            let max_serial = self
+                .get_session_states()
+                .iter()
+                .map(|s| s.serial_num)
+                .max()
+                .unwrap_or(0);
+            callback(status, max_serial);
+        }
+
+        if result.is_err() {
+            self.system_state.store(
+                SystemState::rest(start_version),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+
+        if self.stats_collector.is_enabled() {
+            if result.is_ok() {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_checkpoint_completed();
+            } else {
+                self.stats_collector
+                    .store_stats
+                    .operational
+                    .record_checkpoint_failed();
+            }
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            let duration_ms = started_at.elapsed().as_millis();
+            if let Err(ref err) = result {
+                tracing::warn!(
+                    action = ?Action::CheckpointFull,
+                    token = %token,
+                    duration_ms,
+                    error = %err,
+                    "checkpoint with callbacks failed"
+                );
+            } else {
+                tracing::info!(
+                    action = ?Action::CheckpointFull,
+                    token = %token,
+                    duration_ms,
+                    "checkpoint with callbacks completed"
+                );
+            }
+        }
+
+        result.map(|_| token)
+    }
+
     /// Create an index-only checkpoint in `checkpoint_dir`.
     pub fn checkpoint_index(&self, checkpoint_dir: &Path) -> io::Result<CheckpointToken> {
         self.checkpoint_with_action(checkpoint_dir, Action::CheckpointIndex)

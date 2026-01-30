@@ -564,6 +564,49 @@ where
         &self.device
     }
 
+    /// Returns the approximate number of entries in the hash index.
+    ///
+    /// This counts the number of used entry slots in the index, which
+    /// corresponds to the number of keys currently stored.
+    /// This method corresponds to C++ FASTER's Size() method.
+    ///
+    /// # Note
+    /// This is an approximate count as it reads atomic values without
+    /// holding locks. Concurrent insertions/deletions may not be reflected.
+    pub fn size(&self) -> u64 {
+        self.hash_index.dump_distribution().used_entries
+    }
+
+    /// Check if automatic compaction is currently scheduled or running.
+    ///
+    /// Returns `true` if a compaction operation is in progress, `false` otherwise.
+    /// This is useful for monitoring and preventing overlapping compaction requests.
+    pub fn auto_compaction_scheduled(&self) -> bool {
+        self.compactor.is_in_progress()
+    }
+
+    /// Check if the hybrid log has reached its maximum configured size.
+    ///
+    /// Returns `true` if the current log size equals or exceeds the
+    /// configured maximum memory size (page_size * memory_pages).
+    ///
+    /// This is useful for deciding when to trigger compaction or
+    /// other space reclamation operations.
+    pub fn hlog_max_size_reached(&self) -> bool {
+        // SAFETY: read-only access to log metadata
+        let log_stats = unsafe { self.hlog().get_stats() };
+        let tail = log_stats.tail_address;
+        let begin = log_stats.begin_address;
+        // Calculate current log span
+        let current_size = if tail >= begin {
+            tail.control().saturating_sub(begin.control())
+        } else {
+            0
+        };
+        let max_size = unsafe { self.hlog().max_size_bytes() };
+        current_size >= max_size
+    }
+
     /// Get a reference to the hybrid log
     ///
     /// # Safety
@@ -1349,6 +1392,151 @@ where
         // Record RMW statistics only (not upsert stats)
         if self.stats_collector.is_enabled() {
             self.stats_collector.store_stats.operations.record_rmw();
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_latency(start.elapsed());
+            if record_size > 0 {
+                self.stats_collector
+                    .store_stats
+                    .hybrid_log
+                    .record_allocation(record_size as u64);
+            }
+        }
+
+        status
+    }
+
+    /// Synchronous conditional insert operation.
+    /// Inserts the key-value pair only if the key does not already exist.
+    /// Returns Status::Ok if inserted, Status::Aborted if key already exists.
+    pub(crate) fn conditional_insert_sync(
+        &self,
+        ctx: &mut ThreadContext,
+        key: K,
+        value: V,
+    ) -> Status {
+        let start = Instant::now();
+        let hash = match <K as PersistKey>::Codec::hash(&key) {
+            Ok(h) => KeyHash::new(h),
+            Err(s) => return s,
+        };
+
+        // Find or create entry in hash index
+        let result = self.hash_index.find_or_create_entry(hash);
+
+        let _atomic_entry = match result.atomic_entry {
+            Some(entry) => entry,
+            None => return Status::OutOfMemory,
+        };
+        let old_address = result.entry.address();
+
+        // Check if key already exists by traversing the chain
+        if old_address.is_valid() {
+            let mut address = old_address;
+
+            // Skip read cache addresses
+            if address.in_readcache() {
+                if self.try_read_from_cache(address, &key).is_some() {
+                    // Key exists in read cache
+                    if self.stats_collector.is_enabled() {
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_conditional_insert(false);
+                        self.stats_collector
+                            .store_stats
+                            .operations
+                            .record_latency(start.elapsed());
+                    }
+                    return Status::Aborted;
+                }
+                address = self.skip_read_cache(address);
+            }
+
+            // Check in-memory chain
+            while address.is_valid() {
+                if address.in_readcache() {
+                    if self.try_read_from_cache(address, &key).is_some() {
+                        if self.stats_collector.is_enabled() {
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_conditional_insert(false);
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_latency(start.elapsed());
+                        }
+                        return Status::Aborted;
+                    }
+                    address = self.skip_read_cache(address);
+                    continue;
+                }
+
+                // SAFETY: read-only access to hybrid log metadata.
+                let head_address = unsafe { self.hlog().get_head_address() };
+
+                if address < head_address {
+                    // Key might exist on disk - cannot safely insert conditionally
+                    // Return Pending to let caller handle via complete_pending path
+                    if self.stats_collector.is_enabled() {
+                        self.stats_collector.store_stats.operations.record_pending();
+                    }
+                    return Status::Pending;
+                }
+
+                let record_ptr = unsafe { self.hlog().get(address) };
+                if let Some(ptr) = record_ptr {
+                    let info = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+                    if info.is_invalid() {
+                        address = info.previous_address();
+                        continue;
+                    }
+                    let page_size = unsafe { self.hlog().page_size() };
+                    let limit = page_size.saturating_sub(address.offset() as usize);
+                    let view = match unsafe {
+                        record_format::record_view_from_memory::<K, V>(address, ptr.as_ptr(), limit)
+                    } {
+                        Ok(v) => v,
+                        Err(s) => return s,
+                    };
+
+                    let key_matches =
+                        match <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), &key) {
+                            Ok(b) => b,
+                            Err(s) => return s,
+                        };
+                    if key_matches && !view.is_tombstone() {
+                        // Key exists - abort conditional insert
+                        if self.stats_collector.is_enabled() {
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_conditional_insert(false);
+                            self.stats_collector
+                                .store_stats
+                                .operations
+                                .record_latency(start.elapsed());
+                        }
+                        return Status::Aborted;
+                    }
+
+                    address = info.previous_address();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Key does not exist - proceed with insert (reuse upsert_internal)
+        let (status, record_size) = self.upsert_internal(ctx, key, value);
+
+        if self.stats_collector.is_enabled() {
+            self.stats_collector
+                .store_stats
+                .operations
+                .record_conditional_insert(status == Status::Ok);
             self.stats_collector
                 .store_stats
                 .operations
