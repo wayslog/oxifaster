@@ -467,3 +467,64 @@ fn test_recovered_data_is_readable() {
         );
     }
 }
+
+// ============ AutoFlushConfig Tests ============
+
+#[test]
+fn test_auto_flush_config_default() {
+    let config = AutoFlushConfig::default();
+    assert!(!config.enabled);
+    assert_eq!(config.check_interval_ms, 100);
+    assert_eq!(config.min_readonly_pages, 4);
+}
+
+#[test]
+fn test_auto_flush_config_new() {
+    let config = AutoFlushConfig::new();
+    assert!(!config.is_enabled());
+}
+
+#[test]
+fn test_auto_flush_config_with_enabled() {
+    let config = AutoFlushConfig::new().with_enabled(true);
+    assert!(config.is_enabled());
+}
+
+#[test]
+fn test_auto_flush_config_with_check_interval() {
+    let config = AutoFlushConfig::new().with_check_interval_ms(200);
+    assert_eq!(config.check_interval_ms, 200);
+
+    // Test minimum enforcement
+    let config = AutoFlushConfig::new().with_check_interval_ms(5);
+    assert_eq!(config.check_interval_ms, 10); // Minimum 10ms
+}
+
+#[test]
+fn test_auto_flush_config_with_min_readonly_pages() {
+    let config = AutoFlushConfig::new().with_min_readonly_pages(8);
+    assert_eq!(config.min_readonly_pages, 8);
+
+    // Test minimum enforcement
+    let config = AutoFlushConfig::new().with_min_readonly_pages(0);
+    assert_eq!(config.min_readonly_pages, 1); // Minimum 1
+}
+
+#[test]
+fn test_auto_flush_config_clone() {
+    let config = AutoFlushConfig::new()
+        .with_enabled(true)
+        .with_check_interval_ms(50)
+        .with_min_readonly_pages(2);
+    let cloned = config.clone();
+    assert!(cloned.enabled);
+    assert_eq!(cloned.check_interval_ms, 50);
+    assert_eq!(cloned.min_readonly_pages, 2);
+}
+
+#[test]
+fn test_auto_flush_config_debug() {
+    let config = AutoFlushConfig::new();
+    let debug_str = format!("{:?}", config);
+    assert!(debug_str.contains("AutoFlushConfig"));
+}

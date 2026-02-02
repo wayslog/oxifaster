@@ -49,7 +49,9 @@ mod contexts;
 pub use auto_compact::{
     AutoCompactionConfig, AutoCompactionHandle, AutoCompactionState, AutoCompactionStats,
 };
-pub use compact::{CompactionConfig, CompactionResult, CompactionStats, Compactor};
+pub use compact::{
+    CompactToOtherStoreConfig, CompactionConfig, CompactionResult, CompactionStats, Compactor,
+};
 pub use concurrent::{
     CompactionWorkerHandle, ConcurrentCompactionConfig, ConcurrentCompactionContext,
     ConcurrentCompactionResult, ConcurrentCompactionState, ConcurrentCompactor,

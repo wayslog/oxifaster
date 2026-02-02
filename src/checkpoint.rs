@@ -64,8 +64,8 @@ pub use locks::{
 };
 pub(crate) use recovery::{build_incremental_chain, validate_incremental_checkpoint};
 pub use recovery::{
-    find_latest_checkpoint, list_checkpoints, validate_checkpoint, CheckpointInfo, RecoveryState,
-    RecoveryStatus,
+    find_latest_checkpoint, list_checkpoints, validate_checkpoint, CheckpointInfo,
+    PageRecoveryStatus, RecoveryState, RecoveryStatus,
 };
 pub use serialization::{
     create_checkpoint_directory, delta_log_path, delta_metadata_path, incremental_info_path,

@@ -8,6 +8,7 @@
 //! - Concurrent: Multiple threads can scan different pages simultaneously
 
 use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::address::Address;
@@ -951,6 +952,91 @@ where
         }
 
         Ok(processed)
+    }
+}
+
+/// Thread-safe concurrent page iterator for parallel log scanning.
+///
+/// Based on C++ FASTER's ConcurrentLogPageIterator.
+/// Multiple threads can call `get_next_page()` to atomically claim pages to scan.
+pub struct ConcurrentLogScanIterator {
+    /// Scan range
+    range: ScanRange,
+    /// Page size
+    page_size: usize,
+    /// Next page index to process (atomic for thread-safe distribution)
+    next_page: AtomicU64,
+    /// Total number of pages
+    total_pages: u64,
+    /// Whether scanning is complete
+    completed: AtomicBool,
+}
+
+impl ConcurrentLogScanIterator {
+    /// Create a new concurrent log scan iterator
+    pub fn new(range: ScanRange, page_size: usize) -> Self {
+        let total_pages = if range.is_empty() {
+            0
+        } else {
+            (range.end.page() as u64).saturating_sub(range.begin.page() as u64) + 1
+        };
+        Self {
+            range,
+            page_size,
+            next_page: AtomicU64::new(0),
+            total_pages,
+            completed: AtomicBool::new(false),
+        }
+    }
+
+    /// Get the next page to process.
+    /// Returns Some((page_index, page_begin_address, page_end_address)) or None if all pages claimed.
+    pub fn get_next_page(&self) -> Option<(u64, Address, Address)> {
+        let page_idx = self.next_page.fetch_add(1, Ordering::AcqRel);
+        if page_idx >= self.total_pages {
+            self.completed.store(true, Ordering::Release);
+            return None;
+        }
+
+        let page_number = self.range.begin.page() + page_idx as u32;
+        let page_begin = if page_idx == 0 {
+            self.range.begin
+        } else {
+            Address::new(page_number, 0)
+        };
+        let page_end = if page_idx == self.total_pages - 1 {
+            self.range.end
+        } else {
+            Address::new(page_number + 1, 0)
+        };
+
+        Some((page_idx, page_begin, page_end))
+    }
+
+    /// Check if all pages have been distributed
+    pub fn is_complete(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
+    }
+
+    /// Get progress as (pages_distributed, total_pages)
+    pub fn progress(&self) -> (u64, u64) {
+        let distributed = self.next_page.load(Ordering::Acquire).min(self.total_pages);
+        (distributed, self.total_pages)
+    }
+
+    /// Get the scan range
+    pub fn range(&self) -> &ScanRange {
+        &self.range
+    }
+
+    /// Get the total number of pages
+    pub fn total_pages(&self) -> u64 {
+        self.total_pages
+    }
+
+    /// Get the page size
+    pub fn page_size(&self) -> usize {
+        self.page_size
     }
 }
 

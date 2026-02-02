@@ -1,6 +1,6 @@
 use crate::codec::{PersistKey, PersistValue};
 use crate::device::StorageDevice;
-use crate::index::{GrowResult, GrowState};
+use crate::index::{GrowCompleteCallback, GrowResult, GrowState};
 use crate::status::Status;
 
 use super::FasterKv;
@@ -139,6 +139,60 @@ where
             (*self.grow_state.get())
                 .as_ref()
                 .map(|s| (s.progress().0, s.progress().1))
+        }
+    }
+
+    /// Trigger hash index growth with a completion callback.
+    ///
+    /// This method initiates index growth and stores the callback to be invoked
+    /// when growth completes. The callback receives the new table size.
+    ///
+    /// # Arguments
+    /// * `new_size` - New hash table size (must be power of 2 and > current size)
+    /// * `callback` - Optional callback invoked when growth completes with the new size
+    ///
+    /// # Returns
+    /// `Status::Ok` if growth started successfully, error status otherwise
+    ///
+    /// # Example
+    /// ```ignore
+    /// use oxifaster::index::GrowCompleteCallback;
+    ///
+    /// let callback: Option<GrowCompleteCallback> = Some(Box::new(|new_size| {
+    ///     println!("Index growth completed, new size: {}", new_size);
+    /// }));
+    /// store.grow_index_with_callback(new_size, callback)?;
+    /// ```
+    pub fn grow_index_with_callback(
+        &self,
+        new_size: u64,
+        callback: Option<GrowCompleteCallback>,
+    ) -> Status {
+        // Start the grow operation
+        match self.start_grow(new_size) {
+            Ok(()) => {
+                // For now, we complete the grow synchronously and invoke the callback.
+                // In a full implementation, the callback would be stored and invoked
+                // when background growth workers complete.
+                let result = self.complete_grow();
+
+                // Invoke the callback with the new size
+                if let Some(cb) = callback {
+                    let final_size = if result.success {
+                        result.new_size
+                    } else {
+                        self.index_size()
+                    };
+                    cb(final_size);
+                }
+
+                if result.success {
+                    Status::Ok
+                } else {
+                    result.status.unwrap_or(Status::Aborted)
+                }
+            }
+            Err(status) => status,
         }
     }
 }

@@ -695,6 +695,23 @@ where
         self.bump_serial_on_ok(status)
     }
 
+    /// Conditionally insert a key-value pair
+    ///
+    /// Inserts the key-value pair only if the key does not already exist in the store.
+    /// Returns `Status::Ok` if the insertion succeeded, `Status::Aborted` if the key
+    /// already exists.
+    ///
+    /// This corresponds to FASTER C++ ConditionalInsert operation.
+    pub fn conditional_insert(&mut self, key: K, value: V) -> Status {
+        self.start();
+        self.store.cpr_refresh(&mut self.ctx);
+
+        let status = self
+            .store
+            .conditional_insert_sync(&mut self.ctx, key, value);
+        self.bump_serial_on_ok(status)
+    }
+
     /// Complete all pending operations
     ///
     /// # Arguments

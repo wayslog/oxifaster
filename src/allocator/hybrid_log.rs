@@ -8,6 +8,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::address::{Address, AtomicAddress, AtomicPageOffset};
+
+/// Callback type for truncation notification.
+///
+/// Called before the begin address is shifted, receiving the new begin address.
+/// This allows callers to perform cleanup or notification before truncation occurs.
+pub type TruncateCallback = Box<dyn FnOnce(Address) + Send>;
+
+/// Callback type for shift completion notification.
+///
+/// Called after the begin address has been shifted, receiving the new begin address.
+/// This allows callers to perform post-shift operations or logging.
+pub type ShiftCompleteCallback = Box<dyn FnOnce(Address) + Send>;
 use crate::allocator::page_allocator::PageInfo;
 use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
@@ -51,6 +63,57 @@ impl Default for HybridLogConfig {
             mutable_pages: 16,
             segment_size: 1 << 30,
         }
+    }
+}
+
+/// Configuration for automatic background flushing
+#[derive(Debug, Clone)]
+pub struct AutoFlushConfig {
+    /// Enable automatic background flushing
+    pub enabled: bool,
+    /// Interval between flush checks in milliseconds
+    pub check_interval_ms: u64,
+    /// Minimum number of pages in read-only region before triggering flush
+    pub min_readonly_pages: u32,
+}
+
+impl Default for AutoFlushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_ms: 100,
+            min_readonly_pages: 4,
+        }
+    }
+}
+
+impl AutoFlushConfig {
+    /// Create a new auto-flush configuration with default values
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable automatic flushing
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set the check interval in milliseconds
+    pub fn with_check_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.check_interval_ms = interval_ms.max(10); // Minimum 10ms
+        self
+    }
+
+    /// Set the minimum number of read-only pages before flushing
+    pub fn with_min_readonly_pages(mut self, pages: u32) -> Self {
+        self.min_readonly_pages = pages.max(1);
+        self
+    }
+
+    /// Check if auto-flush is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 }
 
@@ -228,6 +291,15 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     #[inline]
     pub fn buffer_size(&self) -> u32 {
         self.buffer_size
+    }
+
+    /// Get the maximum configured size in bytes.
+    ///
+    /// This is the total in-memory buffer capacity (page_size * memory_pages).
+    /// This corresponds to C++ FASTER's GetMaxSize() method.
+    #[inline]
+    pub fn max_size_bytes(&self) -> u64 {
+        self.config.page_size as u64 * self.config.memory_pages as u64
     }
 
     /// Get the current tail address
@@ -463,6 +535,59 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Shift the begin address
     pub fn shift_begin_address(&self, new_address: Address) {
         Self::try_advance_address(&self.begin_address, new_address);
+    }
+
+    /// Shift the begin address with optional callbacks for truncation and completion.
+    ///
+    /// This method provides hooks for callers to be notified before and after
+    /// the begin address is shifted. This corresponds to C++ FASTER's
+    /// ShiftBeginAddress with callbacks.
+    ///
+    /// # Arguments
+    /// * `new_address` - The new begin address to shift to
+    /// * `truncate_callback` - Optional callback invoked before truncation with the new address
+    /// * `complete_callback` - Optional callback invoked after shift completes with the final address
+    ///
+    /// # Returns
+    /// The new begin address after the shift operation
+    ///
+    /// # Example
+    /// ```ignore
+    /// let truncate_cb = Some(Box::new(|addr| {
+    ///     println!("About to truncate to: {}", addr);
+    /// }) as TruncateCallback);
+    /// let complete_cb = Some(Box::new(|addr| {
+    ///     println!("Truncation complete at: {}", addr);
+    /// }) as ShiftCompleteCallback);
+    /// let new_addr = allocator.shift_begin_address_with_callbacks(
+    ///     target_address,
+    ///     truncate_cb,
+    ///     complete_cb,
+    /// );
+    /// ```
+    pub fn shift_begin_address_with_callbacks(
+        &self,
+        new_address: Address,
+        truncate_callback: Option<TruncateCallback>,
+        complete_callback: Option<ShiftCompleteCallback>,
+    ) -> Address {
+        // Invoke truncate callback before shifting
+        if let Some(callback) = truncate_callback {
+            callback(new_address);
+        }
+
+        // Perform the actual shift
+        Self::try_advance_address(&self.begin_address, new_address);
+
+        // Get the actual new begin address (may be different if concurrent shift occurred)
+        let final_address = self.begin_address.load(Ordering::Acquire);
+
+        // Invoke completion callback
+        if let Some(callback) = complete_callback {
+            callback(final_address);
+        }
+
+        final_address
     }
 
     /// Helper: atomically advance an address if the new value is greater.

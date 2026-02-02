@@ -418,6 +418,8 @@ mod tests {
             upserts: 300,
             rmws: 150,
             deletes: 50,
+            conditional_inserts: 0,
+            conditional_insert_exists: 0,
             pending: 5,
             hit_rate: 0.8,
             throughput: 100.0,

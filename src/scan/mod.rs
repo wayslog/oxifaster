@@ -34,4 +34,6 @@
 
 mod log_iterator;
 
-pub use log_iterator::{LogPage, LogPageIterator, LogPageStatus, LogScanIterator, ScanRange};
+pub use log_iterator::{
+    ConcurrentLogScanIterator, LogPage, LogPageIterator, LogPageStatus, LogScanIterator, ScanRange,
+};
