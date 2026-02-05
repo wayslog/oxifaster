@@ -237,3 +237,438 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{RawBytes, Utf8};
+    use crate::device::NullDisk;
+    use crate::store::FasterKvConfig;
+    use std::sync::Arc;
+
+    fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
+        let config = FasterKvConfig {
+            table_size: 1024,
+            log_memory_size: 1 << 20,
+            page_size_bits: 12,
+            mutable_fraction: 0.9,
+        };
+        let device = NullDisk::new();
+        Arc::new(FasterKv::new(config, device))
+    }
+
+    fn create_varlen_test_store() -> Arc<FasterKv<Utf8, Utf8, NullDisk>> {
+        let config = FasterKvConfig {
+            table_size: 1024,
+            log_memory_size: 1 << 20,
+            page_size_bits: 12,
+            mutable_fraction: 0.9,
+        };
+        let device = NullDisk::new();
+        Arc::new(FasterKv::new(config, device))
+    }
+
+    fn create_rawbytes_store() -> Arc<FasterKv<RawBytes, RawBytes, NullDisk>> {
+        let config = FasterKvConfig {
+            table_size: 1024,
+            log_memory_size: 1 << 20,
+            page_size_bits: 12,
+            mutable_fraction: 0.9,
+        };
+        let device = NullDisk::new();
+        Arc::new(FasterKv::new(config, device))
+    }
+
+    #[test]
+    fn test_parse_disk_record_too_small() {
+        let store = create_test_store();
+        let bytes = vec![0u8; 4];
+        let result = store.parse_disk_record(&bytes);
+        assert!(matches!(result, Err(Status::Corruption)));
+    }
+
+    #[test]
+    fn test_parse_disk_record_invalid_header() {
+        let store = create_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, true, false, false);
+        let mut bytes = vec![0u8; 24];
+        let control = header.control();
+        bytes[0..8].copy_from_slice(&control.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert!(parsed.key.is_none());
+        assert!(parsed.value.is_none());
+    }
+
+    #[test]
+    fn test_parse_disk_record_valid_fixed() {
+        let store = create_test_store();
+        let header = RecordInfo::new(Address::new(1, 100), 0, false, false, false);
+        let key: u64 = 42;
+        let value: u64 = 100;
+
+        let mut bytes = vec![0u8; 24];
+        let control = header.control();
+        bytes[0..8].copy_from_slice(&control.to_le_bytes());
+        bytes[8..16].copy_from_slice(&key.to_le_bytes());
+        bytes[16..24].copy_from_slice(&value.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.key, Some(42u64));
+        assert_eq!(parsed.value, Some(100u64));
+        assert_eq!(parsed.previous_address, Address::new(1, 100));
+    }
+
+    #[test]
+    fn test_parse_disk_record_tombstone_fixed() {
+        let store = create_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, true, false);
+        let key: u64 = 42;
+
+        let mut bytes = vec![0u8; 24];
+        let control = header.control();
+        bytes[0..8].copy_from_slice(&control.to_le_bytes());
+        bytes[8..16].copy_from_slice(&key.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.key, Some(42u64));
+        assert!(parsed.value.is_none());
+    }
+
+    #[test]
+    fn test_parse_disk_record_fixed_too_short_for_data() {
+        let store = create_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, false, false);
+        let mut bytes = vec![0u8; 12];
+        let control = header.control();
+        bytes[0..8].copy_from_slice(&control.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(matches!(result, Err(Status::Corruption)));
+    }
+
+    #[test]
+    fn test_parse_disk_record_varlen_too_small_header() {
+        let store = create_varlen_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, false, false);
+        let mut bytes = vec![0u8; 10];
+        let control = header.control();
+        bytes[0..8].copy_from_slice(&control.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(matches!(result, Err(Status::Corruption)));
+    }
+
+    #[test]
+    fn test_parse_disk_record_varlen_valid() {
+        let store = create_varlen_test_store();
+        let header = RecordInfo::new(Address::new(2, 200), 0, false, false, false);
+        let key_str = "hello";
+        let value_str = "world";
+        let key_bytes = key_str.as_bytes();
+        let value_bytes = value_str.as_bytes();
+
+        let total_size = 16 + key_bytes.len() + value_bytes.len();
+        let mut bytes = vec![0u8; total_size];
+        bytes[0..8].copy_from_slice(&header.control().to_le_bytes());
+        bytes[8..12].copy_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+        bytes[12..16].copy_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+        bytes[16..16 + key_bytes.len()].copy_from_slice(key_bytes);
+        bytes[16 + key_bytes.len()..].copy_from_slice(value_bytes);
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.key, Some(Utf8(key_str.to_string())));
+        assert_eq!(parsed.value, Some(Utf8(value_str.to_string())));
+        assert_eq!(parsed.previous_address, Address::new(2, 200));
+    }
+
+    #[test]
+    fn test_parse_disk_record_varlen_tombstone() {
+        let store = create_varlen_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, true, false);
+        let key_str = "deletekey";
+        let key_bytes = key_str.as_bytes();
+
+        let total_size = 16 + key_bytes.len();
+        let mut bytes = vec![0u8; total_size];
+        bytes[0..8].copy_from_slice(&header.control().to_le_bytes());
+        bytes[8..12].copy_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+        bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+        bytes[16..].copy_from_slice(key_bytes);
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.key, Some(Utf8(key_str.to_string())));
+        assert!(parsed.value.is_none());
+    }
+
+    #[test]
+    fn test_parse_disk_record_varlen_insufficient_data() {
+        let store = create_varlen_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, false, false);
+
+        let mut bytes = vec![0u8; 20];
+        bytes[0..8].copy_from_slice(&header.control().to_le_bytes());
+        bytes[8..12].copy_from_slice(&10u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&10u32.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(matches!(result, Err(Status::Corruption)));
+    }
+
+    #[test]
+    fn test_parse_disk_record_varlen_overflow() {
+        let store = create_varlen_test_store();
+        let header = RecordInfo::new(Address::INVALID, 0, false, false, false);
+
+        let mut bytes = vec![0u8; 16];
+        bytes[0..8].copy_from_slice(&header.control().to_le_bytes());
+        bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = store.parse_disk_record(&bytes);
+        // When key_len and value_len overflow when added to header size, it returns ResourceExhausted
+        // Or if total exceeds bytes.len(), it returns Corruption
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_take_completed_io_for_context_empty() {
+        let store = create_test_store();
+        let count = store.take_completed_io_for_context(0, 0, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_take_completed_io_for_context_nonexistent() {
+        let store = create_test_store();
+        let count = store.take_completed_io_for_context(999, 12345, 42);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_take_disk_read_result_empty() {
+        let store = create_test_store();
+        let result = store.take_disk_read_result(Address::new(0, 100));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_take_disk_read_result_nonexistent_address() {
+        let store = create_test_store();
+        let result = store.take_disk_read_result(Address::new(999, 999));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_submit_disk_read_for_context_fixed() {
+        let store = create_test_store();
+        let addr = Address::new(0, 100);
+        let submitted = store.submit_disk_read_for_context(0, 1, 1, addr);
+        assert!(submitted);
+    }
+
+    #[test]
+    fn test_submit_disk_read_for_context_dedup() {
+        let store = create_test_store();
+        let addr = Address::new(0, 200);
+
+        let first = store.submit_disk_read_for_context(0, 1, 1, addr);
+        assert!(first);
+
+        let second = store.submit_disk_read_for_context(0, 1, 2, addr);
+        assert!(!second);
+    }
+
+    #[test]
+    fn test_submit_disk_read_for_context_varlen() {
+        let store = create_varlen_test_store();
+        let addr = Address::new(0, 300);
+        let submitted = store.submit_disk_read_for_context(0, 1, 1, addr);
+        assert!(submitted);
+    }
+
+    #[test]
+    fn test_disk_read_result_debug() {
+        let result: DiskReadResult<u64, u64> = DiskReadResult {
+            key: Some(42),
+            value: Some(100),
+            previous_address: Address::new(1, 50),
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("DiskReadResult"));
+    }
+
+    #[test]
+    fn test_disk_read_result_clone() {
+        let result: DiskReadResult<u64, u64> = DiskReadResult {
+            key: Some(42),
+            value: Some(100),
+            previous_address: Address::new(1, 50),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.key, result.key);
+        assert_eq!(cloned.value, result.value);
+        assert_eq!(cloned.previous_address, result.previous_address);
+    }
+
+    #[test]
+    fn test_pending_io_key_eq() {
+        let key1 = PendingIoKey {
+            thread_id: 1,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+        let key2 = PendingIoKey {
+            thread_id: 1,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+        let key3 = PendingIoKey {
+            thread_id: 2,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+        assert_eq!(key1, key2);
+        assert_ne!(key1, key3);
+    }
+
+    #[test]
+    fn test_pending_io_key_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let key1 = PendingIoKey {
+            thread_id: 1,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+        let key2 = PendingIoKey {
+            thread_id: 1,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        key1.hash(&mut hasher1);
+        key2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[test]
+    fn test_pending_io_key_debug() {
+        let key = PendingIoKey {
+            thread_id: 1,
+            thread_tag: 100,
+            ctx_id: 50,
+        };
+        let debug_str = format!("{:?}", key);
+        assert!(debug_str.contains("PendingIoKey"));
+    }
+
+    #[test]
+    fn test_disk_read_cache_entry_debug() {
+        let entry: DiskReadCacheEntry<u64, u64> = DiskReadCacheEntry {
+            parsed: Ok(DiskReadResult {
+                key: Some(1),
+                value: Some(2),
+                previous_address: Address::INVALID,
+            }),
+        };
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("DiskReadCacheEntry"));
+    }
+
+    #[test]
+    fn test_disk_read_cache_entry_clone() {
+        let entry: DiskReadCacheEntry<u64, u64> = DiskReadCacheEntry {
+            parsed: Ok(DiskReadResult {
+                key: Some(1),
+                value: Some(2),
+                previous_address: Address::INVALID,
+            }),
+        };
+        let cloned = entry.clone();
+        assert!(cloned.parsed.is_ok());
+    }
+
+    #[test]
+    fn test_multiple_disk_read_submissions() {
+        let store = create_test_store();
+
+        for i in 0..5 {
+            let addr = Address::new(i, 100 * i);
+            let submitted = store.submit_disk_read_for_context(i as usize, 1, i as u64, addr);
+            assert!(submitted);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_take_completed_io() {
+        let store = create_test_store();
+
+        for i in 0..5 {
+            let count = store.take_completed_io_for_context(i, i as u64, i as u64);
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn test_parse_disk_record_rawbytes() {
+        let store = create_rawbytes_store();
+        let header = RecordInfo::new(Address::new(3, 300), 0, false, false, false);
+        let key_data = b"rawkey";
+        let value_data = b"rawvalue";
+
+        let total_size = 16 + key_data.len() + value_data.len();
+        let mut bytes = vec![0u8; total_size];
+        bytes[0..8].copy_from_slice(&header.control().to_le_bytes());
+        bytes[8..12].copy_from_slice(&(key_data.len() as u32).to_le_bytes());
+        bytes[12..16].copy_from_slice(&(value_data.len() as u32).to_le_bytes());
+        bytes[16..16 + key_data.len()].copy_from_slice(key_data);
+        bytes[16 + key_data.len()..].copy_from_slice(value_data);
+
+        let result = store.parse_disk_record(&bytes);
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert!(parsed.key.is_some());
+        assert!(parsed.value.is_some());
+        assert_eq!(parsed.key.as_ref().unwrap().0.as_ref(), key_data);
+        assert_eq!(parsed.value.as_ref().unwrap().0.as_ref(), value_data);
+    }
+
+    #[test]
+    fn test_record_info_size_constant() {
+        assert_eq!(
+            FasterKv::<u64, u64, NullDisk>::RECORD_INFO_SIZE,
+            std::mem::size_of::<RecordInfo>()
+        );
+    }
+
+    #[test]
+    fn test_varlen_lengths_size_constant() {
+        assert_eq!(
+            FasterKv::<u64, u64, NullDisk>::VARLEN_LENGTHS_SIZE,
+            2 * std::mem::size_of::<u32>()
+        );
+    }
+
+    #[test]
+    fn test_varlen_header_size_constant() {
+        assert_eq!(
+            FasterKv::<u64, u64, NullDisk>::VARLEN_HEADER_SIZE,
+            FasterKv::<u64, u64, NullDisk>::RECORD_INFO_SIZE
+                + FasterKv::<u64, u64, NullDisk>::VARLEN_LENGTHS_SIZE
+        );
+    }
+}

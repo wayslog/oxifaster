@@ -14,7 +14,8 @@
 //!
 //! # Enabling Statistics
 //!
-//! Statistics collection is enabled by default but can be controlled:
+//! Statistics collection is disabled by default (to avoid overhead in hot paths),
+//! but can be enabled when needed:
 //!
 //! ```rust,ignore
 //! // Enable/disable at runtime
