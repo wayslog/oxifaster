@@ -1,4 +1,4 @@
-// 7. IoUring mock tests (src/device/io_uring_mock.rs)
+// 7. IoUring tests (portable fallback + Linux backend)
 // ===========================================================================
 
 #[test]
@@ -22,7 +22,13 @@ fn cov_io_uring_device_creation() {
 
     assert!(!device.is_initialized());
     assert_eq!(device.stats().reads_submitted, 0);
+
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     assert!(!IoUringDevice::is_available());
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    {
+        let _ = IoUringDevice::is_available();
+    }
 }
 
 #[test]
@@ -49,15 +55,22 @@ fn cov_io_uring_device_submit_methods() {
     let path = dir.path().join("test_submit.dat");
     let mut device = IoUringDevice::with_defaults(&path);
 
-    // These methods are no-ops in mock mode
+    // In the portable fallback, these methods are no-ops. In the Linux backend, these methods
+    // operate on the ring; with no queued operations, they return `Ok(0)` and must not block.
     let result = device.submit();
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 0);
 
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     let result = device.submit_and_wait(1);
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    let result = device.submit_and_wait(0);
     assert!(result.is_ok());
 
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     let result = device.wait_completions(1);
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    let result = device.wait_completions(0);
     assert!(result.is_ok());
 }
 
@@ -89,11 +102,23 @@ fn cov_io_uring_device_pending_operations() {
 fn cov_io_uring_supported_features() {
     let features = IoUringDevice::supported_features();
 
-    // Mock mode has all features disabled
-    assert!(!features.sqpoll);
-    assert!(!features.fixed_buffers);
-    assert!(!features.registered_files);
-    assert!(!features.io_drain);
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    {
+        // Fallback mode has all features disabled.
+        assert!(!features.sqpoll);
+        assert!(!features.fixed_buffers);
+        assert!(!features.registered_files);
+        assert!(!features.io_drain);
+    }
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    {
+        let _ = (
+            features.sqpoll,
+            features.fixed_buffers,
+            features.registered_files,
+            features.io_drain,
+        );
+    }
 }
 
 #[test]

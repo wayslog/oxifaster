@@ -24,6 +24,10 @@ struct LinuxState {
     file: std::fs::File,
     fixed_buffers: Option<FixedBuffers>,
     use_registered_file: bool,
+    /// Best-effort count of submitted operations that have not been observed via CQE polling.
+    ///
+    /// This is used to make `pending_operations()` and the submit/wait helpers behave sensibly.
+    inflight: u32,
 }
 
 struct FixedBuffers {
@@ -159,6 +163,92 @@ impl IoUringDevice {
         &self.path
     }
 
+    /// Submit queued operations to the kernel.
+    ///
+    /// If the ring is not initialized yet, this returns `Ok(0)` (there is nothing to submit).
+    pub fn submit(&mut self) -> Result<u32, Status> {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return Ok(0);
+        };
+
+        let submitted = state
+            .ring
+            .submit()
+            .map_err(|e| map_ring_io_err_to_status(&e))?;
+        state.inflight = state.inflight.saturating_add(submitted as u32);
+        Ok(submitted as u32)
+    }
+
+    /// Submit queued operations and wait for at least `min_complete` completions.
+    pub fn submit_and_wait(&mut self, min_complete: u32) -> Result<u32, Status> {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return Ok(0);
+        };
+
+        let want = min_complete as usize;
+        let submitted = state
+            .ring
+            .submit_and_wait(want)
+            .map_err(|e| map_ring_io_err_to_status(&e))?;
+        state.inflight = state.inflight.saturating_add(submitted as u32);
+        Ok(submitted as u32)
+    }
+
+    /// Wait for at least `min_complete` completions.
+    ///
+    /// This does not consume CQEs; it only ensures they are available.
+    pub fn wait_completions(&mut self, min_complete: u32) -> Result<u32, Status> {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return Ok(0);
+        };
+
+        if min_complete == 0 {
+            return Ok(available_completions(state));
+        }
+
+        let submitted = state
+            .ring
+            .submit_and_wait(min_complete as usize)
+            .map_err(|e| map_ring_io_err_to_status(&e))?;
+        state.inflight = state.inflight.saturating_add(submitted as u32);
+        Ok(available_completions(state))
+    }
+
+    /// Process completed operations.
+    ///
+    /// This drains all currently available CQEs and returns the number drained.
+    pub fn process_completions(&mut self) -> u32 {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return 0;
+        };
+
+        let drained = drain_completions(state);
+        state.inflight = state.inflight.saturating_sub(drained);
+        drained
+    }
+
+    /// Poll for completions without blocking.
+    ///
+    /// This is equivalent to [`Self::process_completions`].
+    pub fn poll_completions(&mut self) -> u32 {
+        self.process_completions()
+    }
+
+    /// Get pending operation count.
+    ///
+    /// This includes both queued SQEs and submitted-but-not-yet-consumed CQEs (best-effort).
+    pub fn pending_operations(&self) -> u32 {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return 0;
+        };
+        state.inflight.saturating_add(queued_submissions(state))
+    }
+
     fn ensure_initialized_inner(&self) -> io::Result<()> {
         let mut guard = self.state.lock();
         if guard.is_some() {
@@ -215,6 +305,7 @@ impl IoUringDevice {
             file,
             fixed_buffers,
             use_registered_file,
+            inflight: 0,
         });
         Ok(())
     }
@@ -229,14 +320,45 @@ impl IoUringDevice {
     }
 
     fn submit_and_wait_one(state: &mut LinuxState) -> io::Result<i32> {
-        state
-            .ring
-            .submit_and_wait(1)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let submitted = state.ring.submit_and_wait(1)?;
+        state.inflight = state.inflight.saturating_add(submitted as u32);
         let mut cq = state.ring.completion();
+        cq.sync();
         let cqe = cq.next().ok_or_else(|| io::Error::other("missing cqe"))?;
+        state.inflight = state.inflight.saturating_sub(1);
         Ok(cqe.result())
     }
+}
+
+fn map_ring_io_err_to_status(e: &io::Error) -> Status {
+    match e.raw_os_error() {
+        Some(libc::ENOSYS) => Status::NotSupported,
+        Some(libc::EINVAL) => Status::InvalidArgument,
+        _ => Status::IoError,
+    }
+}
+
+fn queued_submissions(state: &mut LinuxState) -> u32 {
+    let mut sq = state.ring.submission();
+    sq.sync();
+    sq.len() as u32
+}
+
+fn available_completions(state: &mut LinuxState) -> u32 {
+    let mut cq = state.ring.completion();
+    cq.sync();
+    cq.len() as u32
+}
+
+fn drain_completions(state: &mut LinuxState) -> u32 {
+    let mut cq = state.ring.completion();
+    cq.sync();
+
+    let mut drained: u32 = 0;
+    while cq.next().is_some() {
+        drained = drained.saturating_add(1);
+    }
+    drained
 }
 
 impl SyncStorageDevice for IoUringDevice {
@@ -466,5 +588,38 @@ mod tests {
 
         // u64::MAX should fail.
         assert!(checked_offset(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_submit_wait_and_drain_nop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("io_uring_nop.dat");
+
+        let mut dev = IoUringDevice::with_defaults(&path);
+        dev.initialize().unwrap();
+
+        // Queue a NOP SQE so the submit/wait APIs have a real completion to work with.
+        dev.with_state(|state| {
+            let entry = opcode::Nop::new().build().user_data(1);
+            unsafe {
+                state
+                    .ring
+                    .submission()
+                    .push(&entry)
+                    .map_err(|_| io::Error::other(IoUringError::SubmissionQueueFull))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(dev.pending_operations(), 1);
+        assert_eq!(dev.submit().unwrap(), 1);
+        assert_eq!(dev.pending_operations(), 1);
+
+        let available = dev.wait_completions(1).unwrap();
+        assert!(available >= 1);
+
+        assert_eq!(dev.process_completions(), 1);
+        assert_eq!(dev.pending_operations(), 0);
     }
 }
