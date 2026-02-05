@@ -25,7 +25,7 @@ pub struct StatsConfig {
 impl Default for StatsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             collection_interval: Duration::from_secs(1),
             track_latency_histogram: false,
             latency_buckets: 100,
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = StatsConfig::default();
-        assert!(config.enabled);
+        assert!(!config.enabled);
         assert!(config.track_per_operation);
     }
 
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_collector_creation() {
         let collector = StatsCollector::with_defaults();
-        assert!(collector.is_enabled());
+        assert!(!collector.is_enabled());
     }
 
     #[test]

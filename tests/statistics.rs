@@ -1,6 +1,6 @@
-//! Statistics 集成测试
+//! Statistics integration tests.
 //!
-//! 测试统计收集功能。
+//! Covers statistics collection and configuration APIs.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use oxifaster::store::{FasterKv, FasterKvConfig};
 fn test_stats_config_default() {
     let config = StatsConfig::default();
 
-    assert!(config.enabled);
+    assert!(!config.enabled);
     assert_eq!(config.collection_interval, Duration::from_secs(1));
     assert!(!config.track_latency_histogram);
     assert!(config.track_per_operation);
@@ -38,7 +38,7 @@ fn test_stats_config_new() {
     let config = StatsConfig::new();
 
     // Should be same as default
-    assert!(config.enabled);
+    assert!(!config.enabled);
 }
 
 // ============ StatsCollector Tests ============
@@ -48,27 +48,27 @@ fn test_stats_collector_new() {
     let config = StatsConfig::default();
     let collector = StatsCollector::new(config);
 
-    assert!(collector.is_enabled());
+    assert!(!collector.is_enabled());
 }
 
 #[test]
 fn test_stats_collector_with_defaults() {
     let collector = StatsCollector::with_defaults();
 
-    assert!(collector.is_enabled());
+    assert!(!collector.is_enabled());
 }
 
 #[test]
 fn test_stats_collector_enable_disable() {
     let collector = StatsCollector::with_defaults();
 
-    assert!(collector.is_enabled());
-
-    collector.disable();
     assert!(!collector.is_enabled());
 
     collector.enable();
     assert!(collector.is_enabled());
+
+    collector.disable();
+    assert!(!collector.is_enabled());
 }
 
 #[test]
