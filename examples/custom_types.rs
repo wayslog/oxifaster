@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use oxifaster::codec::Bincode;
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
+#[cfg(feature = "prometheus")]
+use oxifaster::stats::prometheus::PrometheusRenderer;
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use serde::{Deserialize, Serialize};
@@ -70,12 +72,11 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("--- Upsert users ---");
     for (id, info) in &users {
         let status = session.upsert(Bincode(id.clone()), Bincode(info.clone()));
-        if status == Status::Ok {
-            println!(
-                "  Upsert: {:?} -> {} (age: {}, score: {})",
-                id, info.name, info.age, info.score
-            );
-        }
+        assert_eq!(status, Status::Ok);
+        println!(
+            "  Upsert: {:?} -> {} (age: {}, score: {})",
+            id, info.name, info.age, info.score
+        );
     }
 
     println!("\n--- Read users ---");
@@ -93,12 +94,15 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
                     "  Found: {:?} -> {} (age: {}, score: {})",
                     id, info.name, info.age, info.score
                 );
+                // Ensure the round-trip persisted value matches at least one known entry.
+                assert!(users.iter().any(|(u, i)| u == id && i == &info));
             }
             Ok(None) => {
                 println!("  Not found: {id:?}");
+                assert!(!users.iter().any(|(u, _)| u == id));
             }
             Err(e) => {
-                println!("  Error: {id:?} - {e:?}");
+                panic!("read error for {id:?}: {e:?}");
             }
         }
     }
@@ -110,12 +114,20 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     if session.upsert(Bincode(update_id.clone()), Bincode(updated_info.clone())) == Status::Ok {
         println!("  Update ok: {update_id:?}");
 
-        if let Ok(Some(Bincode(info))) = session.read(&Bincode(update_id.clone())) {
-            println!(
-                "  Verify: {} (age: {}, score: {})",
-                info.name, info.age, info.score
-            );
-        }
+        let read_back = session
+            .read(&Bincode(update_id.clone()))
+            .expect("read after update failed");
+        let read_back = match read_back {
+            Some(Bincode(info)) => info,
+            None => panic!("updated user not found: {update_id:?}"),
+        };
+        assert_eq!(read_back, updated_info);
+        println!(
+            "  Verify: {} (age: {}, score: {})",
+            read_back.name, read_back.age, read_back.score
+        );
+    } else {
+        panic!("update failed: {update_id:?}");
     }
 
     println!("\n--- Delete user ---");
@@ -126,15 +138,25 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
 
         match session.read(&Bincode(delete_id.clone())) {
             Ok(None) => println!("  Verify: user deleted"),
-            Ok(Some(_)) => println!("  Verify: user still exists (unexpected)"),
-            Err(e) => println!("  Verify error: {e:?}"),
+            Ok(Some(_)) => panic!("verify delete failed: user still exists"),
+            Err(e) => panic!("verify delete read error: {e:?}"),
         }
+    } else {
+        panic!("delete failed: {delete_id:?}");
     }
 
     println!("\n--- Index stats ---");
     let stats = store.index_stats();
     println!("  Used entries: {}", stats.used_entries);
     println!("  Load factor: {:.2}%", stats.load_factor * 100.0);
+
+    #[cfg(feature = "prometheus")]
+    {
+        let snapshot = store.stats_snapshot();
+        let text = PrometheusRenderer::new().render_snapshot(&snapshot);
+        println!("\n--- Prometheus metrics (store stats) ---\n{text}");
+        assert!(text.contains("oxifaster_operations_total"));
+    }
 
     println!("\n=== Done ===");
 }

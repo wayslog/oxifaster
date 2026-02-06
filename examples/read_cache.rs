@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example read_cache
 
+mod util;
+
 use std::sync::Arc;
 
 use oxifaster::cache::ReadCacheConfig;
@@ -110,6 +112,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         println!("  总插入次数: {}", summary.insert_calls);
         println!("  插入成功率: {:.2}%", summary.insert_rate * 100.0);
         println!("  淘汰记录数: {}", summary.evicted_records);
+        assert!(summary.read_hits > 0, "expected at least one cache hit");
     }
 
     // 8. 清空缓存
@@ -147,6 +150,10 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         println!("  预分配: {}", config.pre_allocate);
         println!("  Copy-to-Tail: {}", config.copy_to_tail);
     }
+
+    let snapshot = store.stats_snapshot();
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }

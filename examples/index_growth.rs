@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example index_growth
 
+mod util;
+
 use std::sync::Arc;
 
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
@@ -12,6 +14,7 @@ use oxifaster::index::{
     MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
 };
 use oxifaster::store::{FasterKv, FasterKvConfig};
+use oxifaster::Status;
 use tempfile::tempdir;
 
 fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
@@ -72,6 +75,15 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("  已插入: 500 条记录");
     println!("  已用条目: {}", stats.used_entries);
     println!("  负载因子: {:.2}%\n", stats.load_factor * 100.0);
+
+    // Trigger store index growth (public API) and verify it is observed.
+    let current_size = store.index_size();
+    let new_size = current_size * 2;
+    let status = store.grow_index_with_callback(new_size, None);
+    assert_eq!(status, Status::Ok);
+    let snapshot = store.stats_snapshot();
+    assert!(snapshot.index_grows_started >= 1);
+    assert!(snapshot.index_grows_completed + snapshot.index_grows_failed >= 1);
 
     // 4. GrowState 基本使用
     println!("--- 4. GrowState 演示 ---");
@@ -203,6 +215,10 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         "  设置 growth_factor=1 后: {}",
         clamped_config.growth_factor
     );
+
+    let snapshot = store.stats_snapshot();
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }

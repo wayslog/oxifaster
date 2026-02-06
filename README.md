@@ -19,6 +19,7 @@ oxifaster is a Rust port of Microsoft's [FASTER](https://github.com/microsoft/FA
 - **Index Growth**: Dynamic hash table expansion with rehash callback for correctness
 - **F2 Architecture**: Two-tier storage with hot-cold data separation, including complete Checkpoint/Recovery
 - **Statistics**: Comprehensive statistics collection integrated into all CRUD operations
+- **Prometheus Metrics**: Render statistics snapshots as Prometheus text exposition for external scraping (feature = `prometheus`)
 
 ## Quick Start
 
@@ -39,6 +40,45 @@ oxifaster = { path = "oxifaster", features = ["io_uring"] }
 ```
 
 Note: the real `io_uring` backend is only available on Linux. On non-Linux platforms (or when the feature is disabled), `IoUringDevice` falls back to a portable file-backed implementation.
+
+Enable Prometheus text exposition (for statistics snapshots):
+
+```toml
+[dependencies]
+oxifaster = { path = "oxifaster", features = ["prometheus"] }
+```
+
+With `prometheus` enabled, you can also run a minimal HTTP `/metrics` server (Tokio required):
+
+```rust
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use oxifaster::device::NullDisk;
+use oxifaster::stats::prometheus::{MetricsHttpServer, PrometheusRenderer};
+use oxifaster::store::{FasterKv, FasterKvConfig};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(
+        FasterKvConfig::default(),
+        NullDisk::new(),
+    ));
+
+    let store_for_server = store.clone();
+    let render = Arc::new(move || {
+        PrometheusRenderer::new().render_snapshot(&store_for_server.stats_snapshot())
+    });
+
+    let addr: SocketAddr = "127.0.0.1:9898".parse().unwrap();
+    let server = MetricsHttpServer::bind(addr, render).await?;
+    println!("metrics: http://{}/metrics", server.local_addr());
+
+    tokio::signal::ctrl_c().await.ok();
+    server.shutdown().await?;
+    Ok(())
+}
+```
 
 ### Basic Usage
 

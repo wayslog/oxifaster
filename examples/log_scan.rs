@@ -20,17 +20,25 @@ fn main() {
     println!("  结束地址: {:?}", range.end);
     println!("  是否为空: {}", range.is_empty());
     println!("  页面数量: {}\n", range.page_count());
+    assert!(!range.is_empty());
+    assert_eq!(range.page_count(), 11);
 
     // 2. 空范围
     println!("--- 2. 空范围检测 ---");
     let empty_range1 = ScanRange::new(Address::new(5, 0), Address::new(5, 0));
     println!("  相同地址 (5,0) -> (5,0): 空={}", empty_range1.is_empty());
+    assert!(empty_range1.is_empty());
+    assert_eq!(empty_range1.page_count(), 0);
 
     let empty_range2 = ScanRange::new(Address::new(10, 0), Address::new(5, 0));
     println!("  反向地址 (10,0) -> (5,0): 空={}", empty_range2.is_empty());
+    assert!(empty_range2.is_empty());
+    assert_eq!(empty_range2.page_count(), 0);
 
     let valid_range = ScanRange::new(Address::new(0, 0), Address::new(1, 0));
     println!("  有效地址 (0,0) -> (1,0): 空={}\n", valid_range.is_empty());
+    assert!(!valid_range.is_empty());
+    assert_eq!(valid_range.page_count(), 2);
 
     // 3. LogPageStatus 状态
     println!("--- 3. LogPageStatus 状态 ---");
@@ -42,6 +50,7 @@ fn main() {
     ];
     for (name, status) in &statuses {
         println!("  {name:15}: {status:?}");
+        assert_eq!(*name, status.as_str());
     }
     println!();
 
@@ -58,6 +67,22 @@ fn main() {
         let range = ScanRange::new(*begin, *end);
         println!("  {}: {} 页", desc, range.page_count());
     }
+    assert_eq!(
+        ScanRange::new(Address::new(0, 0), Address::new(1, 0)).page_count(),
+        2
+    );
+    assert_eq!(
+        ScanRange::new(Address::new(0, 0), Address::new(5, 0)).page_count(),
+        6
+    );
+    assert_eq!(
+        ScanRange::new(Address::new(3, 100), Address::new(10, 500)).page_count(),
+        8
+    );
+    assert_eq!(
+        ScanRange::new(Address::new(0, 0), Address::new(100, 0)).page_count(),
+        101
+    );
     println!();
 
     // 5. 扫描范围边界
@@ -69,10 +94,12 @@ fn main() {
         "  起始偏移 100, 结束偏移 500: {} 页",
         range_with_offset.page_count()
     );
+    assert_eq!(range_with_offset.page_count(), 3);
 
     // 最大页面
     let large_range = ScanRange::new(Address::new(0, 0), Address::new(1000, 0));
     println!("  大范围 (0 -> 1000): {} 页", large_range.page_count());
+    assert_eq!(large_range.page_count(), 1001);
     println!();
 
     // 6. 扫描模式说明

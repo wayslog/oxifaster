@@ -43,6 +43,8 @@
 
 pub mod collector;
 pub mod metrics;
+#[cfg(feature = "prometheus")]
+pub mod prometheus;
 pub mod reporter;
 
 pub use collector::{StatsCollector, StatsConfig, StatsSnapshot};
