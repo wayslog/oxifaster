@@ -94,11 +94,15 @@ struct PendingIoKey {
 }
 
 #[derive(Debug, Clone)]
-struct DiskReadCacheEntry<K, V> {
-    parsed: Result<DiskReadResult<K, V>, Status>,
+struct DiskReadCacheEntry {
+    /// Raw bytes read from the device for the record starting at `address`.
+    ///
+    /// Stored as an `Arc` so multiple pending readers can reuse the same bytes (e.g. under hash
+    /// collisions) without requiring `K/V: Clone`.
+    bytes: Result<Arc<Vec<u8>>, Status>,
 }
 
-type DiskReadCache<K, V> = HashMap<u64, DiskReadCacheEntry<K, V>>;
+type DiskReadCache = HashMap<u64, DiskReadCacheEntry>;
 
 pub(crate) enum ChainReadOutcome<V> {
     Completed(Option<V>),
@@ -143,7 +147,7 @@ where
     /// Convention: `read()` returns `Pending` when it hits a disk address. Once the background
     /// read completes, the parsed result is stored here; the caller calls `complete_pending()`
     /// and then retries `read()` to hit the cache.
-    disk_read_results: Mutex<DiskReadCache<K, V>>,
+    disk_read_results: Mutex<DiskReadCache>,
     /// Background I/O completion counter (aggregated by `thread_id` and consumed by sessions in
     /// `complete_pending()`).
     pending_io_completed: Mutex<HashMap<PendingIoKey, u32>>,
@@ -822,8 +826,8 @@ where
 
             if address < head_address {
                 // Prefer hitting the "disk read result cache" to avoid duplicate I/O submissions.
-                if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
-                    match result.parsed {
+                if let Some(result) = self.peek_disk_read_result(address) {
+                    match result {
                         Ok(parsed) => {
                             if parsed.key.as_ref() == Some(key) {
                                 self.record_read_stats(parsed.value.is_some(), start);
@@ -1507,8 +1511,14 @@ where
                             Ok(b) => b,
                             Err(s) => return s,
                         };
-                    if key_matches && !view.is_tombstone() {
-                        // Key exists - abort conditional insert
+                    if key_matches {
+                        if view.is_tombstone() {
+                            // A tombstone is definitive for key existence: once we see it, older
+                            // versions are logically deleted and must not affect conditional insert.
+                            break;
+                        }
+
+                        // Key exists - abort conditional insert.
                         if self.stats_collector.is_enabled() {
                             self.stats_collector
                                 .store_stats

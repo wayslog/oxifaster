@@ -329,17 +329,29 @@ where
     }
 
     fn enqueue_pending_read(&mut self, ctx_id: u64, key: K, hash: u64, address: Address) {
-        self.pending_reads
-            .entry(ctx_id)
-            .or_default()
-            .push(PendingReadRequest {
-                key,
-                hash,
-                address,
-                ctx_id,
-                cancelled: false,
-                retry_tracked: true,
-            });
+        let requests = self.pending_reads.entry(ctx_id).or_default();
+
+        // Avoid unbounded growth when a caller retries `read()` while the same request is still
+        // pending (or the I/O is inflight). Without de-duplication, `retry_count` can grow without
+        // bound, making `complete_pending(wait=true)` unable to drain.
+        if let Some(existing) = requests
+            .iter_mut()
+            .find(|r| !r.cancelled && r.hash == hash && r.key == key)
+        {
+            // Keep the newest observed on-disk address so the request can make forward progress
+            // even if the caller retries `read()` while the chain traversal advances.
+            existing.address = address;
+            return;
+        }
+
+        requests.push(PendingReadRequest {
+            key,
+            hash,
+            address,
+            ctx_id,
+            cancelled: false,
+            retry_tracked: true,
+        });
         self.ctx.on_retry_requests_ready(ctx_id, 1);
     }
 
@@ -386,7 +398,7 @@ where
 
             // Handle cancelled requests
             if requests[i].cancelled {
-                if self.store.take_disk_read_result(address).is_some() {
+                if self.store.peek_disk_read_result(address).is_some() {
                     let _ = requests.swap_remove(i);
                 } else {
                     i += 1;
@@ -395,7 +407,7 @@ where
             }
 
             // Check if disk read completed - need to extract result to avoid borrow conflicts
-            let parsed = match self.store.take_disk_read_result(address) {
+            let parsed = match self.store.peek_disk_read_result(address) {
                 Some(p) => p,
                 None => {
                     i += 1;
@@ -698,6 +710,7 @@ where
     /// Conditionally insert a key-value pair
     ///
     /// Inserts the key-value pair only if the key does not already exist in the store.
+    /// A key that has been deleted (i.e. whose latest record is a tombstone) is treated as absent.
     /// Returns `Status::Ok` if the insertion succeeded, `Status::Aborted` if the key
     /// already exists.
     ///
