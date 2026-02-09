@@ -40,7 +40,7 @@ where
                     address,
                     result,
                 } => {
-                    let bytes = match result {
+                    let parsed = match result {
                         Ok(bytes) => {
                             if self.stats_collector.is_enabled() {
                                 self.stats_collector
@@ -48,7 +48,7 @@ where
                                     .operational
                                     .record_pending_io_completed();
                             }
-                            Ok(std::sync::Arc::new(bytes))
+                            self.parse_disk_record(&bytes)
                         }
                         Err(err) => {
                             if self.stats_collector.is_enabled() {
@@ -72,7 +72,7 @@ where
                         if cache.len() >= Self::DISK_READ_CACHE_MAX_ENTRIES {
                             cache.clear();
                         }
-                        cache.insert(address.control(), DiskReadCacheEntry { bytes });
+                        cache.insert(address.control(), DiskReadCacheEntry { parsed });
                     }
 
                     if current_thread_tag_for(thread_id) != thread_tag {
@@ -116,15 +116,25 @@ where
         &self,
         address: Address,
     ) -> Option<Result<DiskReadResult<K, V>, Status>> {
-        let entry = self
-            .disk_read_results
+        self.disk_read_results
             .lock()
             .get(&address.control())
-            .cloned()?;
-        match entry.bytes {
-            Ok(bytes) => Some(self.parse_disk_record(&bytes)),
-            Err(status) => Some(Err(status)),
-        }
+            .cloned()
+            .map(|e| e.parsed)
+    }
+
+    /// Consume a parsed disk read result for `address` (if present).
+    ///
+    /// New code should prefer `peek_disk_read_result` to allow reusing the cached result
+    /// without re-submitting I/O.
+    pub(crate) fn take_disk_read_result(
+        &self,
+        address: Address,
+    ) -> Option<Result<DiskReadResult<K, V>, Status>> {
+        self.disk_read_results
+            .lock()
+            .remove(&address.control())
+            .map(|e| e.parsed)
     }
 
     /// Submit a disk read for a specific execution context.

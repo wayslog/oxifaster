@@ -94,15 +94,11 @@ struct PendingIoKey {
 }
 
 #[derive(Debug, Clone)]
-struct DiskReadCacheEntry {
-    /// Raw bytes read from the device for the record starting at `address`.
-    ///
-    /// Stored as an `Arc` so multiple pending readers can reuse the same bytes (e.g. under hash
-    /// collisions) without requiring `K/V: Clone`.
-    bytes: Result<Arc<Vec<u8>>, Status>,
+struct DiskReadCacheEntry<K, V> {
+    parsed: Result<DiskReadResult<K, V>, Status>,
 }
 
-type DiskReadCache = HashMap<u64, DiskReadCacheEntry>;
+type DiskReadCache<K, V> = HashMap<u64, DiskReadCacheEntry<K, V>>;
 
 pub(crate) enum ChainReadOutcome<V> {
     Completed(Option<V>),
@@ -147,7 +143,7 @@ where
     /// Convention: `read()` returns `Pending` when it hits a disk address. Once the background
     /// read completes, the parsed result is stored here; the caller calls `complete_pending()`
     /// and then retries `read()` to hit the cache.
-    disk_read_results: Mutex<DiskReadCache>,
+    disk_read_results: Mutex<DiskReadCache<K, V>>,
     /// Background I/O completion counter (aggregated by `thread_id` and consumed by sessions in
     /// `complete_pending()`).
     pending_io_completed: Mutex<HashMap<PendingIoKey, u32>>,
