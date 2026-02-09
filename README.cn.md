@@ -19,6 +19,7 @@ oxifaster 是微软 [FASTER](https://github.com/microsoft/FASTER) 项目的 Rust
 - **Index Growth**: 动态哈希表扩容，支持 rehash 回调确保正确性
 - **F2 架构**: 热冷数据分离的两级存储，含完整 Checkpoint/Recovery
 - **Statistics**: 完整的统计收集，集成到所有 CRUD 操作
+- **Prometheus Metrics**: 将统计快照渲染为 Prometheus 文本格式，便于外部抓取（feature = `prometheus`）
 
 ## 快速开始
 
@@ -39,6 +40,45 @@ oxifaster = { path = "oxifaster", features = ["io_uring"] }
 ```
 
 说明：真实 `io_uring` 后端仅在 Linux 可用；在非 Linux（或未开启 feature）时，`IoUringDevice` 会回退到可移植的基于文件的实现（非 io_uring），以保持 API 可用与可编译。
+
+启用 Prometheus 文本导出（用于 statistics 快照）：
+
+```toml
+[dependencies]
+oxifaster = { path = "oxifaster", features = ["prometheus"] }
+```
+
+启用 `prometheus` 后，也可以启动一个最小的 HTTP `/metrics` 服务器（需要 Tokio 运行时）：
+
+```rust
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use oxifaster::device::NullDisk;
+use oxifaster::stats::prometheus::{MetricsHttpServer, PrometheusRenderer};
+use oxifaster::store::{FasterKv, FasterKvConfig};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(
+        FasterKvConfig::default(),
+        NullDisk::new(),
+    ));
+
+    let store_for_server = store.clone();
+    let render = Arc::new(move || {
+        PrometheusRenderer::new().render_snapshot(&store_for_server.stats_snapshot())
+    });
+
+    let addr: SocketAddr = "127.0.0.1:9898".parse().unwrap();
+    let server = MetricsHttpServer::bind(addr, render).await?;
+    println!("metrics: http://{}/metrics", server.local_addr());
+
+    tokio::signal::ctrl_c().await.ok();
+    server.shutdown().await?;
+    Ok(())
+}
+```
 
 ### 基本使用
 

@@ -822,8 +822,8 @@ where
 
             if address < head_address {
                 // Prefer hitting the "disk read result cache" to avoid duplicate I/O submissions.
-                if let Some(result) = self.disk_read_results.lock().remove(&address.control()) {
-                    match result.parsed {
+                if let Some(result) = self.peek_disk_read_result(address) {
+                    match result {
                         Ok(parsed) => {
                             if parsed.key.as_ref() == Some(key) {
                                 self.record_read_stats(parsed.value.is_some(), start);
@@ -1507,8 +1507,14 @@ where
                             Ok(b) => b,
                             Err(s) => return s,
                         };
-                    if key_matches && !view.is_tombstone() {
-                        // Key exists - abort conditional insert
+                    if key_matches {
+                        if view.is_tombstone() {
+                            // A tombstone is definitive for key existence: once we see it, older
+                            // versions are logically deleted and must not affect conditional insert.
+                            break;
+                        }
+
+                        // Key exists - abort conditional insert.
                         if self.stats_collector.is_enabled() {
                             self.stats_collector
                                 .store_stats

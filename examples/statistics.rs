@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example statistics
 
+mod util;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,6 +87,10 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         }
     }
     println!("  删除 100 条记录\n");
+
+    let snapshot = store.stats_snapshot();
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     // 5. 获取统计快照
     println!("--- 5. 统计快照 ---");

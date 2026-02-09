@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use oxifaster::codec::Utf8;
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
+#[cfg(feature = "prometheus")]
+use oxifaster::stats::prometheus::PrometheusRenderer;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use oxifaster::varlen::{SpanByte, SpanByteBuilder};
 use tempfile::tempdir;
@@ -29,23 +31,39 @@ fn run_fasterkv_with_varlen_utf8<D: StorageDevice>(device_name: &str, device: D)
 
         let key = Utf8::from("user:1");
         let value = Utf8::from("Alice");
-        let status = session.upsert(key.clone(), value);
+        let status = session.upsert(key.clone(), value.clone());
         println!("  Upsert user:1 -> Alice: {status:?}");
 
-        match session.read(&key) {
-            Ok(Some(v)) => println!("  Read user:1: {}", v.0),
-            Ok(None) => println!("  user:1 not found"),
-            Err(_) => println!("  Read failed"),
-        }
+        let read_back = session.read(&key).expect("read failed");
+        let read_back = match read_back {
+            Some(v) => v,
+            None => panic!("expected user:1 to exist after upsert"),
+        };
+        assert_eq!(read_back, value);
+        println!("  Read user:1: {}", read_back.0);
 
         let new_value = Utf8::from("Alice Smith");
         session.upsert(key.clone(), new_value);
-        if let Ok(Some(v)) = session.read(&key) {
-            println!("  Updated user:1: {}", v.0);
-        }
+        let updated = session.read(&key).expect("read after update failed");
+        let updated = match updated {
+            Some(v) => v,
+            None => panic!("expected user:1 to exist after update"),
+        };
+        assert_eq!(updated.0, "Alice Smith");
+        println!("  Updated user:1: {}", updated.0);
 
         let delete_status = session.delete(&key);
         println!("  Delete user:1: {delete_status:?}");
+        let after_delete = session.read(&key).expect("read after delete failed");
+        assert_eq!(after_delete, None);
+    }
+
+    #[cfg(feature = "prometheus")]
+    {
+        let snapshot = store.stats_snapshot();
+        let text = PrometheusRenderer::new().render_snapshot(&snapshot);
+        println!("\n--- Prometheus metrics (store stats) ---\n{text}");
+        assert!(text.contains("oxifaster_operations_total"));
     }
     println!();
 }

@@ -170,6 +170,7 @@
 //! ## Feature Flags
 //!
 //! - `statistics`: Enable comprehensive statistics collection (slight performance overhead)
+//! - `prometheus`: Enable Prometheus text exposition rendering for statistics snapshots
 
 #![warn(missing_docs)]
 #![allow(dead_code)]

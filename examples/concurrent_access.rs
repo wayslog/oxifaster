@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example concurrent_access
 
+mod util;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -119,6 +121,11 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     let stats = store.index_stats();
     println!("已用条目: {}", stats.used_entries);
     println!("负载因子: {:.2}%", stats.load_factor * 100.0);
+
+    let snapshot = store.stats_snapshot();
+    assert!(snapshot.total_operations > 0);
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }

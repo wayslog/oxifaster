@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example async_operations
 
+mod util;
+
 use std::sync::Arc;
 
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
@@ -119,6 +121,13 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("      session.upsert_async(key, value).await;");
     println!("  }}");
     println!("  ```");
+
+    let snapshot = store.stats_snapshot();
+    assert!(snapshot.upserts >= 10);
+    assert!(snapshot.deletes >= 1);
+    assert!(snapshot.rmws >= 1);
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }

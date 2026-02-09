@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example basic_kv
 
+mod util;
+
 use std::sync::Arc;
 
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
@@ -97,6 +99,13 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("  混合日志:");
     println!("    尾部地址: {}", log_stats.tail_address);
     println!("    可变区域: {} 字节", log_stats.mutable_bytes);
+
+    let snapshot = store.stats_snapshot();
+    assert!(snapshot.upserts >= 15, "expected at least 15 upserts");
+    assert!(snapshot.reads >= 15, "expected at least 15 reads");
+    assert!(snapshot.deletes >= 3, "expected at least 3 deletes");
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }

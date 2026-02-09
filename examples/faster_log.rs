@@ -6,6 +6,8 @@
 
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::log::{FasterLog, FasterLogConfig};
+#[cfg(feature = "prometheus")]
+use oxifaster::stats::prometheus::PrometheusRenderer;
 use tempfile::tempdir;
 
 fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
@@ -44,29 +46,26 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
                 addresses.push(addr);
             }
             Err(e) => {
-                println!("  [{}] 追加失败: {:?}", i + 1, e);
+                panic!("append failed at {}: {e:?}", i + 1);
             }
         }
     }
+    assert_eq!(addresses.len(), entries.len());
 
     // 4. 提交日志
     println!("\n--- 提交日志 ---");
-    match log.commit() {
-        Ok(committed_addr) => {
-            println!("已提交到地址: {committed_addr}");
-        }
-        Err(e) => {
-            println!("提交失败: {e:?}");
-        }
-    }
+    let committed_addr = log.commit().expect("commit failed");
+    println!("已提交到地址: {committed_addr}");
 
     // 5. 读取特定条目
     println!("\n--- 读取特定条目 ---");
     for (i, addr) in addresses.iter().enumerate() {
-        if let Some(data) = log.read_entry(*addr) {
-            let text = String::from_utf8_lossy(&data);
-            println!("  [{}] {} - {}", i + 1, addr, text);
-        }
+        let data = log
+            .read_entry(*addr)
+            .unwrap_or_else(|| panic!("read_entry returned None for addr={addr}"));
+        let text = String::from_utf8_lossy(&data);
+        assert_eq!(text, entries[i]);
+        println!("  [{}] {} - {}", i + 1, addr, text);
     }
 
     // 6. 扫描所有条目
@@ -78,15 +77,15 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         println!("  {} - {} ({} 字节)", addr, text, data.len());
     }
     println!("共扫描到 {count} 条记录");
+    assert_eq!(count, entries.len());
 
     // 7. 追加更多条目
     println!("\n--- 追加更多条目 ---");
     let more_entries = ["新增日志 A", "新增日志 B", "新增日志 C"];
 
     for entry in &more_entries {
-        if let Ok(addr) = log.append(entry.as_bytes()) {
-            println!("  追加: {addr} - {entry}");
-        }
+        let addr = log.append(entry.as_bytes()).expect("append failed");
+        println!("  追加: {addr} - {entry}");
     }
 
     // 8. 再次提交
@@ -102,6 +101,13 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     println!("  页面大小: {} 字节", stats.page_size);
     println!("  缓冲页数: {}", stats.buffer_pages);
 
+    #[cfg(feature = "prometheus")]
+    {
+        let text = PrometheusRenderer::new().render_log_stats(&stats);
+        println!("\n--- Prometheus metrics (log stats) ---\n{text}");
+        assert!(text.contains("oxifaster_faster_log_tail_address"));
+    }
+
     // 10. 截断日志
     println!("\n--- 截断日志 ---");
     if !addresses.is_empty() {
@@ -109,6 +115,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         log.truncate_until(truncate_addr);
         println!("已截断到地址: {truncate_addr}");
         println!("新的起始地址: {}", log.get_begin_address());
+        assert!(log.get_begin_address() >= truncate_addr);
     }
 
     // 11. 关闭日志
@@ -116,6 +123,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     log.close();
     println!("日志已关闭");
     println!("是否已关闭: {}", log.is_closed());
+    assert!(log.is_closed());
 
     println!("\n=== 示例完成 ===");
 }

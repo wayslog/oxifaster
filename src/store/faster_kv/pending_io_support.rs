@@ -14,6 +14,10 @@ where
     V: PersistValue,
     D: StorageDevice,
 {
+    // Keep the disk read cache bounded. This cache is only an optimization / rendezvous point for
+    // pending reads; it is safe to clear under pressure.
+    const DISK_READ_CACHE_MAX_ENTRIES: usize = 4096;
+
     const RECORD_INFO_SIZE: usize = std::mem::size_of::<RecordInfo>();
     const VARLEN_LENGTHS_SIZE: usize = 2 * std::mem::size_of::<u32>();
     const VARLEN_HEADER_SIZE: usize = Self::RECORD_INFO_SIZE + Self::VARLEN_LENGTHS_SIZE;
@@ -63,9 +67,13 @@ where
                             Err(Status::IoError)
                         }
                     };
-                    self.disk_read_results
-                        .lock()
-                        .insert(address.control(), DiskReadCacheEntry { parsed });
+                    {
+                        let mut cache = self.disk_read_results.lock();
+                        if cache.len() >= Self::DISK_READ_CACHE_MAX_ENTRIES {
+                            cache.clear();
+                        }
+                        cache.insert(address.control(), DiskReadCacheEntry { parsed });
+                    }
 
                     if current_thread_tag_for(thread_id) != thread_tag {
                         continue;
@@ -101,9 +109,24 @@ where
             .unwrap_or(0)
     }
 
-    /// Consume a parsed disk read result for `address` (if present).
+    /// Peek a disk read result for `address` (if present).
     ///
     /// This is primarily used to advance pending requests inside `complete_pending()`.
+    pub(crate) fn peek_disk_read_result(
+        &self,
+        address: Address,
+    ) -> Option<Result<DiskReadResult<K, V>, Status>> {
+        self.disk_read_results
+            .lock()
+            .get(&address.control())
+            .cloned()
+            .map(|e| e.parsed)
+    }
+
+    /// Consume a parsed disk read result for `address` (if present).
+    ///
+    /// New code should prefer `peek_disk_read_result` to allow reusing the cached result
+    /// without re-submitting I/O.
     pub(crate) fn take_disk_read_result(
         &self,
         address: Address,

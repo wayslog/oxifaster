@@ -4,6 +4,8 @@
 //!
 //! 运行: cargo run --example compaction
 
+mod util;
+
 use std::sync::Arc;
 
 use oxifaster::compaction::{
@@ -13,6 +15,7 @@ use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::scan::ScanRange;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use oxifaster::Address;
+use oxifaster::Status;
 use tempfile::tempdir;
 
 fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
@@ -153,8 +156,19 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         range.end.control() - range.begin.control()
     );
 
-    // 9. 验证数据完整性 (压缩后未删除的数据应该仍然存在)
-    println!("--- 9. 验证数据完整性 ---");
+    // 9. 执行存储压缩（public API）
+    println!("--- 9. 执行 FasterKv::log_compact() ---");
+    let result = store.log_compact();
+    println!("  状态: {:?}", result.status);
+    println!("  压缩记录数: {}", result.stats.records_compacted);
+    assert_eq!(result.status, Status::Ok);
+
+    let snapshot = store.stats_snapshot();
+    assert!(snapshot.compactions_started >= 1);
+    assert!(snapshot.compactions_completed + snapshot.compactions_failed >= 1);
+
+    // 10. 验证数据完整性 (压缩后未删除的数据应该仍然存在)
+    println!("--- 10. 验证数据完整性 ---");
     {
         let mut session = store.start_session().unwrap();
         let mut found = 0;
@@ -172,8 +186,8 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         println!("  未找到记录: {not_found} (已删除)\n");
     }
 
-    // 10. should_compact_record 逻辑演示
-    println!("--- 10. 记录压缩判断逻辑 ---");
+    // 11. should_compact_record 逻辑演示
+    println!("--- 11. 记录压缩判断逻辑 ---");
     let compactor = Compactor::new();
     let addr1 = Address::new(1, 100);
     let addr2 = Address::new(2, 200);
@@ -195,6 +209,10 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 旧版本 -> 应该跳过
     let should3 = compactor.should_compact_record(addr1, addr2, false);
     println!("  旧版本: {}", if should3 { "压缩" } else { "跳过" });
+
+    let snapshot = store.stats_snapshot();
+    util::assert_observable_activity(&snapshot);
+    util::print_prometheus(&snapshot);
 
     println!("\n=== 示例完成 ===");
 }
