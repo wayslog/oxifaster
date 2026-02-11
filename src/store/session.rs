@@ -21,6 +21,7 @@ use crate::checkpoint::SessionState;
 use crate::codec::{KeyCodec, PersistKey, PersistValue};
 use crate::device::StorageDevice;
 use crate::epoch::{get_thread_tag, EpochGuard};
+use crate::index::{AtomicHashBucketEntry, KeyHash};
 use crate::status::Status;
 use crate::store::{Action, Phase};
 use crate::store::{FasterKv, RecordView};
@@ -40,6 +41,28 @@ pub(crate) struct ExecutionContext {
     pub(crate) retry_requests: u32,
 }
 
+const INDEX_ENTRY_CACHE_SIZE: usize = 64;
+
+#[derive(Debug, Clone, Copy)]
+struct IndexEntryCacheSlot {
+    hash: u64,
+    version: u8,
+    atomic_entry: *const AtomicHashBucketEntry,
+}
+
+impl IndexEntryCacheSlot {
+    const EMPTY: Self = Self {
+        hash: 0,
+        version: 0,
+        atomic_entry: std::ptr::null(),
+    };
+
+    #[inline]
+    const fn is_empty(self) -> bool {
+        self.atomic_entry.is_null()
+    }
+}
+
 impl ExecutionContext {
     fn new(id: u64, version: u32) -> Self {
         Self {
@@ -56,7 +79,7 @@ impl ExecutionContext {
 /// Tracks per-thread state including the serial number for CPR (Concurrent Prefix Recovery).
 /// The serial number is incremented with each successful mutating operation and is used to
 /// validate recovery boundaries.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ThreadContext {
     /// Thread ID
     pub thread_id: usize,
@@ -78,6 +101,8 @@ pub struct ThreadContext {
     pub(crate) last_cpr_state: u64,
     /// Last on-disk address observed by `read()` when returning `Status::Pending`.
     pub(crate) last_pending_read: Option<Address>,
+    index_entry_cache_store: usize,
+    index_entry_cache: [IndexEntryCacheSlot; INDEX_ENTRY_CACHE_SIZE],
 }
 
 impl ThreadContext {
@@ -96,6 +121,62 @@ impl ThreadContext {
             next_ctx_id: 2,
             last_cpr_state: 0,
             last_pending_read: None,
+            index_entry_cache_store: 0,
+            index_entry_cache: [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE],
+        }
+    }
+
+    #[inline]
+    fn index_cache_slot(hash: KeyHash) -> usize {
+        (hash.hash() as usize) & (INDEX_ENTRY_CACHE_SIZE - 1)
+    }
+
+    #[inline]
+    fn clear_index_entry_cache(&mut self) {
+        self.index_entry_cache = [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE];
+    }
+
+    #[inline]
+    pub(crate) fn prepare_index_entry_cache_for_store(&mut self, store_id: usize) {
+        if self.index_entry_cache_store != store_id {
+            self.index_entry_cache_store = store_id;
+            self.clear_index_entry_cache();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get_cached_index_entry(
+        &self,
+        hash: KeyHash,
+        version: u8,
+    ) -> Option<*const AtomicHashBucketEntry> {
+        let slot = self.index_entry_cache[Self::index_cache_slot(hash)];
+        if slot.is_empty() || slot.hash != hash.hash() || slot.version != version {
+            return None;
+        }
+        Some(slot.atomic_entry)
+    }
+
+    #[inline]
+    pub(crate) fn put_cached_index_entry(
+        &mut self,
+        hash: KeyHash,
+        version: u8,
+        atomic_entry: *const AtomicHashBucketEntry,
+    ) {
+        self.index_entry_cache[Self::index_cache_slot(hash)] = IndexEntryCacheSlot {
+            hash: hash.hash(),
+            version,
+            atomic_entry,
+        };
+    }
+
+    #[inline]
+    pub(crate) fn invalidate_cached_index_entry(&mut self, hash: KeyHash) {
+        let slot = Self::index_cache_slot(hash);
+        let cached = self.index_entry_cache[slot];
+        if !cached.is_empty() && cached.hash == hash.hash() {
+            self.index_entry_cache[slot] = IndexEntryCacheSlot::EMPTY;
         }
     }
 
@@ -213,6 +294,26 @@ impl ThreadContext {
         self.version = self.current.version;
         self.pending_count = self.current.pending_ios;
         self.retry_count = self.current.retry_requests;
+        self.clear_index_entry_cache();
+    }
+}
+
+impl Clone for ThreadContext {
+    fn clone(&self) -> Self {
+        Self {
+            thread_id: self.thread_id,
+            version: self.version,
+            serial_num: self.serial_num,
+            pending_count: self.pending_count,
+            retry_count: self.retry_count,
+            current: self.current.clone(),
+            prev: self.prev.clone(),
+            next_ctx_id: self.next_ctx_id,
+            last_cpr_state: self.last_cpr_state,
+            last_pending_read: self.last_pending_read,
+            index_entry_cache_store: 0,
+            index_entry_cache: [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE],
+        }
     }
 }
 

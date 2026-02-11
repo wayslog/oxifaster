@@ -105,6 +105,18 @@ impl RecordInfo {
         }
     }
 
+    /// Set the previous address assuming the caller has exclusive access to the record header.
+    ///
+    /// This is intended for the record initialization path before the record is published
+    /// (reachable from the hash index). In that phase, using a plain relaxed store avoids an
+    /// atomic RMW loop on the hot upsert/delete path.
+    #[inline]
+    pub fn set_previous_address_relaxed(&self, addr: Address) {
+        let current = self.control.load(Ordering::Relaxed);
+        let new_val = (current & !Self::PREV_ADDR_MASK) | (addr.control() & Self::PREV_ADDR_MASK);
+        self.control.store(new_val, Ordering::Relaxed);
+    }
+
     /// Get the checkpoint version.
     #[inline]
     pub fn checkpoint_version(&self) -> u16 {
@@ -125,6 +137,17 @@ impl RecordInfo {
         } else {
             self.control.fetch_and(!Self::INVALID_BIT, Ordering::AcqRel);
         }
+    }
+
+    /// Publish a fully initialized record by clearing the invalid flag.
+    ///
+    /// Readers load the header with `Acquire` (e.g. via `is_invalid()`), so a `Release` store
+    /// here is sufficient to publish all prior record writes.
+    #[inline]
+    pub fn publish_valid(&self) {
+        let mut control = self.control.load(Ordering::Relaxed);
+        control &= !Self::INVALID_BIT;
+        self.control.store(control, Ordering::Release);
     }
 
     /// Check if this is a tombstone (delete marker).

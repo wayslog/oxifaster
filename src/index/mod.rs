@@ -57,6 +57,9 @@ mod hash_bucket;
 mod hash_table;
 mod mem_index;
 
+#[cfg(feature = "index-profile")]
+pub mod profile;
+
 pub use cold_index::{
     ColdIndex, ColdIndexConfig, ColdIndexFindResult, ColdIndexStats, DefaultHashIndexChunk,
     GcStateColdIndex, HashIndexChunk, HashIndexChunkKey, HashIndexChunkPos, HashIndexOp,

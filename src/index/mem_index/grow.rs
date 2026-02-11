@@ -245,7 +245,8 @@ impl MemHashIndex {
             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
             if overflow.is_unused() {
                 // Append an overflow bucket.
-                let new_addr = self.overflow_pools[new_version as usize].allocate();
+                let (new_addr, new_ptr) =
+                    self.overflow_pools[new_version as usize].allocate_with_ptr();
                 let new_overflow = HashBucketOverflowEntry::new(new_addr);
                 let expected = HashBucketOverflowEntry::INVALID;
 
@@ -256,15 +257,14 @@ impl MemHashIndex {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        let new_ptr =
-                            self.overflow_pools[new_version as usize].bucket_ptr(new_addr);
-                        if let Some(p) = new_ptr {
-                            bucket_ptr = p;
-                            continue;
-                        }
-                        return false;
+                        bucket_ptr = new_ptr;
+                        continue;
                     }
                     Err(actual) => {
+                        // Another thread installed an overflow bucket first. Return ours to the
+                        // pool for reuse.
+                        self.overflow_pools[new_version as usize]
+                            .deallocate_with_ptr(new_addr, new_ptr);
                         if actual.is_unused() {
                             continue;
                         }

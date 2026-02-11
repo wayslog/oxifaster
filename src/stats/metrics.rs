@@ -136,6 +136,139 @@ impl OperationStats {
     }
 }
 
+/// Coarse per-phase latency breakdown for hot store operations.
+///
+/// This is intended for profiling runs. It is disabled by default to avoid adding `Instant::now()`
+/// calls to hot paths.
+#[allow(missing_docs)]
+#[derive(Debug, Default)]
+pub struct PhaseStats {
+    pub upsert_ops: AtomicU64,
+    pub upsert_hash_ns: AtomicU64,
+    pub upsert_index_ns: AtomicU64,
+    pub upsert_layout_ns: AtomicU64,
+    pub upsert_alloc_ns: AtomicU64,
+    pub upsert_init_ns: AtomicU64,
+    pub upsert_index_update_ns: AtomicU64,
+
+    pub read_ops: AtomicU64,
+    pub read_hash_ns: AtomicU64,
+    pub read_index_ns: AtomicU64,
+    pub read_chain_ns: AtomicU64,
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhaseStatsSnapshot {
+    pub upsert_ops: u64,
+    pub upsert_hash_ns: u64,
+    pub upsert_index_ns: u64,
+    pub upsert_layout_ns: u64,
+    pub upsert_alloc_ns: u64,
+    pub upsert_init_ns: u64,
+    pub upsert_index_update_ns: u64,
+
+    pub read_ops: u64,
+    pub read_hash_ns: u64,
+    pub read_index_ns: u64,
+    pub read_chain_ns: u64,
+}
+
+#[allow(missing_docs)]
+impl PhaseStats {
+    pub fn reset(&self) {
+        self.upsert_ops.store(0, Ordering::Relaxed);
+        self.upsert_hash_ns.store(0, Ordering::Relaxed);
+        self.upsert_index_ns.store(0, Ordering::Relaxed);
+        self.upsert_layout_ns.store(0, Ordering::Relaxed);
+        self.upsert_alloc_ns.store(0, Ordering::Relaxed);
+        self.upsert_init_ns.store(0, Ordering::Relaxed);
+        self.upsert_index_update_ns.store(0, Ordering::Relaxed);
+
+        self.read_ops.store(0, Ordering::Relaxed);
+        self.read_hash_ns.store(0, Ordering::Relaxed);
+        self.read_index_ns.store(0, Ordering::Relaxed);
+        self.read_chain_ns.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn snapshot(&self) -> PhaseStatsSnapshot {
+        PhaseStatsSnapshot {
+            upsert_ops: self.upsert_ops.load(Ordering::Relaxed),
+            upsert_hash_ns: self.upsert_hash_ns.load(Ordering::Relaxed),
+            upsert_index_ns: self.upsert_index_ns.load(Ordering::Relaxed),
+            upsert_layout_ns: self.upsert_layout_ns.load(Ordering::Relaxed),
+            upsert_alloc_ns: self.upsert_alloc_ns.load(Ordering::Relaxed),
+            upsert_init_ns: self.upsert_init_ns.load(Ordering::Relaxed),
+            upsert_index_update_ns: self.upsert_index_update_ns.load(Ordering::Relaxed),
+            read_ops: self.read_ops.load(Ordering::Relaxed),
+            read_hash_ns: self.read_hash_ns.load(Ordering::Relaxed),
+            read_index_ns: self.read_index_ns.load(Ordering::Relaxed),
+            read_chain_ns: self.read_chain_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    #[inline]
+    pub fn record_upsert_op(&self) {
+        self.upsert_ops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_read_op(&self) {
+        self.read_ops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn add_ns(counter: &AtomicU64, d: Duration) {
+        counter.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_upsert_hash(&self, d: Duration) {
+        Self::add_ns(&self.upsert_hash_ns, d);
+    }
+
+    #[inline]
+    pub fn record_upsert_index(&self, d: Duration) {
+        Self::add_ns(&self.upsert_index_ns, d);
+    }
+
+    #[inline]
+    pub fn record_upsert_layout(&self, d: Duration) {
+        Self::add_ns(&self.upsert_layout_ns, d);
+    }
+
+    #[inline]
+    pub fn record_upsert_alloc(&self, d: Duration) {
+        Self::add_ns(&self.upsert_alloc_ns, d);
+    }
+
+    #[inline]
+    pub fn record_upsert_init(&self, d: Duration) {
+        Self::add_ns(&self.upsert_init_ns, d);
+    }
+
+    #[inline]
+    pub fn record_upsert_index_update(&self, d: Duration) {
+        Self::add_ns(&self.upsert_index_update_ns, d);
+    }
+
+    #[inline]
+    pub fn record_read_hash(&self, d: Duration) {
+        Self::add_ns(&self.read_hash_ns, d);
+    }
+
+    #[inline]
+    pub fn record_read_index(&self, d: Duration) {
+        Self::add_ns(&self.read_index_ns, d);
+    }
+
+    #[inline]
+    pub fn record_read_chain(&self, d: Duration) {
+        Self::add_ns(&self.read_chain_ns, d);
+    }
+}
+
 /// Statistics for the hash index
 #[derive(Debug, Default)]
 pub struct HashIndexStats {
@@ -377,6 +510,8 @@ impl SessionStats {
 pub struct StoreStats {
     /// Operation statistics
     pub operations: OperationStats,
+    /// Per-phase profiling counters (disabled by default, enabled via `StatsCollector`).
+    pub phases: PhaseStats,
     /// Hash index statistics
     pub hash_index: HashIndexStats,
     /// Hybrid log statistics
@@ -396,6 +531,7 @@ impl StoreStats {
     /// Reset all statistics
     pub fn reset(&self) {
         self.operations.reset();
+        self.phases.reset();
         self.hash_index.reset();
         self.hybrid_log.reset();
         self.allocator.reset();

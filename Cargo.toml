@@ -18,6 +18,8 @@ io_uring = ["dep:io-uring"]
 hash-xxh3 = ["dep:xxhash-rust", "xxhash-rust/xxh3"]
 hash-xxh64 = ["dep:xxhash-rust", "xxhash-rust/xxh64"]
 f2 = []
+# Internal-only instrumentation for index hot paths. Not enabled by default.
+index-profile = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -51,6 +53,14 @@ rayon = "1.10"
 
 [[bench]]
 name = "ycsb"
+harness = false
+
+[[bench]]
+name = "index_overflow"
+harness = false
+
+[[bench]]
+name = "index_overflow_concurrent"
 harness = false
 
 [[bin]]

@@ -376,7 +376,12 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
                 // Calculate address - safe cast since offset <= Address::MAX_OFFSET
                 let address = Address::new(page, offset as u32);
-                self.mark_page_dirty(page);
+                // Mark the page dirty only once per page. Subsequent allocations within the same
+                // page do not need to touch the atomic flush state, which keeps the hot allocation
+                // path lightweight.
+                if offset == 0 {
+                    self.mark_page_dirty(page);
+                }
                 return Ok(address);
             }
 
