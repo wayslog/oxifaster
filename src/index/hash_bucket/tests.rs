@@ -327,6 +327,27 @@ fn test_hash_bucket_overflow_entry_from_control() {
 }
 
 #[test]
+fn test_hash_bucket_overflow_entry_tag_summary_bits() {
+    let addr = FixedPageAddress::new(42);
+    let mut entry = HashBucketOverflowEntry::new(addr);
+    assert_eq!(entry.tag_summary(), 0);
+    assert!(entry.may_contain_tag(7)); // zero summary means unknown
+
+    entry = entry.with_tag_summary_bit(7);
+    assert_ne!(entry.tag_summary(), 0);
+    assert!(entry.may_contain_tag(7));
+    assert!(!entry.may_contain_tag(8));
+}
+
+#[test]
+fn test_hash_bucket_overflow_entry_new_with_tag_summary() {
+    let addr = FixedPageAddress::new(12345);
+    let entry = HashBucketOverflowEntry::new_with_tag_summary(addr, 0x00f0);
+    assert_eq!(entry.address().control(), 12345);
+    assert_eq!(entry.tag_summary(), 0x00f0);
+}
+
+#[test]
 fn test_hash_bucket_overflow_entry_debug() {
     let addr = FixedPageAddress::new(12345);
     let entry = HashBucketOverflowEntry::new(addr);
@@ -391,6 +412,18 @@ fn test_atomic_hash_bucket_overflow_entry_compare_exchange() {
     let result = atomic.compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire);
     assert!(result.is_ok());
     assert_eq!(atomic.load(Ordering::Relaxed), new);
+}
+
+#[test]
+fn test_atomic_hash_bucket_overflow_entry_set_tag_summary_bit() {
+    let addr = FixedPageAddress::new(9);
+    let atomic = AtomicHashBucketOverflowEntry::new(HashBucketOverflowEntry::new(addr));
+
+    atomic.set_tag_summary_bit(3, Ordering::AcqRel);
+    let entry = atomic.load(Ordering::Acquire);
+    assert_eq!(entry.address().control(), 9);
+    assert!(entry.may_contain_tag(3));
+    assert!(!entry.may_contain_tag(4));
 }
 
 #[test]
