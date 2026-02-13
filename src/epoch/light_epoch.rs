@@ -4,9 +4,9 @@
 //! to safely reclaim memory in lock-free data structures.
 
 use std::cell::{RefCell, UnsafeCell};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -47,8 +47,8 @@ struct ThreadIdGuard {
 impl Drop for ThreadIdGuard {
     fn drop(&mut self) {
         if let Some(gens) = THREAD_ID_GENERATIONS.get() {
-            if let Some(gen) = gens.get(self.id) {
-                gen.fetch_add(1, Ordering::AcqRel);
+            if let Some(generation) = gens.get(self.id) {
+                generation.fetch_add(1, Ordering::AcqRel);
             }
         }
         if let Some(free) = FREE_THREAD_IDS.get() {

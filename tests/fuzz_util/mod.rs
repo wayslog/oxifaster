@@ -64,5 +64,5 @@ pub fn choose_key(rng: &mut StdRng, key_space: u64) -> u64 {
 }
 
 pub fn choose_value(rng: &mut StdRng) -> u64 {
-    rng.gen::<u64>() ^ (rng.gen::<u64>() << 1)
+    rng.r#gen::<u64>() ^ (rng.r#gen::<u64>() << 1)
 }

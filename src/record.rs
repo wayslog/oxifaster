@@ -263,26 +263,34 @@ impl<K: Pod, V: Pod> Record<K, V> {
 
     #[inline]
     pub(crate) unsafe fn read_key(base: *const u8) -> K {
-        let ptr = base.add(Self::key_offset()) as *const K;
-        std::ptr::read_unaligned(ptr)
+        unsafe {
+            let ptr = base.add(Self::key_offset()) as *const K;
+            std::ptr::read_unaligned(ptr)
+        }
     }
 
     #[inline]
     pub(crate) unsafe fn read_value(base: *const u8) -> V {
-        let ptr = base.add(Self::value_offset()) as *const V;
-        std::ptr::read_unaligned(ptr)
+        unsafe {
+            let ptr = base.add(Self::value_offset()) as *const V;
+            std::ptr::read_unaligned(ptr)
+        }
     }
 
     #[inline]
     pub(crate) unsafe fn write_key(base: *mut u8, key: K) {
-        let ptr = base.add(Self::key_offset()) as *mut K;
-        std::ptr::write_unaligned(ptr, key);
+        unsafe {
+            let ptr = base.add(Self::key_offset()) as *mut K;
+            std::ptr::write_unaligned(ptr, key);
+        }
     }
 
     #[inline]
     pub(crate) unsafe fn write_value(base: *mut u8, value: V) {
-        let ptr = base.add(Self::value_offset()) as *mut V;
-        std::ptr::write_unaligned(ptr, value);
+        unsafe {
+            let ptr = base.add(Self::value_offset()) as *mut V;
+            std::ptr::write_unaligned(ptr, value);
+        }
     }
 }
 

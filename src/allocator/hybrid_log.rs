@@ -4,8 +4,8 @@
 //! with hot pages in memory and cold pages on disk.
 
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::address::{Address, AtomicAddress, AtomicPageOffset};
 
@@ -24,7 +24,7 @@ use crate::allocator::page_allocator::PageInfo;
 use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
 use crate::status::Status;
-use crate::utility::{is_power_of_two, AlignedBuffer};
+use crate::utility::{AlignedBuffer, is_power_of_two};
 use flush_worker::{FlushManager, FlushShared};
 
 /// Configuration for the hybrid log allocator
@@ -425,7 +425,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page(page) {
-            let ptr = buf.as_ptr().add(offset) as *mut u8;
+            let ptr = unsafe { buf.as_ptr().add(offset) as *mut u8 };
             NonNull::new(ptr)
         } else {
             None
@@ -460,7 +460,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page_mut(page) {
-            let ptr = buf.as_mut_ptr().add(offset);
+            let ptr = unsafe { buf.as_mut_ptr().add(offset) };
             NonNull::new(ptr)
         } else {
             None

@@ -20,8 +20,8 @@
 //! let result = compactor.compact_range(range, &store);
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 

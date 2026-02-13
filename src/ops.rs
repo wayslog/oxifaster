@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::cache::ReadCacheConfig;
 use crate::checkpoint::{
-    build_incremental_chain, find_latest_checkpoint, validate_checkpoint,
-    validate_incremental_checkpoint, CheckpointToken, LogMetadata,
+    CheckpointToken, LogMetadata, build_incremental_chain, find_latest_checkpoint,
+    validate_checkpoint, validate_incremental_checkpoint,
 };
 use crate::codec::{PersistKey, PersistValue};
 use crate::compaction::CompactionConfig;

@@ -61,13 +61,13 @@ mod mem_index;
 pub mod profile;
 
 pub use cold_index::{
-    ColdIndex, ColdIndexConfig, ColdIndexFindResult, ColdIndexStats, DefaultHashIndexChunk,
-    GcStateColdIndex, HashIndexChunk, HashIndexChunkKey, HashIndexChunkPos, HashIndexOp,
-    IndexOperationType, DEFAULT_NUM_BUCKETS_PER_CHUNK, ENTRIES_PER_BUCKET,
+    ColdIndex, ColdIndexConfig, ColdIndexFindResult, ColdIndexStats, DEFAULT_NUM_BUCKETS_PER_CHUNK,
+    DefaultHashIndexChunk, ENTRIES_PER_BUCKET, GcStateColdIndex, HashIndexChunk, HashIndexChunkKey,
+    HashIndexChunkPos, HashIndexOp, IndexOperationType,
 };
 pub use grow::{
-    calculate_num_chunks, get_chunk_bounds, GrowCompleteCallback, GrowConfig, GrowResult,
-    GrowState, HASH_TABLE_CHUNK_SIZE,
+    GrowCompleteCallback, GrowConfig, GrowResult, GrowState, HASH_TABLE_CHUNK_SIZE,
+    calculate_num_chunks, get_chunk_bounds,
 };
 pub use hash_bucket::{
     AtomicHashBucketEntry, ColdHashBucket, HashBucket, HashBucketEntry, HashBucketOverflowEntry,

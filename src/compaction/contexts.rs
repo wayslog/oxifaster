@@ -7,8 +7,8 @@ use std::slice;
 use crate::address::Address;
 use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::status::Status;
-use crate::store::record_format;
 use crate::store::RecordView;
+use crate::store::record_format;
 
 /// Context for a compaction operation
 #[derive(Debug)]

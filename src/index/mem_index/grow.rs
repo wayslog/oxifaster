@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::address::Address;
 use crate::constants::CACHE_LINE_BYTES;
-use crate::index::grow::{calculate_num_chunks, get_chunk_bounds, GrowResult};
+use crate::index::grow::{GrowResult, calculate_num_chunks, get_chunk_bounds};
 use crate::index::{
     HashBucket, HashBucketEntry, HashBucketOverflowEntry, IndexHashBucketEntry, KeyHash,
 };

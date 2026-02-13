@@ -443,16 +443,20 @@ mod tests {
     fn test_env_overrides_store_and_cache() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        env::set_var("OXIFASTER__store__table_size", "2048");
-        env::set_var("OXIFASTER__cache__enabled", "true");
-        env::set_var("OXIFASTER__cache__mem_size", "1048576");
+        unsafe {
+            env::set_var("OXIFASTER__store__table_size", "2048");
+            env::set_var("OXIFASTER__cache__enabled", "true");
+            env::set_var("OXIFASTER__cache__mem_size", "1048576");
+        }
 
         let mut config = OxifasterConfig::default();
         config.apply_env_overrides().unwrap();
 
-        env::remove_var("OXIFASTER__store__table_size");
-        env::remove_var("OXIFASTER__cache__enabled");
-        env::remove_var("OXIFASTER__cache__mem_size");
+        unsafe {
+            env::remove_var("OXIFASTER__store__table_size");
+            env::remove_var("OXIFASTER__cache__enabled");
+            env::remove_var("OXIFASTER__cache__mem_size");
+        }
 
         let store = config.store.unwrap();
         assert_eq!(store.table_size, Some(2048));
@@ -600,14 +604,18 @@ mod tests {
     fn test_env_overrides_compaction() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        env::set_var("OXIFASTER__compaction__target_utilization", "0.8");
-        env::set_var("OXIFASTER__compaction__min_compact_bytes", "1024");
+        unsafe {
+            env::set_var("OXIFASTER__compaction__target_utilization", "0.8");
+            env::set_var("OXIFASTER__compaction__min_compact_bytes", "1024");
+        }
 
         let mut config = OxifasterConfig::default();
         config.apply_env_overrides().unwrap();
 
-        env::remove_var("OXIFASTER__compaction__target_utilization");
-        env::remove_var("OXIFASTER__compaction__min_compact_bytes");
+        unsafe {
+            env::remove_var("OXIFASTER__compaction__target_utilization");
+            env::remove_var("OXIFASTER__compaction__min_compact_bytes");
+        }
 
         let compaction = config.compaction.unwrap();
         assert_eq!(compaction.target_utilization, Some(0.8));
@@ -618,14 +626,18 @@ mod tests {
     fn test_env_overrides_device() {
         let _guard = ENV_LOCK.lock().unwrap();
 
-        env::set_var("OXIFASTER__device__kind", "single_file");
-        env::set_var("OXIFASTER__device__path", "/tmp/test.db");
+        unsafe {
+            env::set_var("OXIFASTER__device__kind", "single_file");
+            env::set_var("OXIFASTER__device__path", "/tmp/test.db");
+        }
 
         let mut config = OxifasterConfig::default();
         config.apply_env_overrides().unwrap();
 
-        env::remove_var("OXIFASTER__device__kind");
-        env::remove_var("OXIFASTER__device__path");
+        unsafe {
+            env::remove_var("OXIFASTER__device__kind");
+            env::remove_var("OXIFASTER__device__path");
+        }
 
         let device = config.device.unwrap();
         assert_eq!(device.kind, Some("single_file".to_string()));

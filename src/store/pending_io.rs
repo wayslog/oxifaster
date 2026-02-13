@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
 
 use crate::address::Address;

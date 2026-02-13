@@ -7,8 +7,8 @@ use std::thread;
 
 use oxifaster::device::NullDisk;
 use oxifaster::index::{
-    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState, MemHashIndex,
-    MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
+    GrowConfig, GrowResult, GrowState, HASH_TABLE_CHUNK_SIZE, MemHashIndex, MemHashIndexConfig,
+    calculate_num_chunks, get_chunk_bounds,
 };
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};

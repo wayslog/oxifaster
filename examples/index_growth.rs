@@ -8,13 +8,13 @@ mod util;
 
 use std::sync::Arc;
 
+use oxifaster::Status;
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::index::{
-    calculate_num_chunks, get_chunk_bounds, GrowConfig, GrowResult, GrowState, MemHashIndex,
-    MemHashIndexConfig, HASH_TABLE_CHUNK_SIZE,
+    GrowConfig, GrowResult, GrowState, HASH_TABLE_CHUNK_SIZE, MemHashIndex, MemHashIndexConfig,
+    calculate_num_chunks, get_chunk_bounds,
 };
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Status;
 use tempfile::tempdir;
 
 fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {

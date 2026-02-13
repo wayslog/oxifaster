@@ -8,7 +8,7 @@
 //! which returns an [`AutoCompactionHandle`]. Dropping the handle stops the worker and
 //! joins its thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};

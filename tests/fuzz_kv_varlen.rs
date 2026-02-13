@@ -80,7 +80,7 @@ fn run_varlen_fuzz(
             }
             30..=74 => {
                 let value = if rng.gen_ratio(3, 4) {
-                    let v = rng.gen::<u64>();
+                    let v = rng.r#gen::<u64>();
                     format!("v{v}")
                 } else {
                     rand_ascii_string(&mut rng, 0, 512)

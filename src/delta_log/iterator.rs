@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::device::StorageDevice;
 
-use super::entry::{DeltaLogEntry, DeltaLogEntryType, DeltaLogHeader, DELTA_LOG_HEADER_SIZE};
+use super::entry::{DELTA_LOG_HEADER_SIZE, DeltaLogEntry, DeltaLogEntryType, DeltaLogHeader};
 use super::log::DeltaLog;
 #[cfg(test)]
 use super::log::DeltaLogConfig;

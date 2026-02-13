@@ -51,6 +51,7 @@
 //!
 //! Based on C++ FASTER's f2.h implementation.
 
+mod bloom;
 mod config;
 mod state;
 mod store;

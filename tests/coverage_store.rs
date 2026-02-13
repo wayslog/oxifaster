@@ -2,10 +2,11 @@
 //!
 //! Covers: FasterKv, Session, AsyncSession, Compaction, and StateTransitions.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 
+use oxifaster::Address;
 use oxifaster::checkpoint::SessionState;
 use oxifaster::compaction::CompactionConfig;
 use oxifaster::device::NullDisk;
@@ -14,7 +15,6 @@ use oxifaster::store::{
     Action, AsyncSessionBuilder, AtomicSystemState, FasterKv, FasterKvConfig, Phase,
     SessionBuilder, SystemState, ThreadContext,
 };
-use oxifaster::Address;
 use uuid::Uuid;
 
 // ============ Helpers ============

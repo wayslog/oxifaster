@@ -18,7 +18,7 @@ use crate::device::traits::SyncStorageDevice;
 use crate::status::Status;
 
 use super::io_uring_common::{
-    checked_offset, IoUringConfig, IoUringError, IoUringFeatures, IoUringStats,
+    IoUringConfig, IoUringError, IoUringFeatures, IoUringStats, checked_offset,
 };
 
 struct FallbackState {

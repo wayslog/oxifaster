@@ -3,8 +3,8 @@
 //! Stores hot (frequently read) records in memory to avoid disk reads.
 //! Based on C++ FASTER's read_cache.h implementation.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::address::Address;
 use crate::cache::config::ReadCacheConfig;

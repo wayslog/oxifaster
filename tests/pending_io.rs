@@ -11,11 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use oxifaster::Address;
 use oxifaster::codec::{KeyCodec, PersistKey};
 use oxifaster::device::FileSystemDisk;
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Address;
 use tempfile::tempdir;
 
 #[test]

@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use oxifaster::Address;
 use oxifaster::cache::{ReadCache, ReadCacheConfig};
 use oxifaster::device::{IoUringConfig, IoUringDevice, IoUringFile, NullDisk};
 use oxifaster::index::{GrowConfig, MemHashIndex, MemHashIndexConfig};
@@ -21,7 +22,6 @@ use oxifaster::scan::{
     ConcurrentLogScanIterator, LogPage, LogPageIterator, LogPageStatus, LogScanIterator, ScanRange,
 };
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Address;
 
 // ===========================================================================
 // 1. Index grow module tests (src/index/mem_index/grow.rs)

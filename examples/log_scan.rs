@@ -4,8 +4,8 @@
 //!
 //! 运行: cargo run --example log_scan
 
-use oxifaster::scan::{LogPageStatus, ScanRange};
 use oxifaster::Address;
+use oxifaster::scan::{LogPageStatus, ScanRange};
 
 fn main() {
     println!("=== oxifaster Log Scan 示例 ===\n");

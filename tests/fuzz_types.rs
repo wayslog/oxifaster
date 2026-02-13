@@ -23,7 +23,7 @@ fn fuzz_types_smoke_spanbyte_roundtrip() {
 
         let mut span = SpanByte::from_vec(payload.clone());
         if rng.gen_bool(0.5) {
-            span.set_metadata(rng.gen::<u64>());
+            span.set_metadata(rng.r#gen::<u64>());
             assert!(span.has_metadata());
         }
 
@@ -60,7 +60,7 @@ fn fuzz_types_stress_spanbyte_large_payloads() {
 
         let mut span = SpanByte::from_vec(payload.clone());
         if rng.gen_ratio(1, 4) {
-            span.set_metadata(rng.gen::<u64>());
+            span.set_metadata(rng.r#gen::<u64>());
         }
 
         let mut buf = vec![0u8; span.total_size()];
@@ -76,13 +76,13 @@ fn fuzz_types_smoke_codecs_bincode_utf8() {
     let mut rng = fuzz_util::rng(p.seed);
 
     for _ in 0..p.steps {
-        let s = format!("user:{}:{}", rng.gen::<u32>(), rng.gen::<u16>());
+        let s = format!("user:{}:{}", rng.r#gen::<u32>(), rng.r#gen::<u16>());
         let u = Utf8::from(s.as_str());
         assert_eq!(u.0, s);
 
         let x = Small {
-            a: rng.gen(),
-            b: rng.gen(),
+            a: rng.r#gen(),
+            b: rng.r#gen(),
         };
         let wrapped = Bincode(x.clone());
         // Round-trip through the codec API.

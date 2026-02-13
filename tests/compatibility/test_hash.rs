@@ -2,7 +2,7 @@
 //
 // 目标: 验证 oxifaster 的哈希函数与 C++ FASTER 的兼容性
 
-use oxifaster::codec::multi_hash::{hash_faster_compat_u64, HashAlgorithm};
+use oxifaster::codec::multi_hash::{HashAlgorithm, hash_faster_compat_u64};
 
 #[test]
 fn test_hash_algorithm_enum() {

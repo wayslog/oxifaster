@@ -9,8 +9,11 @@ use crate::record::{Record, RecordInfo};
 use crate::status::Status;
 use bytemuck::Pod;
 
-use super::internal_store::InternalStore;
 use super::F2Kv;
+use super::internal_store::InternalStore;
+
+/// Global read counter for router sampling (shared across all F2Kv instances).
+static READ_SAMPLE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl<K, V, D> F2Kv<K, V, D>
 where
@@ -18,16 +21,33 @@ where
     V: Pod + Clone + Send + Sync + 'static,
     D: crate::device::StorageDevice + 'static,
 {
-    /// Read: hot first, then cold.
+    /// Read a value by key, querying hot and cold stores adaptively.
     pub fn read(&self, key: &K) -> Result<Option<V>, Status> {
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
+        let tick = READ_SAMPLE_TICK.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(value) = self.internal_read(&self.hot_store, true, key, hash)? {
-            return Ok(Some(value));
-        }
-
-        if let Some(value) = self.internal_read(&self.cold_store, false, key, hash)? {
-            return Ok(Some(value));
+        if self.read_router.cold_first() {
+            if self.cold_bloom.may_contain(hash.hash())
+                && let Some(value) = self.internal_read(&self.cold_store, false, key, hash)?
+            {
+                self.read_router.record_cold_hit(tick);
+                return Ok(Some(value));
+            }
+            if let Some(value) = self.internal_read(&self.hot_store, true, key, hash)? {
+                self.read_router.record_hot_hit(tick);
+                return Ok(Some(value));
+            }
+        } else {
+            if let Some(value) = self.internal_read(&self.hot_store, true, key, hash)? {
+                self.read_router.record_hot_hit(tick);
+                return Ok(Some(value));
+            }
+            if self.cold_bloom.may_contain(hash.hash())
+                && let Some(value) = self.internal_read(&self.cold_store, false, key, hash)?
+            {
+                self.read_router.record_cold_hit(tick);
+                return Ok(Some(value));
+            }
         }
 
         Ok(None)

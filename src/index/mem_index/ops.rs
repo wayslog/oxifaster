@@ -1091,11 +1091,7 @@ impl MemHashIndex {
         tag: u16,
     ) -> Option<FindResult> {
         let found = self.find_entry_in_bucket_chain(version, base_bucket, tag);
-        if found.found() {
-            Some(found)
-        } else {
-            None
-        }
+        if found.found() { Some(found) } else { None }
     }
 
     fn find_free_entry_in_bucket_chain(

@@ -5,8 +5,8 @@
 use std::io::Cursor;
 use std::marker::PhantomData;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::codec::{KeyCodec, PersistKey, PersistValue, ValueCodec};
 use crate::status::Status;

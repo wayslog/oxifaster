@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxifaster::ops::{
-    checkpoint_self_check, recover_latest_with_self_check, CheckpointSelfCheckOptions,
+    CheckpointSelfCheckOptions, checkpoint_self_check, recover_latest_with_self_check,
 };
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};

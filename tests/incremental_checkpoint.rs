@@ -6,8 +6,8 @@
 //! - Recovery from incremental checkpoints
 
 use oxifaster::checkpoint::{
-    delta_log_path, delta_metadata_path, CheckpointType, DeltaLogMetadata,
-    IncrementalCheckpointChain, LogMetadata,
+    CheckpointType, DeltaLogMetadata, IncrementalCheckpointChain, LogMetadata, delta_log_path,
+    delta_metadata_path,
 };
 use oxifaster::delta_log::{
     DeltaLog, DeltaLogConfig, DeltaLogEntry, DeltaLogEntryType, DeltaLogIterator,
@@ -352,7 +352,7 @@ fn test_delta_log_iterator_empty() {
 
 #[test]
 fn test_delta_log_checksum_verification() {
-    use oxifaster::delta_log::{verify_checksum, DeltaLogHeader};
+    use oxifaster::delta_log::{DeltaLogHeader, verify_checksum};
 
     let payload = b"test payload for checksum".to_vec();
     let mut header = DeltaLogHeader::new(payload.len() as i32, DeltaLogEntryType::Delta);

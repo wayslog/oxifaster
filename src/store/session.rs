@@ -20,7 +20,7 @@ use crate::address::Address;
 use crate::checkpoint::SessionState;
 use crate::codec::{KeyCodec, PersistKey, PersistValue};
 use crate::device::StorageDevice;
-use crate::epoch::{get_thread_tag, EpochGuard};
+use crate::epoch::{EpochGuard, get_thread_tag};
 use crate::index::{AtomicHashBucketEntry, KeyHash};
 use crate::status::Status;
 use crate::store::{Action, Phase};

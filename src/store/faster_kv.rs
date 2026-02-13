@@ -12,8 +12,8 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -29,7 +29,7 @@ use crate::compaction::{CompactionConfig, Compactor};
 use crate::constants::MAX_THREADS;
 use crate::device::StorageDevice;
 use crate::epoch::EpochGuard;
-use crate::epoch::{get_thread_tag, try_get_thread_id, LightEpoch};
+use crate::epoch::{LightEpoch, get_thread_tag, try_get_thread_id};
 use crate::index::{GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
 use crate::record::RecordInfo;
 use crate::stats::StatsCollector;
@@ -638,7 +638,7 @@ where
     /// is occurring concurrently.
     #[inline]
     unsafe fn hlog(&self) -> &PersistentMemoryMalloc<D> {
-        &*self.hlog.get()
+        unsafe { &*self.hlog.get() }
     }
 
     /// Get a mutable reference to the hybrid log
@@ -649,7 +649,7 @@ where
     #[inline]
     #[allow(clippy::mut_from_ref)]
     unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
-        &mut *self.hlog.get()
+        unsafe { &mut *self.hlog.get() }
     }
 
     // ============ Session Management API ============

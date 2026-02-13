@@ -14,15 +14,15 @@
 //! read-back verification write enough data to cross page boundaries, which
 //! triggers the seal path that calls flush_current_page.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use oxifaster::delta_log::{
     DeltaLog, DeltaLogConfig, DeltaLogEntry, DeltaLogEntryType, DeltaLogIntoIterator,
     DeltaLogIterator, IteratorState,
 };
 use oxifaster::device::NullDisk;
-use oxifaster::epoch::{get_thread_id, get_thread_tag, EpochGuard, LightEpoch};
+use oxifaster::epoch::{EpochGuard, LightEpoch, get_thread_id, get_thread_tag};
 
 // ============================================================
 // LightEpoch tests

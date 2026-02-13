@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use oxifaster::index::{
-    ColdIndexConfig, HashBucketEntry, KeyHash, DEFAULT_NUM_BUCKETS_PER_CHUNK, ENTRIES_PER_BUCKET,
+    ColdIndexConfig, DEFAULT_NUM_BUCKETS_PER_CHUNK, ENTRIES_PER_BUCKET, HashBucketEntry, KeyHash,
 };
 
 fn main() {

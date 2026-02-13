@@ -416,7 +416,7 @@ fn verify_checkpoint(base_dir: &Path, token: &Option<String>) -> io::Result<()> 
                 return Err(io::Error::other(format!(
                     "lookup failed for key {}",
                     entry.key
-                )))
+                )));
             }
         }
     }

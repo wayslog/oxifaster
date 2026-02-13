@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use oxifaster::device::FileSystemDisk;
-use oxifaster::ops::{checkpoint_self_check, recover_latest, CheckpointSelfCheckOptions};
+use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check, recover_latest};
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
 use tempfile::tempdir;

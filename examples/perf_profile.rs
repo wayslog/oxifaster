@@ -8,13 +8,14 @@
 //!
 //! Profiling with `sample` (macOS):
 //!   cargo build --release --example perf_profile
+#![allow(clippy::collapsible_if)]
 //!   ./target/release/examples/perf_profile --sleep-ms 2000 --seconds 10 &
 //!   pid=$!
 //!   sample $pid 10 1 -mayDie -file /tmp/oxifaster-perf/sample_perf_profile.txt
 //!   wait $pid
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use oxifaster::device::NullDisk;

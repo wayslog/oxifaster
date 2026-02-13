@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::address::Address;
 use crate::checkpoint::{
-    delta_log_path, delta_metadata_path, CheckpointToken, DeltaLogMetadata, IndexMetadata,
-    LogMetadata, SessionState,
+    CheckpointToken, DeltaLogMetadata, IndexMetadata, LogMetadata, SessionState, delta_log_path,
+    delta_metadata_path,
 };
 use crate::status::Status;
 

@@ -15,7 +15,7 @@ use crate::status::Status;
 use crate::utility::AlignedBuffer;
 
 use super::format::{LogEntryHeader, LogMetadata, LogMetadataError};
-use super::io::{block_on_device, IoExecutor};
+use super::io::{IoExecutor, block_on_device};
 use super::types::status_from_error;
 pub use super::types::{
     FasterLogConfig, FasterLogOpenOptions, FasterLogSelfCheckOptions, FasterLogSelfCheckReport,

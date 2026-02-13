@@ -3,8 +3,8 @@
 //! These tests verify that checkpoints work correctly under heavy concurrent load
 //! and validate the CPR (Concurrent Prefix Recovery) prefix guarantee.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 

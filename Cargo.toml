@@ -1,7 +1,7 @@
 [package]
 name = "oxifaster"
 version = "0.1.3"
-edition = "2021"
+edition = "2024"
 rust-version = "1.92.0"
 authors = ["oxifaster contributors"]
 description = "A high-performance concurrent key-value store and log engine in Rust"

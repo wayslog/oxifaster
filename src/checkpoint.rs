@@ -62,16 +62,16 @@ mod state;
 pub use locks::{
     AtomicCheckpointLock, CheckpointLock, CheckpointLockGuard, CheckpointLocks, LockType,
 };
-pub(crate) use recovery::{build_incremental_chain, validate_incremental_checkpoint};
 pub use recovery::{
-    find_latest_checkpoint, list_checkpoints, validate_checkpoint, CheckpointInfo,
-    PageRecoveryStatus, RecoveryState, RecoveryStatus,
+    CheckpointInfo, PageRecoveryStatus, RecoveryState, RecoveryStatus, find_latest_checkpoint,
+    list_checkpoints, validate_checkpoint,
 };
+pub(crate) use recovery::{build_incremental_chain, validate_incremental_checkpoint};
 pub use serialization::{
-    create_checkpoint_directory, delta_log_path, delta_metadata_path, incremental_info_path,
-    index_data_path, index_metadata_path, log_metadata_path, log_snapshot_path, DeltaLogMetadata,
-    IncrementalCheckpointChain, SerializableCheckpointInfo, SerializableIndexMetadata,
-    SerializableLogMetadata,
+    DeltaLogMetadata, IncrementalCheckpointChain, SerializableCheckpointInfo,
+    SerializableIndexMetadata, SerializableLogMetadata, create_checkpoint_directory,
+    delta_log_path, delta_metadata_path, incremental_info_path, index_data_path,
+    index_metadata_path, log_metadata_path, log_snapshot_path,
 };
 pub use state::{CheckpointState, CheckpointType, IndexMetadata, LogMetadata, SessionState};
 

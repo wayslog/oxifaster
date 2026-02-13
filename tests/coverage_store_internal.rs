@@ -13,19 +13,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use oxifaster::Address;
 use oxifaster::cache::ReadCacheConfig;
 use oxifaster::checkpoint::{
-    find_latest_checkpoint, list_checkpoints, validate_checkpoint, CheckpointInfo,
-    PageRecoveryStatus, RecoveryState, RecoveryStatus, SessionState,
+    CheckpointInfo, PageRecoveryStatus, RecoveryState, RecoveryStatus, SessionState,
+    find_latest_checkpoint, list_checkpoints, validate_checkpoint,
 };
-use oxifaster::codec::{hash64, KeyCodec, RawBytes, Utf8};
+use oxifaster::codec::{KeyCodec, RawBytes, Utf8, hash64};
 use oxifaster::compaction::CompactionConfig;
 use oxifaster::device::{FileSystemDisk, NullDisk};
 use oxifaster::status::Status;
 use oxifaster::store::{
     AsyncSessionBuilder, CheckpointKind, FasterKv, FasterKvConfig, SessionBuilder,
 };
-use oxifaster::Address;
 use uuid::Uuid;
 
 // ============ Test Helpers ============

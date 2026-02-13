@@ -2,7 +2,7 @@
 //!
 //! This module provides various utility functions used throughout the library.
 
-use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 use std::ptr::NonNull;
 
 /// Check if a value is a power of two
@@ -46,7 +46,7 @@ pub unsafe fn aligned_alloc(alignment: usize, size: usize) -> Option<NonNull<u8>
     debug_assert!(size > 0);
 
     let layout = Layout::from_size_align(size, alignment).ok()?;
-    let ptr = alloc(layout);
+    let ptr = unsafe { alloc(layout) };
     NonNull::new(ptr)
 }
 
@@ -59,7 +59,7 @@ pub unsafe fn aligned_alloc_zeroed(alignment: usize, size: usize) -> Option<NonN
     debug_assert!(size > 0);
 
     let layout = Layout::from_size_align(size, alignment).ok()?;
-    let ptr = alloc_zeroed(layout);
+    let ptr = unsafe { alloc_zeroed(layout) };
     NonNull::new(ptr)
 }
 
@@ -71,7 +71,7 @@ pub unsafe fn aligned_alloc_zeroed(alignment: usize, size: usize) -> Option<NonN
 /// - `alignment` and `size` match the original allocation
 pub unsafe fn aligned_free(ptr: NonNull<u8>, alignment: usize, size: usize) {
     let layout = Layout::from_size_align(size, alignment).unwrap();
-    dealloc(ptr.as_ptr(), layout);
+    unsafe { dealloc(ptr.as_ptr(), layout) };
 }
 
 /// RAII wrapper for aligned memory

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use std::sync::Arc;
 
 use oxifaster::config::OxifasterConfig;
@@ -11,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Note: `OxifasterConfig::load_from_env` rejects unknown `OXIFASTER__...` keys, so keep
     // overrides minimal and valid.
-    std::env::set_var("OXIFASTER__store__table_size", "1024");
+    unsafe { std::env::set_var("OXIFASTER__store__table_size", "1024") };
 
     let config = OxifasterConfig::load_from_env()?;
     let store_config = config.to_faster_kv_config();

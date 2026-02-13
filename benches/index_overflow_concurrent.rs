@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode,
-    Throughput,
+    BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group,
+    criterion_main,
 };
 use rayon::prelude::*;
 

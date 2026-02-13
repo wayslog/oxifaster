@@ -7,5 +7,5 @@ pub mod header;
 
 pub use detector::{DetectionResult, FormatDetector};
 pub use header::{
-    compute_xor_checksum, FormatFlags, FormatHeaderError, FormatType, UniversalFormatHeader,
+    FormatFlags, FormatHeaderError, FormatType, UniversalFormatHeader, compute_xor_checksum,
 };

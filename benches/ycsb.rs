@@ -7,12 +7,12 @@
 //! - Real disk I/O operations using FileSystemDisk
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group, criterion_main,
 };
 use rand::prelude::*;
 
