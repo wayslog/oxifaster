@@ -371,13 +371,15 @@ where
     }
 
     pub(crate) fn cpr_refresh(&self, ctx: &mut ThreadContext) {
-        let state = self.system_state.load(Ordering::Acquire);
+        let state = self.system_state.load(Ordering::Relaxed);
 
         if state.phase == crate::store::Phase::Rest || state.action == crate::store::Action::None {
             ctx.version = state.version;
             ctx.current.version = state.version;
             return;
         }
+
+        let state = self.system_state.load(Ordering::Acquire);
 
         let state_sig = ThreadContext::cpr_state_sig(state.action, state.phase, state.version);
         if ctx.last_cpr_state == state_sig {
@@ -499,8 +501,8 @@ where
 
     /// Record read operation statistics
     #[inline]
-    fn record_read_stats(&self, hit: bool, start: Instant) {
-        if self.stats_collector.is_enabled() {
+    fn record_read_stats(&self, hit: bool, start: Option<Instant>) {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_read(hit);
             self.stats_collector
                 .store_stats
@@ -801,9 +803,13 @@ where
 
     /// Synchronous read operation
     pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
-        let start = Instant::now();
-        let phase_enabled =
-            self.stats_collector.is_enabled() && self.stats_collector.is_phase_stats_enabled();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let phase_enabled = stats_enabled && self.stats_collector.is_phase_stats_enabled();
         if phase_enabled {
             self.stats_collector.store_stats.phases.record_read_op();
         }
@@ -1368,12 +1374,17 @@ where
     ///
     /// Inserts or updates a key-value pair.
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
         // Record upsert statistics
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_upsert();
             self.stats_collector
                 .store_stats
@@ -1392,7 +1403,12 @@ where
 
     /// Synchronous delete operation
     pub(crate) fn delete_sync(&self, ctx: &mut ThreadContext, key: &K) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
@@ -1518,7 +1534,7 @@ where
             header.publish_valid();
 
             // Record delete statistics
-            if self.stats_collector.is_enabled() {
+            if let Some(start) = start {
                 self.stats_collector.store_stats.operations.record_delete();
                 self.stats_collector
                     .store_stats
@@ -1541,7 +1557,12 @@ where
     where
         F: FnMut(&mut V) -> bool,
     {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(&key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
@@ -1605,7 +1626,7 @@ where
                                     return s;
                                 }
 
-                                if self.stats_collector.is_enabled() {
+                                if let Some(start) = start {
                                     self.stats_collector.store_stats.operations.record_rmw();
                                     self.stats_collector
                                         .store_stats
@@ -1645,7 +1666,7 @@ where
         let (status, record_size) = self.upsert_internal(ctx, key, new_value);
 
         // Record RMW statistics only (not upsert stats)
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_rmw();
             self.stats_collector
                 .store_stats
@@ -1671,7 +1692,12 @@ where
         key: K,
         value: V,
     ) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(&key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
@@ -1694,7 +1720,7 @@ where
             if address.in_readcache() {
                 if self.try_read_from_cache(address, &key).is_some() {
                     // Key exists in read cache
-                    if self.stats_collector.is_enabled() {
+                    if let Some(start) = start {
                         self.stats_collector
                             .store_stats
                             .operations
@@ -1713,7 +1739,7 @@ where
             while address.is_valid() {
                 if address.in_readcache() {
                     if self.try_read_from_cache(address, &key).is_some() {
-                        if self.stats_collector.is_enabled() {
+                        if let Some(start) = start {
                             self.stats_collector
                                 .store_stats
                                 .operations
@@ -1770,7 +1796,7 @@ where
                         }
 
                         // Key exists - abort conditional insert.
-                        if self.stats_collector.is_enabled() {
+                        if let Some(start) = start {
                             self.stats_collector
                                 .store_stats
                                 .operations
@@ -1793,7 +1819,7 @@ where
         // Key does not exist - proceed with insert (reuse upsert_internal)
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector
                 .store_stats
                 .operations

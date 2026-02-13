@@ -373,7 +373,6 @@ where
     fn bump_serial_on_ok(&mut self, status: Status) -> Status {
         if status == Status::Ok {
             self.ctx.increment_serial();
-            self.store.update_session(&self.to_session_state());
         }
         status
     }
