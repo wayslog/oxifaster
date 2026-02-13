@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::address::Address;
 use crate::constants::CACHE_LINE_BYTES;
-use crate::index::grow::{calculate_num_chunks, get_chunk_bounds, GrowResult};
+use crate::index::grow::{GrowResult, calculate_num_chunks, get_chunk_bounds};
 use crate::index::{
     HashBucket, HashBucketEntry, HashBucketOverflowEntry, IndexHashBucketEntry, KeyHash,
 };
@@ -221,12 +221,22 @@ impl MemHashIndex {
     ) -> bool {
         let base_bucket = self.tables[new_version as usize].bucket_at(bucket_idx);
         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
+        let mut parent_overflow_entry: Option<
+            *const crate::index::hash_bucket::AtomicHashBucketOverflowEntry,
+        > = None;
+        let preferred_idx = (entry.tag() as usize) % HashBucket::NUM_ENTRIES;
+        let probe_stride =
+            ((entry.tag() as usize / HashBucket::NUM_ENTRIES) % (HashBucket::NUM_ENTRIES - 1)) + 1;
+        let mut probe_order = [0usize; HashBucket::NUM_ENTRIES];
+        for (probe, slot) in probe_order.iter_mut().enumerate() {
+            *slot = (preferred_idx + probe * probe_stride) % HashBucket::NUM_ENTRIES;
+        }
 
         loop {
             // SAFETY: `bucket_ptr` points to a valid bucket.
             let bucket = unsafe { &*bucket_ptr };
 
-            for i in 0..HashBucket::NUM_ENTRIES {
+            for &i in &probe_order {
                 let current = bucket.entries[i].load_index(Ordering::Acquire);
 
                 if current.is_unused() {
@@ -236,7 +246,19 @@ impl MemHashIndex {
                         Ordering::AcqRel,
                         Ordering::Acquire,
                     ) {
-                        Ok(_) => return true,
+                        Ok(_) => {
+                            if let Some(parent_overflow_entry) = parent_overflow_entry {
+                                // SAFETY: Captured from a live bucket while traversing the chain.
+                                let parent_overflow_entry = unsafe { &*parent_overflow_entry };
+                                let current = parent_overflow_entry.load(Ordering::Relaxed);
+                                let bit = HashBucketOverflowEntry::tag_summary_bit(entry.tag());
+                                if !current.is_unused() && (current.tag_summary() & bit) == 0 {
+                                    parent_overflow_entry
+                                        .set_tag_summary_bit(entry.tag(), Ordering::Relaxed);
+                                }
+                            }
+                            return true;
+                        }
                         Err(_) => continue,
                     }
                 }
@@ -245,8 +267,12 @@ impl MemHashIndex {
             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
             if overflow.is_unused() {
                 // Append an overflow bucket.
-                let new_addr = self.overflow_pools[new_version as usize].allocate();
-                let new_overflow = HashBucketOverflowEntry::new(new_addr);
+                let (new_addr, new_ptr) =
+                    self.overflow_pools[new_version as usize].allocate_with_ptr();
+                let new_overflow = HashBucketOverflowEntry::new_with_tag_summary(
+                    new_addr,
+                    HashBucketOverflowEntry::tag_summary_bit(entry.tag()),
+                );
                 let expected = HashBucketOverflowEntry::INVALID;
 
                 match bucket.overflow_entry.compare_exchange(
@@ -256,22 +282,25 @@ impl MemHashIndex {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        let new_ptr =
-                            self.overflow_pools[new_version as usize].bucket_ptr(new_addr);
-                        if let Some(p) = new_ptr {
-                            bucket_ptr = p;
-                            continue;
-                        }
-                        return false;
+                        bucket_ptr = new_ptr;
+                        continue;
                     }
                     Err(actual) => {
+                        // Another thread installed an overflow bucket first. Return ours to the
+                        // pool for reuse.
+                        self.overflow_pools[new_version as usize]
+                            .deallocate_with_ptr(new_addr, new_ptr);
                         if actual.is_unused() {
                             continue;
                         }
+                        bucket
+                            .overflow_entry
+                            .set_tag_summary_bit(entry.tag(), Ordering::AcqRel);
                         let next_ptr =
                             self.overflow_pools[new_version as usize].bucket_ptr(actual.address());
                         match next_ptr {
                             Some(p) => {
+                                parent_overflow_entry = Some(&bucket.overflow_entry as *const _);
                                 bucket_ptr = p;
                                 continue;
                             }
@@ -280,10 +309,16 @@ impl MemHashIndex {
                     }
                 }
             } else {
+                bucket
+                    .overflow_entry
+                    .set_tag_summary_bit(entry.tag(), Ordering::AcqRel);
                 let next_ptr =
                     self.overflow_pools[new_version as usize].bucket_ptr(overflow.address());
                 match next_ptr {
-                    Some(p) => bucket_ptr = p,
+                    Some(p) => {
+                        parent_overflow_entry = Some(&bucket.overflow_entry as *const _);
+                        bucket_ptr = p;
+                    }
                     None => return false,
                 }
             }

@@ -1,9 +1,11 @@
 use super::*;
 
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+
 use crate::address::Address;
 use crate::index::grow::GrowConfig;
-use crate::index::HashBucket;
-use crate::index::KeyHash;
+use crate::index::{HashBucket, HashBucketOverflowEntry, KeyHash};
 use crate::status::Status;
 
 #[test]
@@ -514,6 +516,96 @@ fn test_overflow_buckets_insert_and_find() {
     let stats = index.dump_distribution();
     assert_eq!(stats.used_entries, num);
     assert!(stats.total_entries >= num);
+}
+
+#[test]
+fn test_overflow_link_summary_updates_on_reused_overflow_slot() {
+    let mut index = MemHashIndex::new();
+    let config = MemHashIndexConfig::new(1); // Force all keys into one bucket chain.
+    index.initialize(&config);
+
+    let target_low4 = 5u16;
+    let mut hashes = Vec::new();
+    let mut hash_by_tag = HashMap::new();
+    for tag in 1u16..(1u16 << KeyHash::TAG_BITS) {
+        if (tag & 0xF) == target_low4 {
+            continue;
+        }
+        let hash = KeyHash::new((tag as u64) << 48);
+        hashes.push(hash);
+        hash_by_tag.insert(tag, hash);
+        if hashes.len() == 40 {
+            break;
+        }
+    }
+
+    for (i, hash) in hashes.iter().enumerate() {
+        let result = index.find_or_create_entry(*hash);
+        let atomic_entry = result.atomic_entry.unwrap();
+        index.update_entry(
+            atomic_entry,
+            Address::new(7, (i as u32 + 1) * 32),
+            hash.tag(),
+        );
+    }
+
+    let version = index.version() as usize;
+    let base_bucket = index.tables[version].bucket_at(0);
+    let first_overflow = base_bucket.overflow_entry.load(Ordering::Acquire);
+    assert!(!first_overflow.is_unused());
+
+    let first_overflow_ptr = index.overflow_pools[version]
+        .bucket_ptr(first_overflow.address())
+        .unwrap();
+    let first_overflow_bucket = unsafe { &*first_overflow_ptr };
+
+    let mut tag_to_delete = None;
+    for slot in &first_overflow_bucket.entries {
+        let entry = slot.load_index(Ordering::Acquire);
+        if !entry.is_unused() {
+            tag_to_delete = Some(entry.tag());
+            break;
+        }
+    }
+    let tag_to_delete = tag_to_delete.expect("first overflow bucket should not be empty");
+    let hash_to_delete = hash_by_tag[&tag_to_delete];
+
+    let found = index.find_entry(hash_to_delete);
+    assert!(found.found());
+    let delete_status = index.try_update_entry(
+        found.atomic_entry.unwrap(),
+        found.entry.to_hash_bucket_entry(),
+        Address::INVALID,
+        hash_to_delete.tag(),
+        false,
+    );
+    assert_eq!(delete_status, Status::Ok);
+
+    let target_tag = 0x0155u16; // low 4 bits are 0x5.
+    assert_eq!(target_tag & 0xF, target_low4);
+    assert!(!hash_by_tag.contains_key(&target_tag));
+    let target_hash = KeyHash::new((target_tag as u64) << 48);
+    let target_bit = HashBucketOverflowEntry::tag_summary_bit(target_tag);
+
+    let summary_before = base_bucket
+        .overflow_entry
+        .load(Ordering::Acquire)
+        .tag_summary();
+    assert_eq!(summary_before & target_bit, 0);
+
+    let target_entry = index.find_or_create_entry(target_hash);
+    let target_slot = target_entry.atomic_entry.unwrap();
+    index.update_entry(target_slot, Address::new(8, 4096), target_hash.tag());
+
+    let summary_after = base_bucket
+        .overflow_entry
+        .load(Ordering::Acquire)
+        .tag_summary();
+    assert_ne!(summary_after & target_bit, 0);
+
+    let target_found = index.find_entry(target_hash);
+    assert!(target_found.found());
+    assert_eq!(target_found.entry.address(), Address::new(8, 4096));
 }
 
 #[test]

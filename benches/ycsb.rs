@@ -6,12 +6,17 @@
 //! - Large key/value operations using RawBytes (varlen, no envelope)
 //! - Real disk I/O operations using FileSystemDisk
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    BenchmarkId, Criterion, SamplingMode, Throughput, black_box, criterion_group, criterion_main,
+};
 use rand::prelude::*;
+
+mod common_profiler;
 
 use oxifaster::codec::RawBytes;
 use oxifaster::device::{FileSystemDisk, NullDisk};
@@ -20,6 +25,62 @@ use oxifaster::store::{FasterKv, FasterKvConfig};
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+#[derive(Clone, Copy, Debug)]
+enum KeyDistribution {
+    Uniform,
+    // A simple YCSB-like hotspot distribution:
+    // - With probability `hot_prob`, pick a key from the hot set [0, hot_keys).
+    // - Otherwise, pick a key from the cold set [hot_keys, num_keys).
+    Hotspot {
+        hot_prob: f64,
+        hot_keys_fraction: f64,
+    },
+}
+
+impl KeyDistribution {
+    fn choose_key(&self, rng: &mut impl Rng, num_keys: u64) -> u64 {
+        match *self {
+            KeyDistribution::Uniform => rng.gen_range(0..num_keys),
+            KeyDistribution::Hotspot {
+                hot_prob,
+                hot_keys_fraction,
+            } => {
+                let hot_keys = ((num_keys as f64) * hot_keys_fraction)
+                    .round()
+                    .clamp(1.0, num_keys as f64) as u64;
+                if rng.gen_bool(hot_prob) {
+                    rng.gen_range(0..hot_keys)
+                } else if hot_keys >= num_keys {
+                    rng.gen_range(0..num_keys)
+                } else {
+                    rng.gen_range(hot_keys..num_keys)
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TxnWorkload {
+    // Probabilities in [0, 1000] to avoid floats in the hot loop.
+    read_per_mille: u32,
+    update_per_mille: u32,
+    rmw_per_mille: u32,
+    insert_per_mille: u32,
+}
+
+impl TxnWorkload {
+    fn validate(&self) {
+        debug_assert!(
+            self.read_per_mille
+                + self.update_per_mille
+                + self.rmw_per_mille
+                + self.insert_per_mille
+                == 1000
+        );
+    }
+}
 
 /// Create a test store with NullDisk (in-memory)
 fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, NullDisk>> {
@@ -79,20 +140,172 @@ fn generate_random_bytes(size: usize) -> Vec<u8> {
 /// Benchmark pure upsert performance
 fn bench_upsert(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert");
-    group.throughput(Throughput::Elements(1));
+    // Use flat sampling to reduce noise for very fast operations.
+    group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(Duration::from_secs(5));
 
     let store = create_store(1 << 20, 1 << 28);
     let mut session = store.start_session().unwrap();
     let mut key = 0u64;
+    const BATCH: u64 = 512;
+    group.throughput(Throughput::Elements(BATCH));
 
     group.bench_function("sequential", |b| {
         b.iter(|| {
-            let status = session.upsert(black_box(key), black_box(key * 10));
-            key += 1;
-            status
+            let start = key;
+            key = key.wrapping_add(BATCH);
+
+            for i in 0..BATCH {
+                let k = start.wrapping_add(i);
+                let v = k.wrapping_mul(10);
+                let _ = session.upsert(black_box(k), black_box(v));
+            }
         })
     });
+
+    group.finish();
+}
+
+/// Benchmark YCSB-like transaction mixes with controllable key distributions.
+///
+/// This is closer to real workloads than the index microbenchmarks:
+/// - A load phase populates the store with `num_keys` keys.
+/// - The benchmark measures batches of operations on a key distribution.
+fn bench_ycsb_txn(c: &mut Criterion) {
+    const BATCH: usize = 1024;
+    let mut group = c.benchmark_group("ycsb_txn");
+    group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(5));
+    group.throughput(Throughput::Elements(BATCH as u64));
+
+    let num_keys = 100_000u64;
+
+    let workloads: [(&str, TxnWorkload); 4] = [
+        (
+            "A_read50_update50",
+            TxnWorkload {
+                read_per_mille: 500,
+                update_per_mille: 500,
+                rmw_per_mille: 0,
+                insert_per_mille: 0,
+            },
+        ),
+        (
+            "B_read95_update5",
+            TxnWorkload {
+                read_per_mille: 950,
+                update_per_mille: 50,
+                rmw_per_mille: 0,
+                insert_per_mille: 0,
+            },
+        ),
+        (
+            "C_read100",
+            TxnWorkload {
+                read_per_mille: 1000,
+                update_per_mille: 0,
+                rmw_per_mille: 0,
+                insert_per_mille: 0,
+            },
+        ),
+        (
+            "F_read50_rmw50",
+            TxnWorkload {
+                read_per_mille: 500,
+                update_per_mille: 0,
+                rmw_per_mille: 500,
+                insert_per_mille: 0,
+            },
+        ),
+    ];
+
+    let dists: [(&str, KeyDistribution); 2] = [
+        ("uniform", KeyDistribution::Uniform),
+        (
+            "hotspot_80_20",
+            KeyDistribution::Hotspot {
+                hot_prob: 0.8,
+                hot_keys_fraction: 0.2,
+            },
+        ),
+    ];
+
+    for (wl_name, wl) in workloads {
+        wl.validate();
+
+        for (dist_name, dist) in dists {
+            let bench_name = format!("{wl_name}/{dist_name}");
+
+            group.bench_function(BenchmarkId::new("batch", bench_name), |b| {
+                // Use an isolated store per benchmark case so that write-heavy workloads do not
+                // accumulate unbounded state across cases.
+                let store = create_store(1 << 20, 1 << 28);
+
+                // Load phase (not measured).
+                {
+                    let mut load_session = store.start_session().unwrap();
+                    for i in 0..num_keys {
+                        load_session.upsert(i, i.wrapping_mul(10));
+                    }
+                }
+
+                let mut session = store.start_session().unwrap();
+                let mut rng = rand::rngs::StdRng::from_entropy();
+                let insert_key = Cell::new(num_keys);
+
+                b.iter_batched(
+                    || {
+                        // op: 0=read, 1=update, 2=rmw, 3=insert
+                        let mut ops: Vec<(u32, u64, u64)> = Vec::with_capacity(BATCH);
+                        for _ in 0..BATCH {
+                            let roll: u32 = rng.gen_range(0..1000);
+                            let (op, key) = if roll < wl.read_per_mille {
+                                (0u32, dist.choose_key(&mut rng, num_keys))
+                            } else if roll < wl.read_per_mille + wl.update_per_mille {
+                                (1u32, dist.choose_key(&mut rng, num_keys))
+                            } else if roll
+                                < wl.read_per_mille + wl.update_per_mille + wl.rmw_per_mille
+                            {
+                                (2u32, dist.choose_key(&mut rng, num_keys))
+                            } else {
+                                let k = insert_key.get();
+                                insert_key.set(k.wrapping_add(1));
+                                (3u32, k)
+                            };
+
+                            let value = key.wrapping_mul(100).wrapping_add(op as u64);
+                            ops.push((op, key, value));
+                        }
+                        ops
+                    },
+                    |ops| {
+                        for (op, key, value) in ops {
+                            match op {
+                                0 => {
+                                    let _ = session.read(black_box(&key));
+                                }
+                                1 => {
+                                    let _ = session.upsert(black_box(key), black_box(value));
+                                }
+                                2 => {
+                                    let _ = session.rmw(black_box(key), |v| {
+                                        *v = v.wrapping_add(1);
+                                        true
+                                    });
+                                }
+                                3 => {
+                                    let _ = session.upsert(black_box(key), black_box(value));
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            });
+        }
+    }
 
     group.finish();
 }
@@ -634,18 +847,15 @@ fn bench_disk_mixed(c: &mut Criterion) {
 
 // Basic single-threaded benchmarks (fast, default)
 criterion_group!(
-    basic_benches,
-    bench_upsert,
-    bench_read,
-    bench_mixed_a,
-    bench_mixed_b,
-    bench_rmw,
+    name = basic_benches;
+    config = common_profiler::configured_criterion();
+    targets = bench_upsert, bench_ycsb_txn, bench_read, bench_mixed_a, bench_mixed_b, bench_rmw
 );
 
 // Concurrent multi-threaded benchmarks
 criterion_group!(
     name = concurrent_benches;
-    config = Criterion::default()
+    config = common_profiler::configured_criterion()
         .sample_size(30)
         .measurement_time(Duration::from_secs(10));
     targets = bench_concurrent_read, bench_concurrent_mixed, bench_concurrent_write
@@ -654,7 +864,7 @@ criterion_group!(
 // Large value benchmarks using RawBytes (separate functions to control memory)
 criterion_group!(
     name = large_value_benches;
-    config = Criterion::default()
+    config = common_profiler::configured_criterion()
         .sample_size(50)
         .measurement_time(Duration::from_secs(3));
     targets = bench_large_value_read_1kb,
@@ -666,7 +876,7 @@ criterion_group!(
 // Real disk I/O benchmarks
 criterion_group!(
     name = disk_benches;
-    config = Criterion::default()
+    config = common_profiler::configured_criterion()
         .sample_size(30)
         .measurement_time(Duration::from_secs(10));
     targets = bench_disk_read, bench_disk_write, bench_disk_mixed

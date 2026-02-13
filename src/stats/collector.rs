@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::stats::metrics::StoreStats;
+use crate::stats::metrics::{PhaseStatsSnapshot, StoreStats};
 
 /// Configuration for statistics collection
 #[derive(Debug, Clone)]
@@ -69,6 +69,8 @@ pub struct StatsCollector {
     enabled: AtomicBool,
     /// Store statistics
     pub store_stats: StoreStats,
+    /// Whether phase breakdown collection is enabled
+    phase_enabled: AtomicBool,
     /// Start time for throughput calculation
     start_time: Instant,
 }
@@ -81,6 +83,7 @@ impl StatsCollector {
             config,
             enabled: AtomicBool::new(enabled),
             store_stats: StoreStats::new(),
+            phase_enabled: AtomicBool::new(false),
             start_time: Instant::now(),
         }
     }
@@ -108,6 +111,26 @@ impl StatsCollector {
     /// Disable statistics collection
     pub fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
+    }
+
+    /// Enable per-phase breakdown collection (profiling mode).
+    pub fn enable_phase_stats(&self) {
+        self.phase_enabled.store(true, Ordering::Release);
+    }
+
+    /// Disable per-phase breakdown collection.
+    pub fn disable_phase_stats(&self) {
+        self.phase_enabled.store(false, Ordering::Release);
+    }
+
+    /// Check whether per-phase breakdown collection is enabled.
+    pub fn is_phase_stats_enabled(&self) -> bool {
+        self.phase_enabled.load(Ordering::Acquire)
+    }
+
+    /// Snapshot of per-phase breakdown counters.
+    pub fn phase_snapshot(&self) -> PhaseStatsSnapshot {
+        self.store_stats.phases.snapshot()
     }
 
     /// Get elapsed time since collection started

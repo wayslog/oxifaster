@@ -12,8 +12,8 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -29,7 +29,7 @@ use crate::compaction::{CompactionConfig, Compactor};
 use crate::constants::MAX_THREADS;
 use crate::device::StorageDevice;
 use crate::epoch::EpochGuard;
-use crate::epoch::{get_thread_tag, try_get_thread_id, LightEpoch};
+use crate::epoch::{LightEpoch, get_thread_tag, try_get_thread_id};
 use crate::index::{GrowState, KeyHash, MemHashIndex, MemHashIndexConfig};
 use crate::record::RecordInfo;
 use crate::stats::StatsCollector;
@@ -371,13 +371,17 @@ where
     }
 
     pub(crate) fn cpr_refresh(&self, ctx: &mut ThreadContext) {
-        let state = self.system_state.load(Ordering::Acquire);
+        let state = self.system_state.load(Ordering::Relaxed);
 
         if state.phase == crate::store::Phase::Rest || state.action == crate::store::Action::None {
-            ctx.version = state.version;
-            ctx.current.version = state.version;
+            if ctx.version != state.version {
+                ctx.version = state.version;
+                ctx.current.version = state.version;
+            }
             return;
         }
+
+        let state = self.system_state.load(Ordering::Acquire);
 
         let state_sig = ThreadContext::cpr_state_sig(state.action, state.phase, state.version);
         if ctx.last_cpr_state == state_sig {
@@ -499,8 +503,8 @@ where
 
     /// Record read operation statistics
     #[inline]
-    fn record_read_stats(&self, hit: bool, start: Instant) {
-        if self.stats_collector.is_enabled() {
+    fn record_read_stats(&self, hit: bool, start: Option<Instant>) {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_read(hit);
             self.stats_collector
                 .store_stats
@@ -517,6 +521,26 @@ where
     /// Enable statistics collection
     pub fn enable_stats(&self) {
         self.stats_collector.enable();
+    }
+
+    /// Enable per-phase profiling counters (profiling mode).
+    pub fn enable_phase_stats(&self) {
+        self.stats_collector.enable_phase_stats();
+    }
+
+    /// Disable per-phase profiling counters.
+    pub fn disable_phase_stats(&self) {
+        self.stats_collector.disable_phase_stats();
+    }
+
+    /// Check if per-phase profiling counters are enabled.
+    pub fn is_phase_stats_enabled(&self) -> bool {
+        self.stats_collector.is_phase_stats_enabled()
+    }
+
+    /// Snapshot of per-phase profiling counters.
+    pub fn phase_stats_snapshot(&self) -> crate::stats::PhaseStatsSnapshot {
+        self.stats_collector.phase_snapshot()
     }
 
     /// Disable statistics collection
@@ -614,7 +638,7 @@ where
     /// is occurring concurrently.
     #[inline]
     unsafe fn hlog(&self) -> &PersistentMemoryMalloc<D> {
-        &*self.hlog.get()
+        unsafe { &*self.hlog.get() }
     }
 
     /// Get a mutable reference to the hybrid log
@@ -625,7 +649,7 @@ where
     #[inline]
     #[allow(clippy::mut_from_ref)]
     unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
-        &mut *self.hlog.get()
+        unsafe { &mut *self.hlog.get() }
     }
 
     // ============ Session Management API ============
@@ -781,11 +805,43 @@ where
 
     /// Synchronous read operation
     pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let phase_enabled = stats_enabled && self.stats_collector.is_phase_stats_enabled();
+        if phase_enabled {
+            self.stats_collector.store_stats.phases.record_read_op();
+        }
+
+        let hash_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = KeyHash::new(<K as PersistKey>::Codec::hash(key)?);
+        if let Some(t) = hash_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_read_hash(t.elapsed());
+        }
 
         // Find entry in hash index
+        let index_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let result = self.hash_index.find_entry(hash);
+        if let Some(t) = index_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_read_index(t.elapsed());
+        }
 
         if !result.found() {
             self.record_read_stats(false, start);
@@ -793,10 +849,21 @@ where
         }
 
         let mut address = result.entry.address();
+        let chain_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         // Check read cache first if enabled
         if address.in_readcache() {
             if let Some(value) = self.try_read_from_cache(address, key) {
+                if let Some(t) = chain_start {
+                    self.stats_collector
+                        .store_stats
+                        .phases
+                        .record_read_chain(t.elapsed());
+                }
                 self.record_read_stats(true, start);
                 return Ok(Some(value));
             }
@@ -809,6 +876,12 @@ where
             // Check read cache for chain entries
             if address.in_readcache() {
                 if let Some(value) = self.try_read_from_cache(address, key) {
+                    if let Some(t) = chain_start {
+                        self.stats_collector
+                            .store_stats
+                            .phases
+                            .record_read_chain(t.elapsed());
+                    }
                     self.record_read_stats(true, start);
                     return Ok(Some(value));
                 }
@@ -826,6 +899,12 @@ where
                     match result {
                         Ok(parsed) => {
                             if parsed.key.as_ref() == Some(key) {
+                                if let Some(t) = chain_start {
+                                    self.stats_collector
+                                        .store_stats
+                                        .phases
+                                        .record_read_chain(t.elapsed());
+                                }
                                 self.record_read_stats(parsed.value.is_some(), start);
                                 return Ok(parsed.value);
                             }
@@ -852,6 +931,12 @@ where
                 if submitted {
                     ctx.on_pending_io_submitted();
                 }
+                if let Some(t) = chain_start {
+                    self.stats_collector
+                        .store_stats
+                        .phases
+                        .record_read_chain(t.elapsed());
+                }
                 return Err(Status::Pending);
             }
 
@@ -875,6 +960,12 @@ where
                 if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
                     // Check for tombstone
                     if view.is_tombstone() {
+                        if let Some(t) = chain_start {
+                            self.stats_collector
+                                .store_stats
+                                .phases
+                                .record_read_chain(t.elapsed());
+                        }
                         self.record_read_stats(false, start);
                         return Ok(None);
                     }
@@ -892,6 +983,12 @@ where
                     }
 
                     self.record_read_stats(true, start);
+                    if let Some(t) = chain_start {
+                        self.stats_collector
+                            .store_stats
+                            .phases
+                            .record_read_chain(t.elapsed());
+                    }
                     return Ok(Some(value));
                 }
 
@@ -902,6 +999,12 @@ where
             }
         }
 
+        if let Some(t) = chain_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_read_chain(t.elapsed());
+        }
         self.record_read_stats(false, start);
         Ok(None)
     }
@@ -1019,13 +1122,41 @@ where
     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
     /// operation statistics when RMW creates a new record via upsert.
     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
+        let phase_enabled =
+            self.stats_collector.is_enabled() && self.stats_collector.is_phase_stats_enabled();
+        if phase_enabled {
+            self.stats_collector.store_stats.phases.record_upsert_op();
+        }
+
+        let hash_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(&key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return (s, 0),
         };
+        if let Some(t) = hash_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_upsert_hash(t.elapsed());
+        }
 
         // Find or create entry in hash index
-        let result = self.hash_index.find_or_create_entry(hash);
+        let index_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let result = self.find_or_create_entry_cached(ctx, hash);
+        if let Some(t) = index_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_upsert_index(t.elapsed());
+        }
 
         let atomic_entry = match result.atomic_entry {
             Some(entry) => entry,
@@ -1038,18 +1169,40 @@ where
             self.invalidate_cache_entry(old_address, &key);
         }
 
+        let layout_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let (disk_len, alloc_len, key_len, value_len) =
             match record_format::layout_for_ops::<K, V>(&key, Some(&value)) {
                 Ok(v) => v,
                 Err(s) => return (s, 0),
             };
+        if let Some(t) = layout_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_upsert_layout(t.elapsed());
+        }
 
         // Allocate space in the log
         // SAFETY: Allocation is protected by epoch and internal synchronization
+        let alloc_start = if phase_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let address = match unsafe { self.hlog_mut().allocate(alloc_len as u32) } {
             Ok(addr) => addr,
             Err(status) => return (status, 0),
         };
+        if let Some(t) = alloc_start {
+            self.stats_collector
+                .store_stats
+                .phases
+                .record_upsert_alloc(t.elapsed());
+        }
 
         // Get pointer to the allocated space
         // SAFETY: We just allocated this space, and access is protected by epoch
@@ -1057,6 +1210,11 @@ where
 
         if let Some(ptr) = record_ptr {
             // Initialize the record
+            let init_start = if phase_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             unsafe {
                 const U32_BYTES: usize = std::mem::size_of::<u32>();
                 const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
@@ -1111,27 +1269,68 @@ where
                         return (s, 0);
                     }
                 }
-
-                // The record is now fully initialized and can be scanned safely.
-                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
+            }
+            if let Some(t) = init_start {
+                self.stats_collector
+                    .store_stats
+                    .phases
+                    .record_upsert_init(t.elapsed());
             }
 
-            // Update hash index
-            let status = self.hash_index.try_update_entry(
-                atomic_entry,
-                result.entry.to_hash_bucket_entry(),
+            // SAFETY: The header was initialized above via `ptr::write`.
+            let header = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+
+            // Update the hash index with a CAS-retry loop. If another thread updated the entry
+            // between `find_or_create_entry` and this point, patch the record header to point to
+            // the latest head and retry the CAS until it succeeds. This avoids losing updates
+            // without allocating a new record on contention.
+            //
+            // SAFETY: `atomic_entry` points to the bucket entry returned by `find_or_create_entry`.
+            let atomic_ref = unsafe { &*atomic_entry };
+            let stats_enabled = self.stats_collector.is_enabled();
+            let mut expected = result.entry.to_hash_bucket_entry();
+            let new_entry = crate::index::IndexHashBucketEntry::new_with_read_cache(
                 address,
                 hash.tag(),
                 false,
-            );
+                false,
+            )
+            .to_hash_bucket_entry();
 
-            if status != Status::Ok {
-                // CAS failed - another thread updated, need to retry
-                // Record retry statistics
-                if self.stats_collector.is_enabled() {
-                    self.stats_collector.store_stats.operations.record_retry();
+            let index_update_start = if phase_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            loop {
+                match atomic_ref.compare_exchange(
+                    expected,
+                    new_entry,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => {
+                        if stats_enabled {
+                            self.stats_collector.store_stats.operations.record_retry();
+                        }
+
+                        let actual_index = crate::index::IndexHashBucketEntry::from(actual);
+                        let latest_prev = self.skip_read_cache(actual_index.address());
+                        header.set_previous_address_relaxed(latest_prev);
+                        expected = actual;
+                    }
                 }
             }
+            if let Some(t) = index_update_start {
+                self.stats_collector
+                    .store_stats
+                    .phases
+                    .record_upsert_index_update(t.elapsed());
+            }
+
+            // Publish the record only after the index points to it.
+            header.publish_valid();
 
             (Status::Ok, disk_len)
         } else {
@@ -1139,16 +1338,55 @@ where
         }
     }
 
+    #[inline]
+    fn find_or_create_entry_cached(
+        &self,
+        ctx: &mut ThreadContext,
+        hash: KeyHash,
+    ) -> crate::index::FindResult {
+        let store_id = self as *const Self as usize;
+        ctx.prepare_index_entry_cache_for_store(store_id);
+
+        let version = self.hash_index.version();
+        if let Some(atomic_entry) = ctx.get_cached_index_entry(hash, version) {
+            // SAFETY: Cache entries are only populated from successful index lookups.
+            let atomic_ref = unsafe { &*atomic_entry };
+            let entry = atomic_ref.load_index(Ordering::Acquire);
+            if !entry.is_unused() && !entry.is_tentative() && entry.tag() == hash.tag() {
+                return crate::index::FindResult {
+                    entry,
+                    atomic_entry: Some(atomic_entry),
+                };
+            }
+            ctx.invalidate_cached_index_entry(hash);
+        }
+
+        let result = self.hash_index.find_or_create_entry(hash);
+        if let Some(atomic_entry) = result.atomic_entry {
+            // Avoid caching pointers captured across a concurrent index version flip.
+            if self.hash_index.version() == version {
+                ctx.put_cached_index_entry(hash, version, atomic_entry);
+            }
+        }
+
+        result
+    }
+
     /// Synchronous upsert operation
     ///
     /// Inserts or updates a key-value pair.
     pub(crate) fn upsert_sync(&self, ctx: &mut ThreadContext, key: K, value: V) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
         // Record upsert statistics
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_upsert();
             self.stats_collector
                 .store_stats
@@ -1167,7 +1405,12 @@ where
 
     /// Synchronous delete operation
     pub(crate) fn delete_sync(&self, ctx: &mut ThreadContext, key: &K) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
@@ -1249,21 +1492,51 @@ where
                     }
                 }
 
-                // The tombstone is now fully initialized and can be scanned safely.
-                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
+                // The record remains invalid until the index points to it.
             }
 
-            // Update hash index
-            let _ = self.hash_index.try_update_entry(
-                atomic_entry,
-                result.entry.to_hash_bucket_entry(),
+            // SAFETY: The header was initialized above via `ptr::write`.
+            let header = unsafe { record_format::record_info_at(ptr.as_ptr()) };
+
+            // Update the hash index (CAS-retry loop, same strategy as `upsert_internal`).
+            // SAFETY: `atomic_entry` points to the bucket entry returned by `find_entry`.
+            let atomic_ref = unsafe { &*atomic_entry };
+            let stats_enabled = self.stats_collector.is_enabled();
+            let mut expected = result.entry.to_hash_bucket_entry();
+            let new_entry = crate::index::IndexHashBucketEntry::new_with_read_cache(
                 address,
                 hash.tag(),
                 false,
-            );
+                false,
+            )
+            .to_hash_bucket_entry();
+
+            loop {
+                match atomic_ref.compare_exchange(
+                    expected,
+                    new_entry,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => {
+                        if stats_enabled {
+                            self.stats_collector.store_stats.operations.record_retry();
+                        }
+
+                        let actual_index = crate::index::IndexHashBucketEntry::from(actual);
+                        let latest_prev = self.skip_read_cache(actual_index.address());
+                        header.set_previous_address_relaxed(latest_prev);
+                        expected = actual;
+                    }
+                }
+            }
+
+            // Publish tombstone after the index points to it.
+            header.publish_valid();
 
             // Record delete statistics
-            if self.stats_collector.is_enabled() {
+            if let Some(start) = start {
                 self.stats_collector.store_stats.operations.record_delete();
                 self.stats_collector
                     .store_stats
@@ -1286,14 +1559,19 @@ where
     where
         F: FnMut(&mut V) -> bool,
     {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(&key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
         };
 
         // Find or create entry in hash index
-        let result = self.hash_index.find_or_create_entry(hash);
+        let result = self.find_or_create_entry_cached(ctx, hash);
 
         let _atomic_entry = match result.atomic_entry {
             Some(entry) => entry,
@@ -1350,7 +1628,7 @@ where
                                     return s;
                                 }
 
-                                if self.stats_collector.is_enabled() {
+                                if let Some(start) = start {
                                     self.stats_collector.store_stats.operations.record_rmw();
                                     self.stats_collector
                                         .store_stats
@@ -1390,7 +1668,7 @@ where
         let (status, record_size) = self.upsert_internal(ctx, key, new_value);
 
         // Record RMW statistics only (not upsert stats)
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector.store_stats.operations.record_rmw();
             self.stats_collector
                 .store_stats
@@ -1416,14 +1694,19 @@ where
         key: K,
         value: V,
     ) -> Status {
-        let start = Instant::now();
+        let stats_enabled = self.stats_collector.is_enabled();
+        let start = if stats_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let hash = match <K as PersistKey>::Codec::hash(&key) {
             Ok(h) => KeyHash::new(h),
             Err(s) => return s,
         };
 
         // Find or create entry in hash index
-        let result = self.hash_index.find_or_create_entry(hash);
+        let result = self.find_or_create_entry_cached(ctx, hash);
 
         let _atomic_entry = match result.atomic_entry {
             Some(entry) => entry,
@@ -1439,7 +1722,7 @@ where
             if address.in_readcache() {
                 if self.try_read_from_cache(address, &key).is_some() {
                     // Key exists in read cache
-                    if self.stats_collector.is_enabled() {
+                    if let Some(start) = start {
                         self.stats_collector
                             .store_stats
                             .operations
@@ -1458,7 +1741,7 @@ where
             while address.is_valid() {
                 if address.in_readcache() {
                     if self.try_read_from_cache(address, &key).is_some() {
-                        if self.stats_collector.is_enabled() {
+                        if let Some(start) = start {
                             self.stats_collector
                                 .store_stats
                                 .operations
@@ -1515,7 +1798,7 @@ where
                         }
 
                         // Key exists - abort conditional insert.
-                        if self.stats_collector.is_enabled() {
+                        if let Some(start) = start {
                             self.stats_collector
                                 .store_stats
                                 .operations
@@ -1538,7 +1821,7 @@ where
         // Key does not exist - proceed with insert (reuse upsert_internal)
         let (status, record_size) = self.upsert_internal(ctx, key, value);
 
-        if self.stats_collector.is_enabled() {
+        if let Some(start) = start {
             self.stats_collector
                 .store_stats
                 .operations

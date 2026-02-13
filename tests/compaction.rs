@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use oxifaster::Address;
 use oxifaster::compaction::{
     CompactionConfig, CompactionResult, CompactionStats, Compactor, ConcurrentCompactionConfig,
     ConcurrentCompactionContext, ConcurrentCompactor,
@@ -13,7 +14,6 @@ use oxifaster::device::NullDisk;
 use oxifaster::scan::ScanRange;
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Address;
 
 // ============ Helper Functions ============
 

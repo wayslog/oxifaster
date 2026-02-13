@@ -402,7 +402,9 @@ impl AtomicPageOffset {
     pub fn reserve(&self, num_slots: u32) -> PageOffset {
         debug_assert!(num_slots <= Address::MAX_OFFSET);
         let delta = num_slots as u64;
-        PageOffset(self.control.fetch_add(delta, AtomicOrdering::AcqRel))
+        // Reservation only needs to produce a unique monotonically increasing value.
+        // Publication of record bytes is guarded by the hash index update (Release CAS/store).
+        PageOffset(self.control.fetch_add(delta, AtomicOrdering::Relaxed))
     }
 
     /// Compare and exchange the current page offset.

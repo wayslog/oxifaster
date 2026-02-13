@@ -140,7 +140,7 @@ impl<'a> RecordView<'a> {
 }
 
 pub(crate) unsafe fn record_info_at<'a>(ptr: *const u8) -> &'a RecordInfo {
-    &*(ptr as *const RecordInfo)
+    unsafe { &*(ptr as *const RecordInfo) }
 }
 
 pub(crate) unsafe fn record_view_from_memory<'a, K, V>(
@@ -156,7 +156,7 @@ where
         return Err(Status::Corruption);
     }
 
-    let info = record_info_at(ptr);
+    let info = unsafe { record_info_at(ptr) };
     if is_fixed_record::<K, V>() {
         let total = fixed_disk_len::<K, V>();
         if limit < total {
@@ -166,15 +166,15 @@ where
         let key_len = <K as PersistKey>::Codec::FIXED_LEN;
         let encoded_value_len = <V as PersistValue>::Codec::FIXED_LEN;
 
-        let key_ptr = ptr.add(RECORD_INFO_SIZE);
-        let val_ptr = key_ptr.add(key_len);
+        let key_ptr = unsafe { ptr.add(RECORD_INFO_SIZE) };
+        let val_ptr = unsafe { key_ptr.add(key_len) };
 
-        let key = slice::from_raw_parts(key_ptr, key_len);
+        let key = unsafe { slice::from_raw_parts(key_ptr, key_len) };
         let tombstone = info.is_tombstone();
         let value = if tombstone {
             None
         } else {
-            Some(slice::from_raw_parts(val_ptr, encoded_value_len))
+            Some(unsafe { slice::from_raw_parts(val_ptr, encoded_value_len) })
         };
 
         Ok(RecordView {
@@ -189,8 +189,8 @@ where
             return Err(Status::Corruption);
         }
 
-        let len_ptr = ptr.add(RECORD_INFO_SIZE);
-        let len_bytes = slice::from_raw_parts(len_ptr, VARLEN_LENGTHS_SIZE);
+        let len_ptr = unsafe { ptr.add(RECORD_INFO_SIZE) };
+        let len_bytes = unsafe { slice::from_raw_parts(len_ptr, VARLEN_LENGTHS_SIZE) };
         let key_len =
             u32::from_le_bytes(len_bytes[0..4].try_into().map_err(|_| Status::Corruption)?)
                 as usize;
@@ -207,10 +207,10 @@ where
             return Err(Status::Corruption);
         }
 
-        let key_ptr = len_ptr.add(VARLEN_LENGTHS_SIZE);
-        let val_ptr = key_ptr.add(key_len);
+        let key_ptr = unsafe { len_ptr.add(VARLEN_LENGTHS_SIZE) };
+        let val_ptr = unsafe { key_ptr.add(key_len) };
 
-        let key = slice::from_raw_parts(key_ptr, key_len);
+        let key = unsafe { slice::from_raw_parts(key_ptr, key_len) };
         let tombstone = info.is_tombstone();
         if tombstone && value_len != 0 {
             return Err(Status::Corruption);
@@ -218,7 +218,7 @@ where
         let value = if tombstone {
             None
         } else {
-            Some(slice::from_raw_parts(val_ptr, value_len))
+            Some(unsafe { slice::from_raw_parts(val_ptr, value_len) })
         };
 
         Ok(RecordView {

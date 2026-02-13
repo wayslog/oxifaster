@@ -13,7 +13,7 @@ pub mod multi_hash;
 
 pub use bincode::Bincode;
 pub use hash::hash64;
-pub use multi_hash::{hash_faster_compat_u64, HashAlgorithm};
+pub use multi_hash::{HashAlgorithm, hash_faster_compat_u64};
 
 use crate::status::Status;
 

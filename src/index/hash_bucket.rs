@@ -351,10 +351,23 @@ impl HashBucketOverflowEntry {
     /// Address mask (48 bits)
     const ADDRESS_MASK: u64 = (1 << 48) - 1;
 
+    /// Compact tag-summary bits stored in the high 16 bits.
+    const TAG_SUMMARY_SHIFT: u32 = 48;
+    const TAG_SUMMARY_MASK: u64 = !Self::ADDRESS_MASK;
+
     /// Create a new overflow entry
     #[inline]
     pub const fn new(address: FixedPageAddress) -> Self {
         Self(address.control() & Self::ADDRESS_MASK)
+    }
+
+    /// Create a new overflow entry with a precomputed tag-summary bitset.
+    #[inline]
+    pub const fn new_with_tag_summary(address: FixedPageAddress, tag_summary: u16) -> Self {
+        Self(
+            (address.control() & Self::ADDRESS_MASK)
+                | ((tag_summary as u64) << Self::TAG_SUMMARY_SHIFT),
+        )
     }
 
     /// Create from raw control value
@@ -375,6 +388,34 @@ impl HashBucketOverflowEntry {
         FixedPageAddress::new(self.0 & Self::ADDRESS_MASK)
     }
 
+    /// Get the compact downstream tag-summary bits.
+    #[inline]
+    pub const fn tag_summary(&self) -> u16 {
+        ((self.0 & Self::TAG_SUMMARY_MASK) >> Self::TAG_SUMMARY_SHIFT) as u16
+    }
+
+    /// Return the summary bit corresponding to `tag`.
+    #[inline]
+    pub const fn tag_summary_bit(tag: u16) -> u16 {
+        1u16 << ((tag as u32) & 0xF)
+    }
+
+    /// Check whether the summary indicates this link may contain `tag` downstream.
+    ///
+    /// `false` is only authoritative when `tag_summary() != 0`. A zero summary is treated
+    /// as unknown to preserve correctness for legacy chains recovered without summaries.
+    #[inline]
+    pub const fn may_contain_tag(&self, tag: u16) -> bool {
+        let summary = self.tag_summary();
+        summary == 0 || (summary & Self::tag_summary_bit(tag)) != 0
+    }
+
+    /// Return a copy with one tag-summary bit set.
+    #[inline]
+    pub const fn with_tag_summary_bit(self, tag: u16) -> Self {
+        Self(self.0 | ((Self::tag_summary_bit(tag) as u64) << Self::TAG_SUMMARY_SHIFT))
+    }
+
     /// Get the raw control value
     #[inline]
     pub const fn control(&self) -> u64 {
@@ -386,6 +427,7 @@ impl std::fmt::Debug for HashBucketOverflowEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HashBucketOverflowEntry")
             .field("address", &self.address())
+            .field("tag_summary", &format_args!("0x{:04x}", self.tag_summary()))
             .field("unused", &self.is_unused())
             .finish()
     }
@@ -439,6 +481,20 @@ impl AtomicHashBucketOverflowEntry {
             .compare_exchange(current.0, new.0, success, failure)
             .map(HashBucketOverflowEntry)
             .map_err(HashBucketOverflowEntry)
+    }
+
+    /// Atomically OR a raw mask into the overflow entry control value.
+    #[inline]
+    pub fn fetch_or_control(&self, mask: u64, ordering: Ordering) -> HashBucketOverflowEntry {
+        HashBucketOverflowEntry(self.control.fetch_or(mask, ordering))
+    }
+
+    /// Atomically set the summary bit for `tag`.
+    #[inline]
+    pub fn set_tag_summary_bit(&self, tag: u16, ordering: Ordering) {
+        let mask = (HashBucketOverflowEntry::tag_summary_bit(tag) as u64)
+            << HashBucketOverflowEntry::TAG_SUMMARY_SHIFT;
+        self.control.fetch_or(mask, ordering);
     }
 }
 

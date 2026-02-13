@@ -1,6 +1,6 @@
 use std::fs;
 
-use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
 use tempfile::tempdir;
 use uuid::Uuid;
 

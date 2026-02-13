@@ -13,6 +13,7 @@
 //! - **FasterLog**: A high-performance persistent recoverable append-only log.
 //!
 //! ## Key Features
+#![allow(clippy::collapsible_if)]
 //!
 //! - **High-Performance Concurrent Operations**: Lock-free data structures with epoch-based
 //!   memory reclamation ensure safe and efficient concurrent access.

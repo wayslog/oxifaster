@@ -490,11 +490,12 @@ fn test_f2_checkpoint_dir() {
 
     // Verify it's set
     assert!(f2.checkpoint_dir().is_some());
-    assert!(f2
-        .checkpoint_dir()
-        .unwrap()
-        .to_string_lossy()
-        .contains("test_checkpoint"));
+    assert!(
+        f2.checkpoint_dir()
+            .unwrap()
+            .to_string_lossy()
+            .contains("test_checkpoint")
+    );
 }
 
 #[test]
@@ -797,16 +798,18 @@ fn test_f2_synchronous_checkpoint_flow_resets_phase() {
         f2.checkpoint.phase.load(Ordering::Acquire),
         F2CheckpointPhase::Rest
     );
-    assert!(f2
-        .checkpoint
-        .hot_store_status
-        .load(Ordering::Acquire)
-        .is_done());
-    assert!(f2
-        .checkpoint
-        .cold_store_status
-        .load(Ordering::Acquire)
-        .is_done());
+    assert!(
+        f2.checkpoint
+            .hot_store_status
+            .load(Ordering::Acquire)
+            .is_done()
+    );
+    assert!(
+        f2.checkpoint
+            .cold_store_status
+            .load(Ordering::Acquire)
+            .is_done()
+    );
 
     // 4. 验证可以开启新 session (这在之前会失败)
     let session = f2.start_session();

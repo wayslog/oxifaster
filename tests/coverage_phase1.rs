@@ -358,7 +358,7 @@ fn test_record_info_debug() {
 
 #[test]
 fn test_checkpoint_self_check_empty_dir() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     let options = CheckpointSelfCheckOptions::default();
     let report = checkpoint_self_check(dir.path(), options).unwrap();
@@ -370,7 +370,7 @@ fn test_checkpoint_self_check_empty_dir() {
 
 #[test]
 fn test_checkpoint_self_check_nonexistent_dir() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     use std::path::Path;
     let options = CheckpointSelfCheckOptions::default();
     let report =
@@ -380,7 +380,7 @@ fn test_checkpoint_self_check_nonexistent_dir() {
 
 #[test]
 fn test_checkpoint_self_check_with_non_uuid_dirs() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("not-a-uuid")).unwrap();
     std::fs::create_dir(dir.path().join("also-not-uuid")).unwrap();
@@ -391,7 +391,7 @@ fn test_checkpoint_self_check_with_non_uuid_dirs() {
 
 #[test]
 fn test_checkpoint_self_check_with_uuid_dir_missing_metadata() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     let uuid = uuid::Uuid::new_v4();
     std::fs::create_dir(dir.path().join(uuid.to_string())).unwrap();
@@ -409,7 +409,7 @@ fn test_checkpoint_self_check_with_uuid_dir_missing_metadata() {
 
 #[test]
 fn test_checkpoint_self_check_dry_run_repair() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     let uuid = uuid::Uuid::new_v4();
     std::fs::create_dir(dir.path().join(uuid.to_string())).unwrap();
@@ -429,7 +429,7 @@ fn test_checkpoint_self_check_dry_run_repair() {
 
 #[test]
 fn test_checkpoint_self_check_actual_repair() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     let uuid = uuid::Uuid::new_v4();
     let cp_dir = dir.path().join(uuid.to_string());
@@ -456,7 +456,7 @@ fn test_checkpoint_self_check_options_default() {
 
 #[test]
 fn test_checkpoint_self_check_with_files_skipped() {
-    use oxifaster::ops::{checkpoint_self_check, CheckpointSelfCheckOptions};
+    use oxifaster::ops::{CheckpointSelfCheckOptions, checkpoint_self_check};
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("somefile.txt"), "hello").unwrap();
     let options = CheckpointSelfCheckOptions::default();

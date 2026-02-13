@@ -2,8 +2,8 @@
 //!
 //! 测试日志扫描功能。
 
-use oxifaster::scan::{LogPageStatus, ScanRange};
 use oxifaster::Address;
+use oxifaster::scan::{LogPageStatus, ScanRange};
 
 // ============ ScanRange Tests ============
 

@@ -2,8 +2,8 @@
 //!
 //! These tests verify that checkpoints are durable and crash-consistent.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 

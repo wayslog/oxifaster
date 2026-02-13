@@ -8,14 +8,14 @@ mod util;
 
 use std::sync::Arc;
 
+use oxifaster::Address;
+use oxifaster::Status;
 use oxifaster::compaction::{
     CompactionConfig, CompactionStats, Compactor, ConcurrentCompactionConfig, ConcurrentCompactor,
 };
 use oxifaster::device::{FileSystemDisk, NullDisk, StorageDevice};
 use oxifaster::scan::ScanRange;
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Address;
-use oxifaster::Status;
 use tempfile::tempdir;
 
 fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {

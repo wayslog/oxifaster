@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
@@ -70,7 +70,7 @@ impl<D: StorageDevice> InternalStore<D> {
     /// Get mutable reference to hlog (unsafe)
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
-        &mut *self.hlog.get()
+        unsafe { &mut *self.hlog.get() }
     }
 
     /// Get immutable reference to hlog

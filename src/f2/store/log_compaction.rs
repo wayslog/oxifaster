@@ -261,6 +261,8 @@ where
             return Err(Status::Corruption);
         }
 
+        self.cold_bloom.insert(hash.hash());
+
         let Some(atomic_entry) = index_result.atomic_entry else {
             return Err(Status::Aborted);
         };

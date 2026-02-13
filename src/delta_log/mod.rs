@@ -79,8 +79,8 @@ mod iterator;
 mod log;
 
 pub use entry::{
-    compute_entry_checksum, compute_xor_checksum, verify_checksum, DeltaLogEntry,
-    DeltaLogEntryType, DeltaLogHeader, DELTA_LOG_HEADER_SIZE,
+    DELTA_LOG_HEADER_SIZE, DeltaLogEntry, DeltaLogEntryType, DeltaLogHeader,
+    compute_entry_checksum, compute_xor_checksum, verify_checksum,
 };
 pub use iterator::{DeltaLogIntoIterator, DeltaLogIterator, IteratorState};
 pub use log::{DeltaLog, DeltaLogConfig};

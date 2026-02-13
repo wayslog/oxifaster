@@ -7,6 +7,7 @@ mod internal_store;
 mod key_access;
 mod kv_ops;
 mod log_compaction;
+mod read_router;
 mod store_index;
 mod types;
 
@@ -17,9 +18,11 @@ mod tests;
 
 use self::internal_store::InternalStore;
 
+use super::bloom::ColdBloomFilter;
+
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 
 use parking_lot::Mutex;
@@ -33,6 +36,7 @@ use crate::status::Status;
 use bytemuck::Pod;
 
 use self::key_access::KeyAccessTracker;
+use self::read_router::ReadRouter;
 
 /// F2 Key-Value Store
 ///
@@ -69,6 +73,10 @@ where
     checkpoint_dir: Option<std::path::PathBuf>,
     /// Key access statistics (used only for the access-frequency migration strategy).
     key_access: KeyAccessTracker,
+    /// Adaptive read routing (hot-first vs cold-first).
+    read_router: ReadRouter,
+    /// Bloom filter for cold store lookup optimization.
+    cold_bloom: ColdBloomFilter,
     /// Phantom data for type parameters
     _marker: std::marker::PhantomData<(K, V)>,
 }
@@ -136,6 +144,8 @@ where
             .with_max_compact_bytes(config.compaction.max_compact_size)
             .with_num_threads(config.compaction.num_threads);
 
+        let cold_bloom_index_size = config.cold_store.index_size;
+
         Ok(Self {
             config,
             hot_store,
@@ -149,6 +159,8 @@ where
             num_active_sessions: AtomicU64::new(0),
             checkpoint_dir: None,
             key_access: KeyAccessTracker::new(),
+            read_router: ReadRouter::new(),
+            cold_bloom: ColdBloomFilter::new(cold_bloom_index_size, 10),
             _marker: std::marker::PhantomData,
         })
     }
@@ -542,17 +554,19 @@ where
         }
 
         let weak = Arc::downgrade(self);
-        *handle_guard = Some(thread::spawn(move || loop {
-            let Some(f2) = weak.upgrade() else {
-                break;
-            };
+        *handle_guard = Some(thread::spawn(move || {
+            loop {
+                let Some(f2) = weak.upgrade() else {
+                    break;
+                };
 
-            if !f2.background_worker_active.load(Ordering::Acquire) {
-                break;
+                if !f2.background_worker_active.load(Ordering::Acquire) {
+                    break;
+                }
+
+                f2.background_worker_tick();
+                thread::park_timeout(f2.config.compaction.check_interval);
             }
-
-            f2.background_worker_tick();
-            thread::park_timeout(f2.config.compaction.check_interval);
         }));
     }
 

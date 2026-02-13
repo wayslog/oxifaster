@@ -695,9 +695,11 @@ mod tests {
 
         // Atomic flags should be reset
         assert!(!transferred.index_checkpoint_started.load(Ordering::Relaxed));
-        assert!(!transferred
-            .index_checkpoint_completed
-            .load(Ordering::Relaxed));
+        assert!(
+            !transferred
+                .index_checkpoint_completed
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[test]

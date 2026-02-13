@@ -8,15 +8,15 @@
 //! - Concurrent: Multiple threads can scan different pages simultaneously
 
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::address::Address;
 use crate::codec::{PersistKey, PersistValue};
 use crate::device::SyncStorageDevice;
 use crate::record::RecordInfo;
-use crate::store::record_format;
 use crate::store::RecordView;
+use crate::store::record_format;
 use crate::utility::AlignedBuffer;
 
 /// Status of a log page buffer

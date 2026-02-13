@@ -10,11 +10,11 @@
 //! - start_auto_compaction() - auto compaction handle creation
 //! - AutoCompactionTarget trait implementation
 
+use oxifaster::Address;
 use oxifaster::compaction::AutoCompactionConfig;
 use oxifaster::device::NullDisk;
 use oxifaster::status::Status;
 use oxifaster::store::{FasterKv, FasterKvConfig};
-use oxifaster::Address;
 use std::sync::Arc;
 use std::time::Duration;
 

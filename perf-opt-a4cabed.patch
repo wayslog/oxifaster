@@ -1,0 +1,3687 @@
+From a4cabedc7b33b3189746fa53ce059d65206b0406 Mon Sep 17 00:00:00 2001
+From: wayslog <zxs867179@gmail.com>
+Date: Wed, 11 Feb 2026 18:51:32 +0800
+Subject: [PATCH] perf: optimize index insert path and add profiling benches
+
+---
+ Cargo.toml                           |  10 +
+ benches/common_profiler.rs           |  39 ++
+ benches/index_overflow.rs            |  71 +++
+ benches/index_overflow_concurrent.rs | 100 ++++
+ benches/ycsb.rs                      | 238 +++++++-
+ examples/perf_profile.rs             | 237 ++++++++
+ scripts/bench-ycsb-median.sh         | 162 +++++
+ src/address.rs                       |   4 +-
+ src/allocator/hybrid_log.rs          |   7 +-
+ src/index/mem_index/grow.rs          |  16 +-
+ src/index/mem_index/ops.rs           | 858 +++++++++++++++++++++++++--
+ src/index/mem_index/overflow.rs      | 191 +++++-
+ src/index/mod.rs                     |   3 +
+ src/index/profile.rs                 | 422 +++++++++++++
+ src/record.rs                        |  23 +
+ src/stats/collector.rs               |  25 +-
+ src/stats/metrics.rs                 | 136 +++++
+ src/stats/mod.rs                     |   4 +-
+ src/store/faster_kv.rs               | 301 +++++++++-
+ src/store/session.rs                 | 103 +++-
+ 20 files changed, 2834 insertions(+), 116 deletions(-)
+ create mode 100644 benches/common_profiler.rs
+ create mode 100644 benches/index_overflow.rs
+ create mode 100644 benches/index_overflow_concurrent.rs
+ create mode 100644 examples/perf_profile.rs
+ create mode 100755 scripts/bench-ycsb-median.sh
+ create mode 100644 src/index/profile.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 92b58f6..abc1973 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -18,6 +18,8 @@ io_uring = ["dep:io-uring"]
+ hash-xxh3 = ["dep:xxhash-rust", "xxhash-rust/xxh3"]
+ hash-xxh64 = ["dep:xxhash-rust", "xxhash-rust/xxh64"]
+ f2 = []
++# Internal-only instrumentation for index hot paths. Not enabled by default.
++index-profile = []
+ 
+ [dependencies]
+ tokio = { version = "1", features = ["full"] }
+@@ -53,6 +55,14 @@ rayon = "1.10"
+ name = "ycsb"
+ harness = false
+ 
++[[bench]]
++name = "index_overflow"
++harness = false
++
++[[bench]]
++name = "index_overflow_concurrent"
++harness = false
++
+ [[bin]]
+ name = "format_inspector"
+ path = "tools/format_inspector.rs"
+diff --git a/benches/common_profiler.rs b/benches/common_profiler.rs
+new file mode 100644
+index 0000000..1ca5730
+--- /dev/null
++++ b/benches/common_profiler.rs
+@@ -0,0 +1,39 @@
++// Shared Criterion profiler hook for dumping `oxifaster::index::profile` counters.
++//
++// This is only used when running Criterion with `--profile-time`.
++
++use criterion::Criterion;
++
++pub fn configured_criterion() -> Criterion {
++    #[cfg(feature = "index-profile")]
++    {
++        Criterion::default().with_profiler(IndexProfileProfiler)
++    }
++
++    #[cfg(not(feature = "index-profile"))]
++    {
++        Criterion::default()
++    }
++}
++
++#[cfg(feature = "index-profile")]
++struct IndexProfileProfiler;
++
++#[cfg(feature = "index-profile")]
++use std::{fs, path::Path};
++
++#[cfg(feature = "index-profile")]
++impl criterion::profiler::Profiler for IndexProfileProfiler {
++    fn start_profiling(&mut self, _benchmark_id: &str, _benchmark_dir: &Path) {
++        oxifaster::index::profile::INDEX_INSERT_PROFILE.reset();
++    }
++
++    fn stop_profiling(&mut self, benchmark_id: &str, benchmark_dir: &Path) {
++        let snapshot = oxifaster::index::profile::INDEX_INSERT_PROFILE.snapshot();
++        let contents = format!("benchmark_id: {benchmark_id}\n{snapshot}\n");
++
++        // Best-effort write; profiling should not fail the benchmark run.
++        let _ = fs::create_dir_all(benchmark_dir);
++        let _ = fs::write(benchmark_dir.join("index_insert_profile.txt"), contents);
++    }
++}
+diff --git a/benches/index_overflow.rs b/benches/index_overflow.rs
+new file mode 100644
+index 0000000..e586a9f
+--- /dev/null
++++ b/benches/index_overflow.rs
+@@ -0,0 +1,71 @@
++//! Microbenchmarks focused on MemHashIndex overflow bucket behavior.
++//!
++//! These benchmarks intentionally force many keys into the same base bucket to:
++//! - Exercise overflow bucket allocation and traversal.
++//! - Stress the "insert new key" path (no existing entry).
++
++use std::time::Duration;
++
++use criterion::{
++    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode,
++    Throughput,
++};
++
++use oxifaster::index::{KeyHash, MemHashIndex, MemHashIndexConfig};
++
++mod common_profiler;
++
++fn build_hashes_same_bucket(n: usize, bucket_low_bits: u64) -> Vec<KeyHash> {
++    // The tag is 14 bits derived from bits [48..62). Tags must be unique within a bucket chain,
++    // otherwise MemHashIndex will detect a tag conflict and retry indefinitely.
++    assert!(n <= (1 << KeyHash::TAG_BITS) as usize);
++
++    (0..n)
++        .map(|i| {
++            let tag = i as u64;
++            let hash = bucket_low_bits | (tag << 48);
++            KeyHash::new(hash)
++        })
++        .collect()
++}
++
++fn bench_insert_same_bucket(c: &mut Criterion) {
++    const TABLE_SIZE: u64 = 64;
++    // Force all keys into the same base bucket: hash_table_index(size) uses low bits.
++    const BUCKET_LOW_BITS: u64 = 0x2A;
++
++    let mut group = c.benchmark_group("index/insert_same_bucket");
++    group.sampling_mode(SamplingMode::Flat);
++    group.measurement_time(Duration::from_secs(5));
++
++    for n in [64usize, 256, 1024, 4096] {
++        let hashes = build_hashes_same_bucket(n, BUCKET_LOW_BITS);
++        group.throughput(Throughput::Elements(n as u64));
++        group.bench_function(BenchmarkId::new("n", n), |b| {
++            b.iter_batched(
++                || {
++                    let mut index = MemHashIndex::new();
++                    index.initialize(&MemHashIndexConfig::new(TABLE_SIZE));
++                    index
++                },
++                |index| {
++                    for h in &hashes {
++                        let r = index.find_or_create_entry(black_box(*h));
++                        black_box(&r);
++                        assert!(r.atomic_entry.is_some());
++                    }
++                },
++                BatchSize::LargeInput,
++            )
++        });
++    }
++
++    group.finish();
++}
++
++criterion_group!(
++    name = benches;
++    config = common_profiler::configured_criterion();
++    targets = bench_insert_same_bucket
++);
++criterion_main!(benches);
+diff --git a/benches/index_overflow_concurrent.rs b/benches/index_overflow_concurrent.rs
+new file mode 100644
+index 0000000..94a23c6
+--- /dev/null
++++ b/benches/index_overflow_concurrent.rs
+@@ -0,0 +1,100 @@
++//! Concurrent microbenchmarks focused on MemHashIndex overflow bucket behavior.
++//!
++//! These benchmarks force many keys into the same base bucket to:
++//! - Exercise overflow bucket allocation and traversal under contention.
++//! - Stress the "insert new key" path (no existing entry) with multiple threads.
++
++use std::sync::Arc;
++use std::time::Duration;
++
++use criterion::{
++    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode,
++    Throughput,
++};
++use rayon::prelude::*;
++
++use oxifaster::index::{KeyHash, MemHashIndex, MemHashIndexConfig};
++
++mod common_profiler;
++
++fn build_hashes_same_bucket_range(
++    start_tag: usize,
++    count: usize,
++    bucket_low_bits: u64,
++) -> Vec<KeyHash> {
++    // The tag is 14 bits derived from bits [48..62). Tags must be unique within a bucket chain,
++    // otherwise MemHashIndex will detect a tag conflict and retry indefinitely.
++    assert!(start_tag + count <= (1 << KeyHash::TAG_BITS) as usize);
++
++    (start_tag..start_tag + count)
++        .map(|i| {
++            let tag = i as u64;
++            let hash = bucket_low_bits | (tag << 48);
++            KeyHash::new(hash)
++        })
++        .collect()
++}
++
++fn bench_insert_same_bucket_concurrent(c: &mut Criterion) {
++    const TABLE_SIZE: u64 = 64;
++    // Force all keys into the same base bucket: hash_table_index(size) uses low bits.
++    const BUCKET_LOW_BITS: u64 = 0x2A;
++    const OPS_PER_THREAD: usize = 1024;
++
++    let mut group = c.benchmark_group("index/insert_same_bucket_concurrent");
++    group.sampling_mode(SamplingMode::Flat);
++    group.measurement_time(Duration::from_secs(8));
++    group.sample_size(30);
++
++    for num_threads in [1usize, 2, 4, 8] {
++        let ops_total = OPS_PER_THREAD * num_threads;
++
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(num_threads)
++            .build()
++            .unwrap();
++
++        let per_thread_hashes: Vec<Vec<KeyHash>> = (0..num_threads)
++            .map(|thread_id| {
++                build_hashes_same_bucket_range(
++                    thread_id * OPS_PER_THREAD,
++                    OPS_PER_THREAD,
++                    BUCKET_LOW_BITS,
++                )
++            })
++            .collect();
++
++        group.throughput(Throughput::Elements(ops_total as u64));
++        group.bench_function(BenchmarkId::new("threads", num_threads), |b| {
++            b.iter_batched(
++                || {
++                    let mut index = MemHashIndex::new();
++                    index.initialize(&MemHashIndexConfig::new(TABLE_SIZE));
++                    index
++                },
++                |index| {
++                    let index = Arc::new(index);
++                    pool.install(|| {
++                        per_thread_hashes.par_iter().for_each(|hashes| {
++                            for h in hashes {
++                                let r = index.find_or_create_entry(black_box(*h));
++                                black_box(&r);
++                                assert!(r.atomic_entry.is_some());
++                            }
++                        });
++                    });
++                },
++                BatchSize::LargeInput,
++            )
++        });
++    }
++
++    group.finish();
++}
++
++criterion_group!(
++    name = benches;
++    config = common_profiler::configured_criterion();
++    targets = bench_insert_same_bucket_concurrent
++);
++criterion_main!(benches);
+diff --git a/benches/ycsb.rs b/benches/ycsb.rs
+index c120ee6..b33255a 100644
+--- a/benches/ycsb.rs
++++ b/benches/ycsb.rs
+@@ -6,13 +6,18 @@
+ //! - Large key/value operations using RawBytes (varlen, no envelope)
+ //! - Real disk I/O operations using FileSystemDisk
+ 
++use std::cell::Cell;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
++use criterion::{
++    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
++};
+ use rand::prelude::*;
+ 
++mod common_profiler;
++
+ use oxifaster::codec::RawBytes;
+ use oxifaster::device::{FileSystemDisk, NullDisk};
+ use oxifaster::store::{FasterKv, FasterKvConfig};
+@@ -21,6 +26,62 @@ use oxifaster::store::{FasterKv, FasterKvConfig};
+ // Helper Functions
+ // =============================================================================
+ 
++#[derive(Clone, Copy, Debug)]
++enum KeyDistribution {
++    Uniform,
++    // A simple YCSB-like hotspot distribution:
++    // - With probability `hot_prob`, pick a key from the hot set [0, hot_keys).
++    // - Otherwise, pick a key from the cold set [hot_keys, num_keys).
++    Hotspot {
++        hot_prob: f64,
++        hot_keys_fraction: f64,
++    },
++}
++
++impl KeyDistribution {
++    fn choose_key(&self, rng: &mut impl Rng, num_keys: u64) -> u64 {
++        match *self {
++            KeyDistribution::Uniform => rng.gen_range(0..num_keys),
++            KeyDistribution::Hotspot {
++                hot_prob,
++                hot_keys_fraction,
++            } => {
++                let hot_keys = ((num_keys as f64) * hot_keys_fraction)
++                    .round()
++                    .clamp(1.0, num_keys as f64) as u64;
++                if rng.gen_bool(hot_prob) {
++                    rng.gen_range(0..hot_keys)
++                } else if hot_keys >= num_keys {
++                    rng.gen_range(0..num_keys)
++                } else {
++                    rng.gen_range(hot_keys..num_keys)
++                }
++            }
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug)]
++struct TxnWorkload {
++    // Probabilities in [0, 1000] to avoid floats in the hot loop.
++    read_per_mille: u32,
++    update_per_mille: u32,
++    rmw_per_mille: u32,
++    insert_per_mille: u32,
++}
++
++impl TxnWorkload {
++    fn validate(&self) {
++        debug_assert!(
++            self.read_per_mille
++                + self.update_per_mille
++                + self.rmw_per_mille
++                + self.insert_per_mille
++                == 1000
++        );
++    }
++}
++
+ /// Create a test store with NullDisk (in-memory)
+ fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, NullDisk>> {
+     let config = FasterKvConfig {
+@@ -79,24 +140,176 @@ fn generate_random_bytes(size: usize) -> Vec<u8> {
+ /// Benchmark pure upsert performance
+ fn bench_upsert(c: &mut Criterion) {
+     let mut group = c.benchmark_group("upsert");
+-    group.throughput(Throughput::Elements(1));
++    // Use flat sampling to reduce noise for very fast operations.
++    group.sampling_mode(SamplingMode::Flat);
+     group.measurement_time(Duration::from_secs(5));
+ 
+     let store = create_store(1 << 20, 1 << 28);
+     let mut session = store.start_session().unwrap();
+     let mut key = 0u64;
++    const BATCH: u64 = 512;
++    group.throughput(Throughput::Elements(BATCH));
+ 
+     group.bench_function("sequential", |b| {
+         b.iter(|| {
+-            let status = session.upsert(black_box(key), black_box(key * 10));
+-            key += 1;
+-            status
++            let start = key;
++            key = key.wrapping_add(BATCH);
++
++            for i in 0..BATCH {
++                let k = start.wrapping_add(i);
++                let v = k.wrapping_mul(10);
++                let _ = session.upsert(black_box(k), black_box(v));
++            }
+         })
+     });
+ 
+     group.finish();
+ }
+ 
++/// Benchmark YCSB-like transaction mixes with controllable key distributions.
++///
++/// This is closer to real workloads than the index microbenchmarks:
++/// - A load phase populates the store with `num_keys` keys.
++/// - The benchmark measures batches of operations on a key distribution.
++fn bench_ycsb_txn(c: &mut Criterion) {
++    const BATCH: usize = 1024;
++    let mut group = c.benchmark_group("ycsb_txn");
++    group.sampling_mode(SamplingMode::Flat);
++    group.sample_size(30);
++    group.measurement_time(Duration::from_secs(5));
++    group.throughput(Throughput::Elements(BATCH as u64));
++
++    let num_keys = 100_000u64;
++
++    let workloads: [(&str, TxnWorkload); 4] = [
++        (
++            "A_read50_update50",
++            TxnWorkload {
++                read_per_mille: 500,
++                update_per_mille: 500,
++                rmw_per_mille: 0,
++                insert_per_mille: 0,
++            },
++        ),
++        (
++            "B_read95_update5",
++            TxnWorkload {
++                read_per_mille: 950,
++                update_per_mille: 50,
++                rmw_per_mille: 0,
++                insert_per_mille: 0,
++            },
++        ),
++        (
++            "C_read100",
++            TxnWorkload {
++                read_per_mille: 1000,
++                update_per_mille: 0,
++                rmw_per_mille: 0,
++                insert_per_mille: 0,
++            },
++        ),
++        (
++            "F_read50_rmw50",
++            TxnWorkload {
++                read_per_mille: 500,
++                update_per_mille: 0,
++                rmw_per_mille: 500,
++                insert_per_mille: 0,
++            },
++        ),
++    ];
++
++    let dists: [(&str, KeyDistribution); 2] = [
++        ("uniform", KeyDistribution::Uniform),
++        (
++            "hotspot_80_20",
++            KeyDistribution::Hotspot {
++                hot_prob: 0.8,
++                hot_keys_fraction: 0.2,
++            },
++        ),
++    ];
++
++    for (wl_name, wl) in workloads {
++        wl.validate();
++
++        for (dist_name, dist) in dists {
++            let bench_name = format!("{wl_name}/{dist_name}");
++
++            group.bench_function(BenchmarkId::new("batch", bench_name), |b| {
++                // Use an isolated store per benchmark case so that write-heavy workloads do not
++                // accumulate unbounded state across cases.
++                let store = create_store(1 << 20, 1 << 28);
++
++                // Load phase (not measured).
++                {
++                    let mut load_session = store.start_session().unwrap();
++                    for i in 0..num_keys {
++                        load_session.upsert(i, i.wrapping_mul(10));
++                    }
++                }
++
++                let mut session = store.start_session().unwrap();
++                let mut rng = rand::rngs::StdRng::from_entropy();
++                let insert_key = Cell::new(num_keys);
++
++                b.iter_batched(
++                    || {
++                        // op: 0=read, 1=update, 2=rmw, 3=insert
++                        let mut ops: Vec<(u32, u64, u64)> = Vec::with_capacity(BATCH);
++                        for _ in 0..BATCH {
++                            let roll: u32 = rng.gen_range(0..1000);
++                            let (op, key) = if roll < wl.read_per_mille {
++                                (0u32, dist.choose_key(&mut rng, num_keys))
++                            } else if roll < wl.read_per_mille + wl.update_per_mille {
++                                (1u32, dist.choose_key(&mut rng, num_keys))
++                            } else if roll
++                                < wl.read_per_mille + wl.update_per_mille + wl.rmw_per_mille
++                            {
++                                (2u32, dist.choose_key(&mut rng, num_keys))
++                            } else {
++                                let k = insert_key.get();
++                                insert_key.set(k.wrapping_add(1));
++                                (3u32, k)
++                            };
++
++                            let value = key.wrapping_mul(100).wrapping_add(op as u64);
++                            ops.push((op, key, value));
++                        }
++                        ops
++                    },
++                    |ops| {
++                        for (op, key, value) in ops {
++                            match op {
++                                0 => {
++                                    let _ = session.read(black_box(&key));
++                                }
++                                1 => {
++                                    let _ = session.upsert(black_box(key), black_box(value));
++                                }
++                                2 => {
++                                    let _ = session.rmw(black_box(key), |v| {
++                                        *v = v.wrapping_add(1);
++                                        true
++                                    });
++                                }
++                                3 => {
++                                    let _ = session.upsert(black_box(key), black_box(value));
++                                }
++                                _ => unreachable!(),
++                            }
++                        }
++                    },
++                    criterion::BatchSize::SmallInput,
++                )
++            });
++        }
++    }
++
++    group.finish();
++}
++
+ /// Benchmark pure read performance (after population)
+ fn bench_read(c: &mut Criterion) {
+     let mut group = c.benchmark_group("read");
+@@ -634,18 +847,15 @@ fn bench_disk_mixed(c: &mut Criterion) {
+ 
+ // Basic single-threaded benchmarks (fast, default)
+ criterion_group!(
+-    basic_benches,
+-    bench_upsert,
+-    bench_read,
+-    bench_mixed_a,
+-    bench_mixed_b,
+-    bench_rmw,
++    name = basic_benches;
++    config = common_profiler::configured_criterion();
++    targets = bench_upsert, bench_ycsb_txn, bench_read, bench_mixed_a, bench_mixed_b, bench_rmw
+ );
+ 
+ // Concurrent multi-threaded benchmarks
+ criterion_group!(
+     name = concurrent_benches;
+-    config = Criterion::default()
++    config = common_profiler::configured_criterion()
+         .sample_size(30)
+         .measurement_time(Duration::from_secs(10));
+     targets = bench_concurrent_read, bench_concurrent_mixed, bench_concurrent_write
+@@ -654,7 +864,7 @@ criterion_group!(
+ // Large value benchmarks using RawBytes (separate functions to control memory)
+ criterion_group!(
+     name = large_value_benches;
+-    config = Criterion::default()
++    config = common_profiler::configured_criterion()
+         .sample_size(50)
+         .measurement_time(Duration::from_secs(3));
+     targets = bench_large_value_read_1kb,
+@@ -666,7 +876,7 @@ criterion_group!(
+ // Real disk I/O benchmarks
+ criterion_group!(
+     name = disk_benches;
+-    config = Criterion::default()
++    config = common_profiler::configured_criterion()
+         .sample_size(30)
+         .measurement_time(Duration::from_secs(10));
+     targets = bench_disk_read, bench_disk_write, bench_disk_mixed
+diff --git a/examples/perf_profile.rs b/examples/perf_profile.rs
+new file mode 100644
+index 0000000..89d1b57
+--- /dev/null
++++ b/examples/perf_profile.rs
+@@ -0,0 +1,237 @@
++//! Lightweight performance profiling helper.
++//!
++//! This example is intentionally dependency-free (beyond existing project deps) and is meant to
++//! provide a coarse "profile" signal when external profilers are unavailable.
++//!
++//! Run:
++//!   cargo run --release --example perf_profile
++//!
++//! Profiling with `sample` (macOS):
++//!   cargo build --release --example perf_profile
++//!   ./target/release/examples/perf_profile --sleep-ms 2000 --seconds 10 &
++//!   pid=$!
++//!   sample $pid 10 1 -mayDie -file /tmp/oxifaster-perf/sample_perf_profile.txt
++//!   wait $pid
++
++use std::sync::atomic::Ordering;
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use oxifaster::device::NullDisk;
++use oxifaster::store::{FasterKv, FasterKvConfig};
++
++#[derive(Clone, Copy, Debug)]
++enum Workload {
++    Mixed,
++    Read,
++    Upsert,
++}
++
++impl Workload {
++    fn parse(s: &str) -> Option<Self> {
++        match s {
++            "mixed" => Some(Self::Mixed),
++            "read" => Some(Self::Read),
++            "upsert" => Some(Self::Upsert),
++            _ => None,
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug)]
++struct Args {
++    workload: Workload,
++    threads: usize,
++    seconds: u64,
++    sleep_ms: u64,
++    populate_keys: u64,
++    phase_stats: bool,
++}
++
++impl Default for Args {
++    fn default() -> Self {
++        Self {
++            workload: Workload::Mixed,
++            threads: 1,
++            seconds: 3,
++            sleep_ms: 0,
++            populate_keys: 100_000,
++            phase_stats: false,
++        }
++    }
++}
++
++fn parse_args() -> Args {
++    let mut args = Args::default();
++    let mut it = std::env::args().skip(1);
++    while let Some(flag) = it.next() {
++        match flag.as_str() {
++            "--workload" => {
++                if let Some(v) = it.next() {
++                    if let Some(w) = Workload::parse(&v) {
++                        args.workload = w;
++                    }
++                }
++            }
++            "--threads" => {
++                if let Some(v) = it.next() {
++                    if let Ok(n) = v.parse::<usize>() {
++                        args.threads = n.max(1);
++                    }
++                }
++            }
++            "--seconds" => {
++                if let Some(v) = it.next() {
++                    if let Ok(n) = v.parse::<u64>() {
++                        args.seconds = n.max(1);
++                    }
++                }
++            }
++            "--sleep-ms" => {
++                if let Some(v) = it.next() {
++                    if let Ok(n) = v.parse::<u64>() {
++                        args.sleep_ms = n;
++                    }
++                }
++            }
++            "--populate-keys" => {
++                if let Some(v) = it.next() {
++                    if let Ok(n) = v.parse::<u64>() {
++                        args.populate_keys = n.max(1);
++                    }
++                }
++            }
++            "--phase-stats" => {
++                args.phase_stats = true;
++            }
++            _ => {}
++        }
++    }
++    args
++}
++
++fn main() {
++    let args = parse_args();
++
++    let config = FasterKvConfig {
++        table_size: 1 << 20,
++        log_memory_size: 1 << 28,
++        page_size_bits: 22,
++        mutable_fraction: 0.9,
++    };
++
++    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, NullDisk::new()));
++    store.enable_stats();
++    if args.phase_stats {
++        store.enable_phase_stats();
++    }
++
++    // Warm up and populate.
++    let populate_keys = args.populate_keys;
++    {
++        let mut session = store.start_session().unwrap();
++        for i in 0..populate_keys {
++            session.upsert(i, i * 10);
++        }
++    }
++
++    if args.sleep_ms > 0 {
++        std::thread::sleep(Duration::from_millis(args.sleep_ms));
++    }
++
++    let before = store.stats_snapshot();
++    let before_retries = store.operation_stats().retries.load(Ordering::Relaxed);
++
++    let duration = Duration::from_secs(args.seconds);
++    let start = Instant::now();
++    {
++        std::thread::scope(|s| {
++            for thread_id in 0..args.threads {
++                let store = Arc::clone(&store);
++                s.spawn(move || {
++                    let mut session = store.start_session().unwrap();
++                    let mut seed = 0x1234_5678_9abc_def0u64 ^ (thread_id as u64);
++                    let mut i = 0u64;
++                    while start.elapsed() < duration {
++                        // xorshift64*
++                        seed ^= seed >> 12;
++                        seed ^= seed << 25;
++                        seed ^= seed >> 27;
++                        seed = seed.wrapping_mul(0x2545F4914F6CDD1D);
++                        let key = seed % populate_keys;
++
++                        match args.workload {
++                            Workload::Mixed => {
++                                if i & 1 == 0 {
++                                    let _ = session.read(&key);
++                                } else {
++                                    let _ =
++                                        session.upsert(key, key.wrapping_mul(10).wrapping_add(i));
++                                }
++                            }
++                            Workload::Read => {
++                                let _ = session.read(&key);
++                            }
++                            Workload::Upsert => {
++                                let _ = session.upsert(key, key.wrapping_mul(10).wrapping_add(i));
++                            }
++                        }
++
++                        i = i.wrapping_add(1);
++                    }
++                });
++            }
++        });
++    }
++    let elapsed = start.elapsed();
++
++    let after = store.stats_snapshot();
++    let after_retries = store.operation_stats().retries.load(Ordering::Relaxed);
++    let ops_delta = after
++        .total_operations
++        .saturating_sub(before.total_operations);
++    let retries_delta = after_retries.saturating_sub(before_retries);
++    let throughput = ops_delta as f64 / elapsed.as_secs_f64();
++
++    println!("=== perf_profile ===");
++    println!(
++        "workload: {:?} threads: {} seconds: {}",
++        args.workload, args.threads, args.seconds
++    );
++    println!("elapsed: {:?}", elapsed);
++    println!("ops: {}", ops_delta);
++    println!("throughput: {:.2} ops/s", throughput);
++    println!("retries: {}", retries_delta);
++    println!(
++        "avg_latency (store-wide): {:?}",
++        after.avg_latency.min(Duration::from_secs(10))
++    );
++
++    if args.phase_stats {
++        let p = store.phase_stats_snapshot();
++        println!("--- phase_stats (totals) ---");
++        println!("upsert_ops: {}", p.upsert_ops);
++        println!("read_ops: {}", p.read_ops);
++
++        // Avoid division by zero for short/empty runs.
++        let upsert_ops = p.upsert_ops.max(1) as u128;
++        let read_ops = p.read_ops.max(1) as u128;
++
++        println!("--- phase_stats (avg ns/op) ---");
++        println!("upsert.hash: {}", (p.upsert_hash_ns as u128) / upsert_ops);
++        println!("upsert.index: {}", (p.upsert_index_ns as u128) / upsert_ops);
++        println!(
++            "upsert.layout: {}",
++            (p.upsert_layout_ns as u128) / upsert_ops
++        );
++        println!("upsert.alloc: {}", (p.upsert_alloc_ns as u128) / upsert_ops);
++        println!("upsert.init: {}", (p.upsert_init_ns as u128) / upsert_ops);
++        println!(
++            "upsert.index_update: {}",
++            (p.upsert_index_update_ns as u128) / upsert_ops
++        );
++        println!("read.hash: {}", (p.read_hash_ns as u128) / read_ops);
++        println!("read.index: {}", (p.read_index_ns as u128) / read_ops);
++        println!("read.chain: {}", (p.read_chain_ns as u128) / read_ops);
++    }
++}
+diff --git a/scripts/bench-ycsb-median.sh b/scripts/bench-ycsb-median.sh
+new file mode 100755
+index 0000000..a5f9af8
+--- /dev/null
++++ b/scripts/bench-ycsb-median.sh
+@@ -0,0 +1,162 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Run selected YCSB Criterion cases for a fixed number of rounds and report the
++# median of per-run center estimates from `time: [low center high]`.
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
++
++RUNS=5
++BENCH_NAME="ycsb"
++FEATURES=""
++
++usage() {
++  cat <<USAGE
++Usage: $0 [options] [workload ...]
++
++Options:
++  -r, --runs N          Number of benchmark rounds per workload (default: $RUNS)
++  -f, --features LIST   Cargo features passed to 'cargo bench'
++  -b, --bench NAME      Bench target name (default: $BENCH_NAME)
++  -h, --help            Show this help message
++
++Examples:
++  $0 --runs 7 "ycsb_txn/batch/B_read95_update5/hotspot_80_20"
++  $0 -r 5 -f index-profile      "ycsb_txn/batch/B_read95_update5/hotspot_80_20"      "ycsb_txn/batch/C_read100/uniform"
++USAGE
++}
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    -r|--runs)
++      RUNS="$2"
++      shift 2
++      ;;
++    -f|--features)
++      FEATURES="$2"
++      shift 2
++      ;;
++    -b|--bench)
++      BENCH_NAME="$2"
++      shift 2
++      ;;
++    -h|--help)
++      usage
++      exit 0
++      ;;
++    --)
++      shift
++      break
++      ;;
++    -*)
++      echo "Unknown option: $1" >&2
++      usage >&2
++      exit 2
++      ;;
++    *)
++      break
++      ;;
++  esac
++done
++
++if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
++  echo "--runs must be a positive integer, got: $RUNS" >&2
++  exit 2
++fi
++
++if [[ $# -eq 0 ]]; then
++  set --     "ycsb_txn/batch/B_read95_update5/hotspot_80_20"     "ycsb_txn/batch/C_read100/uniform"
++fi
++
++run_workload() {
++  local workload="$1"
++  local -a run_ns=()
++
++  echo "==> Workload: $workload"
++
++  for ((i = 1; i <= RUNS; i++)); do
++    local -a cmd=(cargo bench --bench "$BENCH_NAME")
++    if [[ -n "$FEATURES" ]]; then
++      cmd+=(--features "$FEATURES")
++    fi
++    cmd+=(-- --noplot "$workload")
++
++    local output
++    if ! output="$(cd "$REPO_ROOT" && "${cmd[@]}" 2>&1)"; then
++      echo "$output"
++      echo "Benchmark command failed on run $i/$RUNS" >&2
++      return 1
++    fi
++
++    local parsed
++    parsed="$(BENCH_OUTPUT="$output" python3 - <<'PY2'
++import os
++import re
++import sys
++
++text = os.environ.get("BENCH_OUTPUT", "")
++cleaned = re.sub(r"\x1b\[[0-9;]*m", "", text)
++pat = re.compile(
++    r"time:\s+\[\s*[0-9.]+\s*(ns|us|µs|μs|ms|s)\s+([0-9.]+)\s*(ns|us|µs|μs|ms|s)"
++)
++matches = list(pat.finditer(cleaned))
++if not matches:
++    sys.exit(1)
++
++m = matches[-1]
++value = float(m.group(2))
++unit = m.group(3)
++if unit == "μs":
++    unit = "µs"
++
++factor = {
++    "ns": 1.0,
++    "us": 1_000.0,
++    "µs": 1_000.0,
++    "ms": 1_000_000.0,
++    "s": 1_000_000_000.0,
++}[unit]
++
++print(f"{value * factor}\t{value:.3f} {unit}")
++PY2
++)" || {
++      echo "$output"
++      echo "Failed to parse Criterion output on run $i/$RUNS" >&2
++      return 1
++    }
++
++    local ns="${parsed%%$'	'*}"
++    local center="${parsed#*$'	'}"
++    run_ns+=("$ns")
++    echo "  run $i/$RUNS: $center"
++  done
++
++  python3 - "$workload" "${run_ns[@]}" <<'PY2'
++import statistics
++import sys
++
++workload = sys.argv[1]
++vals = [float(v) for v in sys.argv[2:]]
++med = statistics.median(vals)
++
++
++def fmt_ns(ns: float) -> str:
++    if ns >= 1_000_000_000:
++        return f"{ns / 1_000_000_000:.3f} s"
++    if ns >= 1_000_000:
++        return f"{ns / 1_000_000:.3f} ms"
++    if ns >= 1_000:
++        return f"{ns / 1_000:.3f} µs"
++    return f"{ns:.3f} ns"
++
++print(f"  median(center) over {len(vals)} runs: {fmt_ns(med)}")
++print(f"  min/max(center): {fmt_ns(min(vals))} / {fmt_ns(max(vals))}")
++print(f"  workload_done: {workload}")
++PY2
++}
++
++for workload in "$@"; do
++  run_workload "$workload"
++  echo
++done
+diff --git a/src/address.rs b/src/address.rs
+index 468b2cc..cbf43cd 100644
+--- a/src/address.rs
++++ b/src/address.rs
+@@ -402,7 +402,9 @@ impl AtomicPageOffset {
+     pub fn reserve(&self, num_slots: u32) -> PageOffset {
+         debug_assert!(num_slots <= Address::MAX_OFFSET);
+         let delta = num_slots as u64;
+-        PageOffset(self.control.fetch_add(delta, AtomicOrdering::AcqRel))
++        // Reservation only needs to produce a unique monotonically increasing value.
++        // Publication of record bytes is guarded by the hash index update (Release CAS/store).
++        PageOffset(self.control.fetch_add(delta, AtomicOrdering::Relaxed))
+     }
+ 
+     /// Compare and exchange the current page offset.
+diff --git a/src/allocator/hybrid_log.rs b/src/allocator/hybrid_log.rs
+index 663f203..7a3b371 100644
+--- a/src/allocator/hybrid_log.rs
++++ b/src/allocator/hybrid_log.rs
+@@ -376,7 +376,12 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
+ 
+                 // Calculate address - safe cast since offset <= Address::MAX_OFFSET
+                 let address = Address::new(page, offset as u32);
+-                self.mark_page_dirty(page);
++                // Mark the page dirty only once per page. Subsequent allocations within the same
++                // page do not need to touch the atomic flush state, which keeps the hot allocation
++                // path lightweight.
++                if offset == 0 {
++                    self.mark_page_dirty(page);
++                }
+                 return Ok(address);
+             }
+ 
+diff --git a/src/index/mem_index/grow.rs b/src/index/mem_index/grow.rs
+index 4c30b80..9caf0e4 100644
+--- a/src/index/mem_index/grow.rs
++++ b/src/index/mem_index/grow.rs
+@@ -245,7 +245,8 @@ impl MemHashIndex {
+             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
+             if overflow.is_unused() {
+                 // Append an overflow bucket.
+-                let new_addr = self.overflow_pools[new_version as usize].allocate();
++                let (new_addr, new_ptr) =
++                    self.overflow_pools[new_version as usize].allocate_with_ptr();
+                 let new_overflow = HashBucketOverflowEntry::new(new_addr);
+                 let expected = HashBucketOverflowEntry::INVALID;
+ 
+@@ -256,15 +257,14 @@ impl MemHashIndex {
+                     Ordering::Acquire,
+                 ) {
+                     Ok(_) => {
+-                        let new_ptr =
+-                            self.overflow_pools[new_version as usize].bucket_ptr(new_addr);
+-                        if let Some(p) = new_ptr {
+-                            bucket_ptr = p;
+-                            continue;
+-                        }
+-                        return false;
++                        bucket_ptr = new_ptr;
++                        continue;
+                     }
+                     Err(actual) => {
++                        // Another thread installed an overflow bucket first. Return ours to the
++                        // pool for reuse.
++                        self.overflow_pools[new_version as usize]
++                            .deallocate_with_ptr(new_addr, new_ptr);
+                         if actual.is_unused() {
+                             continue;
+                         }
+diff --git a/src/index/mem_index/ops.rs b/src/index/mem_index/ops.rs
+index df8a590..07a2ebc 100644
+--- a/src/index/mem_index/ops.rs
++++ b/src/index/mem_index/ops.rs
+@@ -1,4 +1,6 @@
+ use std::sync::atomic::Ordering;
++#[cfg(feature = "index-profile")]
++use std::time::Instant;
+ 
+ use crate::address::Address;
+ use crate::constants::CACHE_LINE_BYTES;
+@@ -11,7 +13,35 @@ use crate::utility::is_power_of_two;
+ 
+ use super::{FindResult, IndexStats, MemHashIndex, MemHashIndexConfig};
+ 
++struct InsertScanResult {
++    found: Option<FindResult>,
++    free_entry: Option<*const AtomicHashBucketEntry>,
++    secondary_free_entry: Option<*const AtomicHashBucketEntry>,
++    tail: *const HashBucket,
++    retry: bool,
++}
++
+ impl MemHashIndex {
++    #[inline]
++    fn preferred_entry_index(tag: u16) -> usize {
++        (tag as usize) % HashBucket::NUM_ENTRIES
++    }
++
++    #[inline]
++    fn probe_stride(tag: u16) -> usize {
++        // Keep probe 0 on the preferred lane, then rotate remaining probes by tag-derived stride
++        // to reduce slot herding under heavy contention.
++        ((tag as usize / HashBucket::NUM_ENTRIES) % (HashBucket::NUM_ENTRIES - 1)) + 1
++    }
++
++    #[inline]
++    fn probe_entry_index(preferred_idx: usize, probe: usize, stride: usize) -> usize {
++        debug_assert!(preferred_idx < HashBucket::NUM_ENTRIES);
++        debug_assert!(probe < HashBucket::NUM_ENTRIES);
++        debug_assert!((1..HashBucket::NUM_ENTRIES).contains(&stride));
++        (preferred_idx + probe * stride) % HashBucket::NUM_ENTRIES
++    }
++
+     /// Create a new uninitialized hash index
+     pub fn new() -> Self {
+         Self {
+@@ -141,20 +171,47 @@ impl MemHashIndex {
+         let version = self.version.load(Ordering::Acquire) as usize;
+         let tag = hash.tag();
+ 
++        #[cfg(feature = "index-profile")]
++        crate::index::profile::INDEX_INSERT_PROFILE.record_find_or_create_call();
++
++        #[cfg(feature = "index-profile")]
++        let mut first_try = true;
+         loop {
++            #[cfg(feature = "index-profile")]
++            {
++                if !first_try {
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_retry();
++                }
++                first_try = false;
++            }
++
+             let bucket = self.tables[version].bucket(hash);
+ 
+-            // Search the entire bucket chain first (including the overflow chain).
+-            if let Some(found) = self.find_existing_in_bucket_chain(version, bucket, tag) {
++            // Single traversal: find an existing matching entry or record a free slot for insert.
++            #[cfg(feature = "index-profile")]
++            let scan_start = Instant::now();
++            let scan = self.scan_bucket_chain_for_insert(version, bucket, tag);
++            #[cfg(feature = "index-profile")]
++            crate::index::profile::INDEX_INSERT_PROFILE.record_scan(scan_start.elapsed());
++            if let Some(found) = scan.found {
+                 return found;
+             }
++            if scan.retry {
++                continue;
++            }
+ 
+-            // Find a free slot (including the overflow chain).
+-            let mut free_entry = self.find_free_entry_in_bucket_chain(version, bucket);
+-
+-            // If the whole chain is full, append a new overflow bucket and use its first entry.
++            // Prefer a free slot found during the scan; only append an overflow bucket if the
++            // chain is full.
++            let mut free_entry = scan.free_entry;
++            let secondary_free_entry = scan.secondary_free_entry;
+             if free_entry.is_none() {
+-                free_entry = self.append_overflow_bucket_and_get_free_entry(version, bucket);
++                #[cfg(feature = "index-profile")]
++                let overflow_start = Instant::now();
++                free_entry =
++                    self.append_overflow_bucket_at_tail_and_get_free_entry(version, scan.tail, tag);
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE
++                    .record_append_overflow(overflow_start.elapsed());
+             }
+ 
+             // Try to install a tentative entry.
+@@ -172,12 +229,8 @@ impl MemHashIndex {
+                     Ordering::Acquire,
+                 ) {
+                     Ok(_) => {
+-                        // Check for conflicts
+-                        if self.has_conflicting_entry_in_chain(tag, version, bucket, atomic_entry) {
+-                            // Back off - clear the tentative entry
+-                            atomic_ref.store(HashBucketEntry::INVALID, Ordering::Release);
+-                            continue;
+-                        }
++                        #[cfg(feature = "index-profile")]
++                        crate::index::profile::INDEX_INSERT_PROFILE.record_cas_attempt(true);
+ 
+                         // Success - return the non-tentative version
+                         let final_entry = IndexHashBucketEntry::new(Address::INVALID, tag, false);
+@@ -188,7 +241,44 @@ impl MemHashIndex {
+                             atomic_entry: Some(atomic_entry),
+                         };
+                     }
+-                    Err(_) => continue,
++                    Err(_) => {
++                        #[cfg(feature = "index-profile")]
++                        crate::index::profile::INDEX_INSERT_PROFILE.record_cas_attempt(false);
++
++                        if let Some(secondary) = secondary_free_entry {
++                            // SAFETY: `secondary` points to another valid entry observed in the
++                            // same scan pass.
++                            let secondary_ref = unsafe { &*secondary };
++                            match secondary_ref.compare_exchange(
++                                expected,
++                                tentative_entry.to_hash_bucket_entry(),
++                                Ordering::AcqRel,
++                                Ordering::Acquire,
++                            ) {
++                                Ok(_) => {
++                                    #[cfg(feature = "index-profile")]
++                                    crate::index::profile::INDEX_INSERT_PROFILE
++                                        .record_cas_attempt(true);
++
++                                    let final_entry =
++                                        IndexHashBucketEntry::new(Address::INVALID, tag, false);
++                                    secondary_ref.store_index(final_entry, Ordering::Release);
++
++                                    return FindResult {
++                                        entry: final_entry,
++                                        atomic_entry: Some(secondary),
++                                    };
++                                }
++                                Err(_) => {
++                                    #[cfg(feature = "index-profile")]
++                                    crate::index::profile::INDEX_INSERT_PROFILE
++                                        .record_cas_attempt(false);
++                                }
++                            }
++                        }
++
++                        continue;
++                    }
+                 }
+             }
+         }
+@@ -236,41 +326,414 @@ impl MemHashIndex {
+         Status::Ok
+     }
+ 
+-    /// Check if there's a conflicting entry with the same tag
+-    fn has_conflicting_entry_in_chain(
++    // Tag-conflict detection is handled by `scan_bucket_chain_for_insert` (including tentative
++    // entries) before attempting to install a new entry.
++
++    fn scan_bucket_chain_for_insert(
+         &self,
+-        tag: u16,
+         version: usize,
+         base_bucket: &HashBucket,
+-        our_entry: *const AtomicHashBucketEntry,
+-    ) -> bool {
++        tag: u16,
++    ) -> InsertScanResult {
+         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
++        let mut free_entry: Option<*const AtomicHashBucketEntry> = None;
++        let mut secondary_free_entry: Option<*const AtomicHashBucketEntry> = None;
++        let preferred_idx = Self::preferred_entry_index(tag);
++        let probe_stride = Self::probe_stride(tag);
++        #[cfg(feature = "index-profile")]
++        let mut scan_chain_depth = 1u64;
++
++        #[cfg(feature = "index-profile")]
++        let mut scan_slots = 0u64;
++        #[cfg(feature = "index-profile")]
++        let mut scan_tag_matches = 0u64;
++        #[cfg(feature = "index-profile")]
++        let mut scan_preferred_tag_matches = 0u64;
++
++        // Scan base bucket first (common case: no overflow).
++        // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow_entry are atomic.
++        let bucket = unsafe { &*bucket_ptr };
++
++        for probe in 0..HashBucket::NUM_ENTRIES {
++            let i = Self::probe_entry_index(preferred_idx, probe, probe_stride);
++            #[cfg(feature = "index-profile")]
++            {
++                scan_slots += 1;
++            }
++
++            let entry = bucket.entries[i].load_index(Ordering::Relaxed);
++            if entry.is_unused() {
++                let slot_ptr = &bucket.entries[i] as *const _;
++                if free_entry.is_none() {
++                    free_entry = Some(slot_ptr);
++                } else if secondary_free_entry.is_none() {
++                    secondary_free_entry = Some(slot_ptr);
++                }
++                continue;
++            }
++            if entry.tag() != tag {
++                continue;
++            }
++
++            #[cfg(feature = "index-profile")]
++            {
++                scan_tag_matches += 1;
++                if i == preferred_idx {
++                    scan_preferred_tag_matches += 1;
++                }
++            }
++
++            let entry = bucket.entries[i].load_index(Ordering::Acquire);
++            if entry.is_unused() || entry.tag() != tag {
++                continue;
++            }
++            if entry.is_tentative() {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                    scan_slots,
++                    scan_tag_matches,
++                    scan_preferred_tag_matches,
++                    scan_chain_depth,
++                );
++                return InsertScanResult {
++                    found: None,
++                    free_entry: None,
++                    secondary_free_entry: None,
++                    tail: bucket_ptr,
++                    retry: true,
++                };
++            }
++
++            #[cfg(feature = "index-profile")]
++            crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                scan_slots,
++                scan_tag_matches,
++                scan_preferred_tag_matches,
++                scan_chain_depth,
++            );
++            return InsertScanResult {
++                found: Some(FindResult {
++                    entry,
++                    atomic_entry: Some(&bucket.entries[i] as *const _),
++                }),
++                free_entry,
++                secondary_free_entry,
++                tail: bucket_ptr,
++                retry: false,
++            };
++        }
++
++        let overflow = bucket.overflow_entry.load(Ordering::Acquire);
++        if overflow.is_unused() {
++            #[cfg(feature = "index-profile")]
++            crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                scan_slots,
++                scan_tag_matches,
++                scan_preferred_tag_matches,
++                scan_chain_depth,
++            );
++            return InsertScanResult {
++                found: None,
++                free_entry,
++                secondary_free_entry,
++                tail: bucket_ptr,
++                retry: false,
++            };
++        }
++
++        // Slow-path: traverse overflow chain with a single read lock for pointer lookups.
++        let overflow_buckets = self.overflow_pools[version].buckets_read();
++        let next_ptr = self.overflow_pools[version]
++            .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
++        match next_ptr {
++            Some(p) => {
++                bucket_ptr = p;
++                #[cfg(feature = "index-profile")]
++                {
++                    scan_chain_depth += 1;
++                }
++            }
++            None => {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                    scan_slots,
++                    scan_tag_matches,
++                    scan_preferred_tag_matches,
++                    scan_chain_depth,
++                );
++                return InsertScanResult {
++                    found: None,
++                    free_entry,
++                    secondary_free_entry,
++                    tail: bucket_ptr,
++                    retry: false,
++                };
++            }
++        }
+ 
+         loop {
+-            // SAFETY: `bucket_ptr` points to a valid `HashBucket`; its fields are atomic and can
+-            // be read/written concurrently.
++            // SAFETY: `bucket_ptr` points to a valid overflow bucket owned by the pool.
+             let bucket = unsafe { &*bucket_ptr };
+-            for i in 0..HashBucket::NUM_ENTRIES {
+-                let entry_ptr = &bucket.entries[i] as *const _;
+-                if entry_ptr == our_entry {
++
++            for probe in 0..HashBucket::NUM_ENTRIES {
++                let i = MemHashIndex::probe_entry_index(preferred_idx, probe, probe_stride);
++                #[cfg(feature = "index-profile")]
++                {
++                    scan_slots += 1;
++                }
++
++                let entry = bucket.entries[i].load_index(Ordering::Relaxed);
++                if entry.is_unused() {
++                    let slot_ptr = &bucket.entries[i] as *const _;
++                    if free_entry.is_none() {
++                        free_entry = Some(slot_ptr);
++                    } else if secondary_free_entry.is_none() {
++                        secondary_free_entry = Some(slot_ptr);
++                    }
++                    continue;
++                }
++                if entry.tag() != tag {
+                     continue;
+                 }
+ 
++                #[cfg(feature = "index-profile")]
++                {
++                    scan_tag_matches += 1;
++                    if i == preferred_idx {
++                        scan_preferred_tag_matches += 1;
++                    }
++                }
++
+                 let entry = bucket.entries[i].load_index(Ordering::Acquire);
+-                if !entry.is_unused() && !entry.is_tentative() && entry.tag() == tag {
+-                    return true;
++                if entry.is_unused() || entry.tag() != tag {
++                    continue;
++                }
++                if entry.is_tentative() {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                        scan_slots,
++                        scan_tag_matches,
++                        scan_preferred_tag_matches,
++                        scan_chain_depth,
++                    );
++                    return InsertScanResult {
++                        found: None,
++                        free_entry: None,
++                        secondary_free_entry: None,
++                        tail: bucket_ptr,
++                        retry: true,
++                    };
+                 }
++
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                    scan_slots,
++                    scan_tag_matches,
++                    scan_preferred_tag_matches,
++                    scan_chain_depth,
++                );
++
++                return InsertScanResult {
++                    found: Some(FindResult {
++                        entry,
++                        atomic_entry: Some(&bucket.entries[i] as *const _),
++                    }),
++                    free_entry,
++                    secondary_free_entry,
++                    tail: bucket_ptr,
++                    retry: false,
++                };
+             }
+ 
+             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
+             if overflow.is_unused() {
+-                return false;
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                    scan_slots,
++                    scan_tag_matches,
++                    scan_preferred_tag_matches,
++                    scan_chain_depth,
++                );
++                return InsertScanResult {
++                    found: None,
++                    free_entry,
++                    secondary_free_entry,
++                    tail: bucket_ptr,
++                    retry: false,
++                };
+             }
+ 
+-            let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address());
++            let next_ptr = self.overflow_pools[version]
++                .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
+             match next_ptr {
+-                Some(p) => bucket_ptr = p,
+-                None => return false,
++                Some(p) => {
++                    bucket_ptr = p;
++                    #[cfg(feature = "index-profile")]
++                    {
++                        scan_chain_depth += 1;
++                    }
++                }
++                None => {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_scan_observations(
++                        scan_slots,
++                        scan_tag_matches,
++                        scan_preferred_tag_matches,
++                        scan_chain_depth,
++                    );
++                    return InsertScanResult {
++                        found: None,
++                        free_entry,
++                        secondary_free_entry,
++                        tail: bucket_ptr,
++                        retry: false,
++                    };
++                }
++            }
++        }
++    }
++
++    fn append_overflow_bucket_at_tail_and_get_free_entry(
++        &self,
++        version: usize,
++        tail_bucket: *const HashBucket,
++        tag: u16,
++    ) -> Option<*const AtomicHashBucketEntry> {
++        #[inline]
++        fn pick_free_entry_in_bucket(
++            bucket: &HashBucket,
++            preferred_idx: usize,
++            probe_stride: usize,
++        ) -> Option<*const AtomicHashBucketEntry> {
++            // Fast path: try the preferred slot first to spread concurrent inserts across lanes.
++            let preferred = bucket.entries[preferred_idx].load_index(Ordering::Relaxed);
++            if preferred.is_unused() {
++                return Some(&bucket.entries[preferred_idx] as *const _);
++            }
++
++            // Fallback: continue probing in the same lane-aware order used by insert scans.
++            for probe in 1..HashBucket::NUM_ENTRIES {
++                let i = MemHashIndex::probe_entry_index(preferred_idx, probe, probe_stride);
++                let entry = bucket.entries[i].load_index(Ordering::Relaxed);
++                if entry.is_unused() {
++                    return Some(&bucket.entries[i] as *const _);
++                }
++            }
++            None
++        }
++
++        let preferred_idx = Self::preferred_entry_index(tag);
++        let probe_stride = Self::probe_stride(tag);
++
++        // SAFETY: `tail_bucket` originates from an earlier traversal and points to a valid bucket.
++        // Its fields are atomic, so concurrent mutation via atomic ops is allowed.
++        let tail = unsafe { &*tail_bucket };
++
++        let overflow = tail.overflow_entry.load(Ordering::Acquire);
++        if !overflow.is_unused() {
++            // Another thread already linked a bucket off our tail. That bucket is likely to have
++            // free space (it was just allocated), so avoid rescanning from the head.
++            let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address())?;
++            // SAFETY: `next_ptr` points to a valid bucket managed by the overflow pool.
++            let next_bucket = unsafe { &*next_ptr };
++
++            if let Some(free) = pick_free_entry_in_bucket(next_bucket, preferred_idx, probe_stride)
++            {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_append_chain_depth(1);
++                return Some(free);
++            }
++
++            // Extremely rare: the next bucket was already filled; fall back to a deeper search.
++            if let Some(free) = self.find_free_entry_in_bucket_chain(
++                version,
++                next_bucket,
++                preferred_idx,
++                probe_stride,
++            ) {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_append_chain_depth(1);
++                return Some(free);
++            }
++
++            return self.append_overflow_bucket_and_get_free_entry(version, next_bucket, tag, 2);
++        }
++
++        let (new_addr, new_ptr) = self.overflow_pools[version].allocate_with_ptr();
++        let new_overflow = HashBucketOverflowEntry::new(new_addr);
++        let expected = HashBucketOverflowEntry::INVALID;
++
++        match tail.overflow_entry.compare_exchange(
++            expected,
++            new_overflow,
++            Ordering::AcqRel,
++            Ordering::Acquire,
++        ) {
++            Ok(_) => {
++                #[cfg(feature = "index-profile")]
++                {
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_append_link_attempt(true);
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_append_chain_depth(1);
++                }
++
++                // SAFETY: The bucket was just allocated/reset and is now linked into the chain.
++                let new_bucket = unsafe { &*new_ptr };
++                pick_free_entry_in_bucket(new_bucket, preferred_idx, probe_stride)
++            }
++            Err(actual) => {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_append_link_attempt(false);
++
++                if actual.is_unused() {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE
++                        .record_append_link_race_deallocate();
++                    self.overflow_pools[version].deallocate_with_ptr(new_addr, new_ptr);
++                    return None;
++                }
++
++                let next_ptr = self.overflow_pools[version].bucket_ptr(actual.address())?;
++                // SAFETY: `next_ptr` points to a valid bucket managed by the overflow pool.
++                let next_bucket = unsafe { &*next_ptr };
++
++                if let Some(free) =
++                    pick_free_entry_in_bucket(next_bucket, preferred_idx, probe_stride)
++                {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE
++                        .record_append_link_race_deallocate();
++                    self.overflow_pools[version].deallocate_with_ptr(new_addr, new_ptr);
++
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_append_chain_depth(2);
++                    return Some(free);
++                }
++
++                // Tail-link CAS lost and the winner bucket is full. Try to consume an existing
++                // deeper free slot before appending.
++                if let Some(free) = self.find_free_entry_in_bucket_chain(
++                    version,
++                    next_bucket,
++                    preferred_idx,
++                    probe_stride,
++                ) {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE
++                        .record_append_link_race_deallocate();
++                    self.overflow_pools[version].deallocate_with_ptr(new_addr, new_ptr);
++
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_append_chain_depth(2);
++                    return Some(free);
++                }
++
++                self.append_overflow_bucket_and_get_free_entry_with_preallocated(
++                    version,
++                    next_bucket,
++                    tag,
++                    2,
++                    Some((new_addr, new_ptr)),
++                )
+             }
+         }
+     }
+@@ -282,16 +745,193 @@ impl MemHashIndex {
+         tag: u16,
+     ) -> FindResult {
+         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
++        let preferred_idx = Self::preferred_entry_index(tag);
++
++        #[cfg(feature = "index-profile")]
++        let mut lookup_base_slots = 0u64;
++        #[cfg(feature = "index-profile")]
++        let mut lookup_overflow_slots = 0u64;
++        #[cfg(feature = "index-profile")]
++        let mut lookup_tag_matches = 0u64;
++        #[cfg(feature = "index-profile")]
++        let mut lookup_preferred_tag_matches = 0u64;
++
++        // Scan base bucket first (common case: no overflow).
++        // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow_entry are atomic.
++        let bucket = unsafe { &*bucket_ptr };
++
++        #[cfg(feature = "index-profile")]
++        {
++            lookup_base_slots += 1;
++        }
++
++        // Preferred lane fast path.
++        // Use Relaxed for the probe and only pay Acquire when we have a viable candidate.
++        let entry = bucket.entries[preferred_idx].load_index(Ordering::Relaxed);
++        if !entry.is_unused() && entry.tag() == tag && !entry.is_tentative() {
++            #[cfg(feature = "index-profile")]
++            {
++                lookup_tag_matches += 1;
++                lookup_preferred_tag_matches += 1;
++            }
++
++            let entry = bucket.entries[preferred_idx].load_index(Ordering::Acquire);
++            if !entry.is_unused() && entry.tag() == tag && !entry.is_tentative() {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                    lookup_base_slots,
++                    lookup_overflow_slots,
++                    lookup_tag_matches,
++                    lookup_preferred_tag_matches,
++                );
++
++                return FindResult {
++                    entry,
++                    atomic_entry: Some(&bucket.entries[preferred_idx] as *const _),
++                };
++            }
++        }
++
++        for i in 0..HashBucket::NUM_ENTRIES {
++            if i == preferred_idx {
++                continue;
++            }
++
++            #[cfg(feature = "index-profile")]
++            {
++                lookup_base_slots += 1;
++            }
++
++            // Avoid paying an Acquire barrier on every slot when scanning.
++            // We only need Acquire when we have a candidate match and might return the entry
++            // (the Acquire pairs with writers' Release updates to publish record bytes).
++            let entry = bucket.entries[i].load_index(Ordering::Relaxed);
++            if entry.is_unused() {
++                continue;
++            }
++            if entry.tag() == tag && !entry.is_tentative() {
++                #[cfg(feature = "index-profile")]
++                {
++                    lookup_tag_matches += 1;
++                }
++
++                let entry = bucket.entries[i].load_index(Ordering::Acquire);
++                if entry.is_unused() || entry.is_tentative() || entry.tag() != tag {
++                    continue;
++                }
++
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                    lookup_base_slots,
++                    lookup_overflow_slots,
++                    lookup_tag_matches,
++                    lookup_preferred_tag_matches,
++                );
++
++                return FindResult {
++                    entry,
++                    atomic_entry: Some(&bucket.entries[i] as *const _),
++                };
++            }
++        }
++
++        let overflow = bucket.overflow_entry.load(Ordering::Acquire);
++        if overflow.is_unused() {
++            #[cfg(feature = "index-profile")]
++            crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                lookup_base_slots,
++                lookup_overflow_slots,
++                lookup_tag_matches,
++                lookup_preferred_tag_matches,
++            );
++            return FindResult::not_found();
++        }
++
++        // Slow-path: traverse overflow chain with a single read lock for pointer lookups.
++        let overflow_buckets = self.overflow_pools[version].buckets_read();
++        let next_ptr = self.overflow_pools[version]
++            .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
++        match next_ptr {
++            Some(p) => bucket_ptr = p,
++            None => {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                    lookup_base_slots,
++                    lookup_overflow_slots,
++                    lookup_tag_matches,
++                    lookup_preferred_tag_matches,
++                );
++                return FindResult::not_found();
++            }
++        }
++
+         loop {
+-            // SAFETY: `bucket_ptr` points to a valid bucket; entries/overflow_entry are atomic.
++            // SAFETY: `bucket_ptr` points to a valid overflow bucket owned by the pool.
+             let bucket = unsafe { &*bucket_ptr };
+ 
++            #[cfg(feature = "index-profile")]
++            {
++                lookup_overflow_slots += 1;
++            }
++
++            let entry = bucket.entries[preferred_idx].load_index(Ordering::Relaxed);
++            if !entry.is_unused() && entry.tag() == tag && !entry.is_tentative() {
++                #[cfg(feature = "index-profile")]
++                {
++                    lookup_tag_matches += 1;
++                    lookup_preferred_tag_matches += 1;
++                }
++
++                let entry = bucket.entries[preferred_idx].load_index(Ordering::Acquire);
++                if !entry.is_unused() && entry.tag() == tag && !entry.is_tentative() {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                        lookup_base_slots,
++                        lookup_overflow_slots,
++                        lookup_tag_matches,
++                        lookup_preferred_tag_matches,
++                    );
++
++                    return FindResult {
++                        entry,
++                        atomic_entry: Some(&bucket.entries[preferred_idx] as *const _),
++                    };
++                }
++            }
++
+             for i in 0..HashBucket::NUM_ENTRIES {
+-                let entry = bucket.entries[i].load_index(Ordering::Acquire);
++                if i == preferred_idx {
++                    continue;
++                }
++
++                #[cfg(feature = "index-profile")]
++                {
++                    lookup_overflow_slots += 1;
++                }
++
++                let entry = bucket.entries[i].load_index(Ordering::Relaxed);
+                 if entry.is_unused() {
+                     continue;
+                 }
+                 if entry.tag() == tag && !entry.is_tentative() {
++                    #[cfg(feature = "index-profile")]
++                    {
++                        lookup_tag_matches += 1;
++                    }
++
++                    let entry = bucket.entries[i].load_index(Ordering::Acquire);
++                    if entry.is_unused() || entry.is_tentative() || entry.tag() != tag {
++                        continue;
++                    }
++
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                        lookup_base_slots,
++                        lookup_overflow_slots,
++                        lookup_tag_matches,
++                        lookup_preferred_tag_matches,
++                    );
++
+                     return FindResult {
+                         entry,
+                         atomic_entry: Some(&bucket.entries[i] as *const _),
+@@ -301,12 +941,29 @@ impl MemHashIndex {
+ 
+             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
+             if overflow.is_unused() {
++                #[cfg(feature = "index-profile")]
++                crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                    lookup_base_slots,
++                    lookup_overflow_slots,
++                    lookup_tag_matches,
++                    lookup_preferred_tag_matches,
++                );
+                 return FindResult::not_found();
+             }
+-            let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address());
++            let next_ptr = self.overflow_pools[version]
++                .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
+             match next_ptr {
+                 Some(p) => bucket_ptr = p,
+-                None => return FindResult::not_found(),
++                None => {
++                    #[cfg(feature = "index-profile")]
++                    crate::index::profile::INDEX_INSERT_PROFILE.record_lookup_observations(
++                        lookup_base_slots,
++                        lookup_overflow_slots,
++                        lookup_tag_matches,
++                        lookup_preferred_tag_matches,
++                    );
++                    return FindResult::not_found();
++                }
+             }
+         }
+     }
+@@ -329,15 +986,44 @@ impl MemHashIndex {
+         &self,
+         version: usize,
+         base_bucket: &HashBucket,
++        preferred_idx: usize,
++        probe_stride: usize,
+     ) -> Option<*const AtomicHashBucketEntry> {
+         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
+ 
++        // Check base bucket first (common case: no overflow).
++        // SAFETY: Same rationale as `find_entry_in_bucket_chain`.
++        let bucket = unsafe { &*bucket_ptr };
++
++        for probe in 0..HashBucket::NUM_ENTRIES {
++            let i = Self::probe_entry_index(preferred_idx, probe, probe_stride);
++            let entry = bucket.entries[i].load_index(Ordering::Relaxed);
++            if entry.is_unused() {
++                return Some(&bucket.entries[i] as *const _);
++            }
++        }
++
++        let overflow = bucket.overflow_entry.load(Ordering::Acquire);
++        if overflow.is_unused() {
++            return None;
++        }
++
++        // Slow-path: traverse overflow chain with a single read lock for pointer lookups.
++        let overflow_buckets = self.overflow_pools[version].buckets_read();
++        let next_ptr = self.overflow_pools[version]
++            .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
++        match next_ptr {
++            Some(p) => bucket_ptr = p,
++            None => return None,
++        }
++
+         loop {
+-            // SAFETY: Same rationale as `find_entry_in_bucket_chain`.
++            // SAFETY: Same rationale as above.
+             let bucket = unsafe { &*bucket_ptr };
+ 
+-            for i in 0..HashBucket::NUM_ENTRIES {
+-                let entry = bucket.entries[i].load_index(Ordering::Acquire);
++            for probe in 0..HashBucket::NUM_ENTRIES {
++                let i = Self::probe_entry_index(preferred_idx, probe, probe_stride);
++                let entry = bucket.entries[i].load_index(Ordering::Relaxed);
+                 if entry.is_unused() {
+                     return Some(&bucket.entries[i] as *const _);
+                 }
+@@ -347,7 +1033,9 @@ impl MemHashIndex {
+             if overflow.is_unused() {
+                 return None;
+             }
+-            let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address());
++
++            let next_ptr = self.overflow_pools[version]
++                .bucket_ptr_in(overflow_buckets.as_slice(), overflow.address());
+             match next_ptr {
+                 Some(p) => bucket_ptr = p,
+                 None => return None,
+@@ -359,10 +1047,38 @@ impl MemHashIndex {
+         &self,
+         version: usize,
+         base_bucket: &HashBucket,
++        tag: u16,
++        initial_chain_depth: u64,
++    ) -> Option<*const AtomicHashBucketEntry> {
++        self.append_overflow_bucket_and_get_free_entry_with_preallocated(
++            version,
++            base_bucket,
++            tag,
++            initial_chain_depth,
++            None,
++        )
++    }
++
++    fn append_overflow_bucket_and_get_free_entry_with_preallocated(
++        &self,
++        version: usize,
++        base_bucket: &HashBucket,
++        tag: u16,
++        initial_chain_depth: u64,
++        preallocated: Option<(
++            crate::index::hash_bucket::FixedPageAddress,
++            *const HashBucket,
++        )>,
+     ) -> Option<*const AtomicHashBucketEntry> {
+         // Find the chain tail (a bucket with an unused overflow entry) and append a new overflow
+         // bucket.
+         let mut bucket_ptr: *const HashBucket = base_bucket as *const _;
++        let preferred_idx = Self::preferred_entry_index(tag);
++        let mut pending_bucket = preallocated;
++        #[cfg(not(feature = "index-profile"))]
++        let _ = initial_chain_depth;
++        #[cfg(feature = "index-profile")]
++        let mut chain_depth = initial_chain_depth;
+ 
+         loop {
+             // SAFETY: Same rationale as above.
+@@ -370,8 +1086,11 @@ impl MemHashIndex {
+             let overflow = bucket.overflow_entry.load(Ordering::Acquire);
+ 
+             if overflow.is_unused() {
+-                // Allocate a new bucket and CAS it into the overflow entry.
+-                let new_addr = self.overflow_pools[version].allocate();
++                // Reuse a previously allocated bucket after a race; otherwise allocate a fresh one.
++                let (new_addr, new_ptr) = match pending_bucket.take() {
++                    Some(bucket) => bucket,
++                    None => self.overflow_pools[version].allocate_with_ptr(),
++                };
+                 let new_overflow = HashBucketOverflowEntry::new(new_addr);
+                 let expected = HashBucketOverflowEntry::INVALID;
+ 
+@@ -382,15 +1101,26 @@ impl MemHashIndex {
+                     Ordering::Acquire,
+                 ) {
+                     Ok(_) => {
+-                        let new_ptr = self.overflow_pools[version].bucket_ptr(new_addr)?;
+-                        // SAFETY: The bucket was just created; entries are initialized to INVALID.
++                        #[cfg(feature = "index-profile")]
++                        {
++                            crate::index::profile::INDEX_INSERT_PROFILE
++                                .record_append_link_attempt(true);
++                            crate::index::profile::INDEX_INSERT_PROFILE
++                                .record_append_chain_depth(chain_depth);
++                        }
++
++                        // SAFETY: The bucket was just allocated/reset and is now linked.
+                         let new_bucket = unsafe { &*new_ptr };
+-                        return Some(&new_bucket.entries[0] as *const _);
++                        return Some(&new_bucket.entries[preferred_idx] as *const _);
+                     }
+                     Err(actual) => {
+-                        // CAS failed: another thread installed an overflow bucket first. Return
+-                        // the newly allocated bucket to the pool for reuse.
+-                        self.overflow_pools[version].deallocate(new_addr);
++                        #[cfg(feature = "index-profile")]
++                        crate::index::profile::INDEX_INSERT_PROFILE
++                            .record_append_link_attempt(false);
++
++                        // CAS failed: keep the allocated bucket and continue from the winner
++                        // bucket to avoid repeated deallocate and allocate churn.
++                        pending_bucket = Some((new_addr, new_ptr));
+ 
+                         // Another thread installed an overflow bucket; keep traversing.
+                         if actual.is_unused() {
+@@ -398,8 +1128,22 @@ impl MemHashIndex {
+                         }
+                         let next_ptr = self.overflow_pools[version].bucket_ptr(actual.address());
+                         match next_ptr {
+-                            Some(p) => bucket_ptr = p,
+-                            None => return None,
++                            Some(p) => {
++                                bucket_ptr = p;
++                                #[cfg(feature = "index-profile")]
++                                {
++                                    chain_depth += 1;
++                                }
++                            }
++                            None => {
++                                if let Some((addr, ptr)) = pending_bucket.take() {
++                                    #[cfg(feature = "index-profile")]
++                                    crate::index::profile::INDEX_INSERT_PROFILE
++                                        .record_append_link_race_deallocate();
++                                    self.overflow_pools[version].deallocate_with_ptr(addr, ptr);
++                                }
++                                return None;
++                            }
+                         }
+                     }
+                 }
+@@ -407,8 +1151,22 @@ impl MemHashIndex {
+                 // Keep traversing.
+                 let next_ptr = self.overflow_pools[version].bucket_ptr(overflow.address());
+                 match next_ptr {
+-                    Some(p) => bucket_ptr = p,
+-                    None => return None,
++                    Some(p) => {
++                        bucket_ptr = p;
++                        #[cfg(feature = "index-profile")]
++                        {
++                            chain_depth += 1;
++                        }
++                    }
++                    None => {
++                        if let Some((addr, ptr)) = pending_bucket.take() {
++                            #[cfg(feature = "index-profile")]
++                            crate::index::profile::INDEX_INSERT_PROFILE
++                                .record_append_link_race_deallocate();
++                            self.overflow_pools[version].deallocate_with_ptr(addr, ptr);
++                        }
++                        return None;
++                    }
+                 }
+             }
+         }
+diff --git a/src/index/mem_index/overflow.rs b/src/index/mem_index/overflow.rs
+index a95d6fa..7002ceb 100644
+--- a/src/index/mem_index/overflow.rs
++++ b/src/index/mem_index/overflow.rs
+@@ -1,4 +1,5 @@
+ use std::sync::atomic::Ordering;
++use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+ 
+ use parking_lot::{Mutex, RwLock};
+ 
+@@ -16,13 +17,21 @@ use crate::index::{HashBucket, HashBucketEntry, HashBucketOverflowEntry};
+ pub(super) struct OverflowBucketPool {
+     buckets: RwLock<Vec<*mut HashBucket>>,
+     free_list: Mutex<Vec<FixedPageAddress>>,
++    refill_in_progress: AtomicBool,
+ }
+ 
+ impl OverflowBucketPool {
++    // Refill the pool in chunks to amortize the cost of taking the `buckets` write lock under
++    // concurrent inserts that create long overflow chains.
++    const REFILL_BATCH_SMALL: usize = 8;
++    const REFILL_BATCH_LARGE: usize = 64;
++    const REFILL_THRESHOLD: usize = 32;
++
+     pub(super) fn new() -> Self {
+         Self {
+             buckets: RwLock::new(Vec::new()),
+             free_list: Mutex::new(Vec::new()),
++            refill_in_progress: AtomicBool::new(false),
+         }
+     }
+ 
+@@ -32,6 +41,8 @@ impl OverflowBucketPool {
+     /// concurrent traversal that could otherwise lead to UAF.
+     pub(super) fn clear(&mut self) {
+         self.free_list.get_mut().clear();
++        self.refill_in_progress
++            .store(false, AtomicOrdering::Relaxed);
+         let mut buckets = self.buckets.write();
+         for ptr in buckets.drain(..) {
+             // SAFETY: `ptr` originates from `Box::into_raw` and is freed exactly once, here or in
+@@ -44,6 +55,29 @@ impl OverflowBucketPool {
+         self.buckets.read().len()
+     }
+ 
++    pub(super) fn buckets_read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<*mut HashBucket>> {
++        self.buckets.read()
++    }
++
++    #[inline]
++    pub(super) fn bucket_ptr_in(
++        &self,
++        buckets: &[*mut HashBucket],
++        addr: FixedPageAddress,
++    ) -> Option<*const HashBucket> {
++        if addr.is_invalid() {
++            return None;
++        }
++        let index = addr.control() as usize;
++        if index == 0 {
++            return None;
++        }
++        buckets
++            .get(index - 1)
++            .copied()
++            .map(|p| p as *const HashBucket)
++    }
++
+     fn reset_bucket(bucket: &HashBucket) {
+         for entry in &bucket.entries {
+             entry.store(HashBucketEntry::INVALID, Ordering::Release);
+@@ -53,6 +87,117 @@ impl OverflowBucketPool {
+             .store(HashBucketOverflowEntry::INVALID, Ordering::Release);
+     }
+ 
++    /// Allocate an overflow bucket and return both its fixed page address and a stable pointer to
++    /// the bucket.
++    ///
++    /// Returning the pointer avoids an immediate `bucket_ptr()` lookup (and its lock acquisition)
++    /// on the hot append path.
++    pub(super) fn allocate_with_ptr(&self) -> (FixedPageAddress, *const HashBucket) {
++        // Fast path: grab an address from the free list.
++        if let Some(addr) = self.free_list.lock().pop() {
++            if let Some(ptr) = self.bucket_ptr(addr) {
++                // SAFETY: `ptr` is owned by this pool and points to a valid bucket.
++                let bucket = unsafe { &*ptr };
++                Self::reset_bucket(bucket);
++                return (addr, ptr);
++            }
++            // Discard invalid addresses and fall through to refill.
++        }
++
++        struct RefillGuard<'a>(&'a AtomicBool);
++        impl Drop for RefillGuard<'_> {
++            fn drop(&mut self) {
++                self.0.store(false, AtomicOrdering::Release);
++            }
++        }
++
++        // Avoid stampeding refills under contention: only one thread allocates a new batch when
++        // the free list is empty. Other threads spin briefly until the refiller publishes spare
++        // addresses.
++        loop {
++            if self
++                .refill_in_progress
++                .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
++                .is_ok()
++            {
++                let _guard = RefillGuard(&self.refill_in_progress);
++
++                // Another thread may have refilled while we were acquiring the flag.
++                if let Some(addr) = self.free_list.lock().pop() {
++                    if let Some(ptr) = self.bucket_ptr(addr) {
++                        // SAFETY: `ptr` is owned by this pool and points to a valid bucket.
++                        let bucket = unsafe { &*ptr };
++                        Self::reset_bucket(bucket);
++                        return (addr, ptr);
++                    }
++                }
++
++                // Slow-path: allocate a batch of new buckets and push the rest into the free list.
++                // This reduces contention on the `buckets` write lock when many threads need new
++                // overflow buckets at the same time.
++                let mut first_addr: Option<FixedPageAddress> = None;
++                let mut first_ptr: *const HashBucket = std::ptr::null();
++                let mut spare_addrs: Vec<FixedPageAddress> = Vec::new();
++
++                // Compute the batch size using a short read lock, then do the actual heap
++                // allocations *outside* the buckets write lock to keep the critical section small.
++                let approx_len = self.buckets.read().len();
++                let batch = if approx_len < Self::REFILL_THRESHOLD {
++                    Self::REFILL_BATCH_SMALL
++                } else {
++                    Self::REFILL_BATCH_LARGE
++                };
++                spare_addrs.reserve(batch.saturating_sub(1));
++
++                let mut new_ptrs: Vec<*mut HashBucket> = Vec::with_capacity(batch);
++                for _ in 0..batch {
++                    let bucket = Box::new(HashBucket::new());
++                    new_ptrs.push(Box::into_raw(bucket));
++                }
++
++                {
++                    let mut buckets = self.buckets.write();
++                    let start = buckets.len();
++                    buckets.reserve(new_ptrs.len());
++
++                    for (i, ptr) in new_ptrs.into_iter().enumerate() {
++                        buckets.push(ptr);
++
++                        let addr = FixedPageAddress::new((start + i + 1) as u64);
++                        if first_addr.is_none() {
++                            first_addr = Some(addr);
++                            first_ptr = ptr as *const HashBucket;
++                        } else {
++                            spare_addrs.push(addr);
++                        }
++                    }
++                }
++
++                if !spare_addrs.is_empty() {
++                    self.free_list.lock().extend(spare_addrs);
++                }
++
++                // SAFETY: We always allocate at least one bucket.
++                return (first_addr.unwrap(), first_ptr);
++            }
++
++            // Another thread is refilling; spin briefly then retry.
++            for _ in 0..32 {
++                if let Some(addr) = self.free_list.lock().pop() {
++                    if let Some(ptr) = self.bucket_ptr(addr) {
++                        // SAFETY: `ptr` is owned by this pool and points to a valid bucket.
++                        let bucket = unsafe { &*ptr };
++                        Self::reset_bucket(bucket);
++                        return (addr, ptr);
++                    }
++                }
++                std::hint::spin_loop();
++            }
++
++            std::thread::yield_now();
++        }
++    }
++
+     fn bucket_ref(&self, addr: FixedPageAddress) -> Option<&HashBucket> {
+         self.bucket_ptr(addr).map(|ptr| {
+             // SAFETY: The returned pointer is owned by this pool and points to a valid `HashBucket`.
+@@ -63,18 +208,7 @@ impl OverflowBucketPool {
+ 
+     /// Allocate an overflow bucket and return its fixed page address (1-based, `0` is reserved).
+     pub(super) fn allocate(&self) -> FixedPageAddress {
+-        if let Some(addr) = self.free_list.lock().pop() {
+-            if let Some(bucket) = self.bucket_ref(addr) {
+-                Self::reset_bucket(bucket);
+-                return addr;
+-            }
+-            // Discard invalid addresses and fall through to allocate a new bucket.
+-        }
+-
+-        let mut buckets = self.buckets.write();
+-        let bucket = Box::new(HashBucket::new());
+-        buckets.push(Box::into_raw(bucket));
+-        FixedPageAddress::new(buckets.len() as u64)
++        self.allocate_with_ptr().0
+     }
+ 
+     /// Return an unlinked overflow bucket to the pool (e.g. after a failed CAS).
+@@ -92,6 +226,33 @@ impl OverflowBucketPool {
+         self.free_list.lock().push(addr);
+     }
+ 
++    /// Return an unlinked overflow bucket to the pool using a direct pointer.
++    ///
++    /// This avoids an extra `bucket_ptr()` lookup when the caller already holds the pointer
++    /// returned by `allocate_with_ptr()`. The caller must only use this for buckets that were not
++    /// linked into any hash chain (e.g. after a failed CAS).
++    pub(super) fn deallocate_with_ptr(
++        &self,
++        addr: FixedPageAddress,
++        bucket_ptr: *const HashBucket,
++    ) {
++        if addr.is_invalid() || addr.control() == 0 {
++            return;
++        }
++
++        // The caller guarantees the bucket is unlinked, so no other thread can concurrently
++        // access it. We purposely do *not* reset the bucket here:
++        // - `allocate_with_ptr()` already returns a reset bucket (or a freshly allocated bucket,
++        //   which is already in the invalid state).
++        // - `allocate_with_ptr()` resets buckets again when popping from `free_list`.
++        // Avoiding the extra reset reduces the cost of losing the append CAS under contention.
++        debug_assert_eq!(
++            self.bucket_ptr(addr).map(|p| p as usize),
++            Some(bucket_ptr as usize)
++        );
++        self.free_list.lock().push(addr);
++    }
++
+     /// Get an overflow bucket pointer by fixed page address.
+     pub(super) fn bucket_ptr(&self, addr: FixedPageAddress) -> Option<*const HashBucket> {
+         if addr.is_invalid() {
+@@ -158,14 +319,14 @@ mod tests {
+         assert_ne!(a1.control(), 0);
+         assert_ne!(a2.control(), 0);
+         assert_ne!(a1, a2);
+-        assert_eq!(pool.free_list_len(), 0);
++        let free_before = pool.free_list_len();
+ 
+         pool.deallocate(a2);
+-        assert_eq!(pool.free_list_len(), 1);
++        assert_eq!(pool.free_list_len(), free_before + 1);
+ 
+         let a3 = pool.allocate();
+         assert_eq!(a3, a2);
+-        assert_eq!(pool.free_list_len(), 0);
++        assert_eq!(pool.free_list_len(), free_before);
+ 
+         let bucket = pool.bucket_ref(a3).unwrap();
+         for entry in &bucket.entries {
+diff --git a/src/index/mod.rs b/src/index/mod.rs
+index 8c78ed1..fd1dbcc 100644
+--- a/src/index/mod.rs
++++ b/src/index/mod.rs
+@@ -57,6 +57,9 @@ mod hash_bucket;
+ mod hash_table;
+ mod mem_index;
+ 
++#[cfg(feature = "index-profile")]
++pub mod profile;
++
+ pub use cold_index::{
+     ColdIndex, ColdIndexConfig, ColdIndexFindResult, ColdIndexStats, DefaultHashIndexChunk,
+     GcStateColdIndex, HashIndexChunk, HashIndexChunkKey, HashIndexChunkPos, HashIndexOp,
+diff --git a/src/index/profile.rs b/src/index/profile.rs
+new file mode 100644
+index 0000000..c063bf4
+--- /dev/null
++++ b/src/index/profile.rs
+@@ -0,0 +1,422 @@
++//! Optional profiling/instrumentation for hot paths.
++//!
++//! This module is only compiled when the `index-profile` feature is enabled.
++//! It is intended for local performance investigation and should not be used as a stable API.
++
++#![allow(missing_docs)]
++
++use std::fmt;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Duration;
++
++#[inline]
++fn dur_to_ns(d: Duration) -> u64 {
++    d.as_nanos().min(u128::from(u64::MAX)) as u64
++}
++
++/// Snapshot of insert-path counters and timings.
++#[derive(Debug, Clone, Copy, Default)]
++pub struct IndexInsertProfileSnapshot {
++    pub find_or_create_calls: u64,
++    pub find_or_create_retries: u64,
++
++    pub scan_calls: u64,
++    pub scan_ns: u64,
++    pub scan_slots: u64,
++    pub scan_tag_matches: u64,
++    pub scan_preferred_tag_matches: u64,
++
++    pub lookup_calls: u64,
++    pub lookup_slots: u64,
++    pub lookup_base_slots: u64,
++    pub lookup_overflow_slots: u64,
++    pub lookup_tag_matches: u64,
++    pub lookup_preferred_tag_matches: u64,
++
++    pub append_overflow_calls: u64,
++    pub append_overflow_ns: u64,
++    pub append_link_attempts: u64,
++    pub append_link_failures: u64,
++    pub append_link_race_deallocs: u64,
++    pub append_chain_depth_total: u64,
++    pub append_chain_depth_max: u64,
++
++    pub cas_attempts: u64,
++    pub cas_success: u64,
++    pub cas_fail: u64,
++
++    pub conflict_checks: u64,
++    pub conflict_ns: u64,
++    pub conflicts_found: u64,
++    pub tentative_clears: u64,
++
++    pub scan_chain_depth_total: u64,
++    pub scan_chain_depth_max: u64,
++}
++
++impl IndexInsertProfileSnapshot {
++    fn pct(part: u64, total: u64) -> f64 {
++        if total == 0 {
++            0.0
++        } else {
++            (part as f64) * 100.0 / (total as f64)
++        }
++    }
++}
++
++impl fmt::Display for IndexInsertProfileSnapshot {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let scan_ms = self.scan_ns as f64 / 1_000_000.0;
++        let overflow_ms = self.append_overflow_ns as f64 / 1_000_000.0;
++        let conflict_ms = self.conflict_ns as f64 / 1_000_000.0;
++        let total_ns = self.scan_ns + self.append_overflow_ns + self.conflict_ns;
++        let total_ms = total_ns as f64 / 1_000_000.0;
++
++        writeln!(
++            f,
++            "Index Insert Profile (MemHashIndex::find_or_create_entry)"
++        )?;
++        writeln!(f, "  calls: {}", self.find_or_create_calls)?;
++        writeln!(f, "  retries: {}", self.find_or_create_retries)?;
++        writeln!(
++            f,
++            "  cas: attempts={} success={} fail={}",
++            self.cas_attempts, self.cas_success, self.cas_fail
++        )?;
++        writeln!(f, "  tentative_clears: {}", self.tentative_clears)?;
++        writeln!(
++            f,
++            "  conflicts: checks={} found={}",
++            self.conflict_checks, self.conflicts_found
++        )?;
++        writeln!(f, "  timings (ms): total={total_ms:.3}")?;
++        writeln!(
++            f,
++            "    scan: {scan_ms:.3} ({:.1}%)",
++            Self::pct(self.scan_ns, total_ns)
++        )?;
++        let avg_slots = if self.scan_calls == 0 {
++            0.0
++        } else {
++            self.scan_slots as f64 / self.scan_calls as f64
++        };
++        writeln!(
++            f,
++            "    scan_detail: slots={} avg_slots_per_scan={avg_slots:.2} tag_matches={} preferred_tag_matches={}",
++            self.scan_slots, self.scan_tag_matches, self.scan_preferred_tag_matches
++        )?;
++        let avg_scan_chain_depth = if self.scan_calls == 0 {
++            0.0
++        } else {
++            self.scan_chain_depth_total as f64 / self.scan_calls as f64
++        };
++        writeln!(
++            f,
++            "    scan_chain: avg_depth={avg_scan_chain_depth:.2} max_depth={}",
++            self.scan_chain_depth_max
++        )?;
++        let avg_lookup_slots = if self.lookup_calls == 0 {
++            0.0
++        } else {
++            self.lookup_slots as f64 / self.lookup_calls as f64
++        };
++        writeln!(
++            f,
++            "    lookup_detail: calls={} slots={} avg_slots_per_lookup={avg_lookup_slots:.2} base_slots={} overflow_slots={} tag_matches={} preferred_tag_matches={}",
++            self.lookup_calls,
++            self.lookup_slots,
++            self.lookup_base_slots,
++            self.lookup_overflow_slots,
++            self.lookup_tag_matches,
++            self.lookup_preferred_tag_matches
++        )?;
++        writeln!(
++            f,
++            "    append_overflow: {overflow_ms:.3} ({:.1}%)",
++            Self::pct(self.append_overflow_ns, total_ns)
++        )?;
++        let avg_append_chain_depth = if self.append_overflow_calls == 0 {
++            0.0
++        } else {
++            self.append_chain_depth_total as f64 / self.append_overflow_calls as f64
++        };
++        writeln!(
++            f,
++            "    append_detail: link_attempts={} link_failures={} race_deallocs={} avg_chain_depth={avg_append_chain_depth:.2} max_chain_depth={}",
++            self.append_link_attempts,
++            self.append_link_failures,
++            self.append_link_race_deallocs,
++            self.append_chain_depth_max,
++        )?;
++        writeln!(
++            f,
++            "    conflict_check: {conflict_ms:.3} ({:.1}%)",
++            Self::pct(self.conflict_ns, total_ns)
++        )?;
++        Ok(())
++    }
++}
++
++/// Global counters for insert-path profiling.
++///
++/// All fields use relaxed atomics because the values are informational only.
++pub struct IndexInsertProfile {
++    find_or_create_calls: AtomicU64,
++    find_or_create_retries: AtomicU64,
++
++    scan_calls: AtomicU64,
++    scan_ns: AtomicU64,
++    scan_slots: AtomicU64,
++    scan_tag_matches: AtomicU64,
++    scan_preferred_tag_matches: AtomicU64,
++
++    lookup_calls: AtomicU64,
++    lookup_slots: AtomicU64,
++    lookup_base_slots: AtomicU64,
++    lookup_overflow_slots: AtomicU64,
++    lookup_tag_matches: AtomicU64,
++    lookup_preferred_tag_matches: AtomicU64,
++
++    append_overflow_calls: AtomicU64,
++    append_overflow_ns: AtomicU64,
++    append_link_attempts: AtomicU64,
++    append_link_failures: AtomicU64,
++    append_link_race_deallocs: AtomicU64,
++    append_chain_depth_total: AtomicU64,
++    append_chain_depth_max: AtomicU64,
++
++    cas_attempts: AtomicU64,
++    cas_success: AtomicU64,
++    cas_fail: AtomicU64,
++
++    conflict_checks: AtomicU64,
++    conflict_ns: AtomicU64,
++    conflicts_found: AtomicU64,
++    tentative_clears: AtomicU64,
++
++    scan_chain_depth_total: AtomicU64,
++    scan_chain_depth_max: AtomicU64,
++}
++
++impl IndexInsertProfile {
++    pub const fn new() -> Self {
++        Self {
++            find_or_create_calls: AtomicU64::new(0),
++            find_or_create_retries: AtomicU64::new(0),
++            scan_calls: AtomicU64::new(0),
++            scan_ns: AtomicU64::new(0),
++            scan_slots: AtomicU64::new(0),
++            scan_tag_matches: AtomicU64::new(0),
++            scan_preferred_tag_matches: AtomicU64::new(0),
++            lookup_calls: AtomicU64::new(0),
++            lookup_slots: AtomicU64::new(0),
++            lookup_base_slots: AtomicU64::new(0),
++            lookup_overflow_slots: AtomicU64::new(0),
++            lookup_tag_matches: AtomicU64::new(0),
++            lookup_preferred_tag_matches: AtomicU64::new(0),
++            append_overflow_calls: AtomicU64::new(0),
++            append_overflow_ns: AtomicU64::new(0),
++            append_link_attempts: AtomicU64::new(0),
++            append_link_failures: AtomicU64::new(0),
++            append_link_race_deallocs: AtomicU64::new(0),
++            append_chain_depth_total: AtomicU64::new(0),
++            append_chain_depth_max: AtomicU64::new(0),
++            cas_attempts: AtomicU64::new(0),
++            cas_success: AtomicU64::new(0),
++            cas_fail: AtomicU64::new(0),
++            conflict_checks: AtomicU64::new(0),
++            conflict_ns: AtomicU64::new(0),
++            conflicts_found: AtomicU64::new(0),
++            tentative_clears: AtomicU64::new(0),
++            scan_chain_depth_total: AtomicU64::new(0),
++            scan_chain_depth_max: AtomicU64::new(0),
++        }
++    }
++
++    pub fn reset(&self) {
++        self.find_or_create_calls.store(0, Ordering::Relaxed);
++        self.find_or_create_retries.store(0, Ordering::Relaxed);
++        self.scan_calls.store(0, Ordering::Relaxed);
++        self.scan_ns.store(0, Ordering::Relaxed);
++        self.scan_slots.store(0, Ordering::Relaxed);
++        self.scan_tag_matches.store(0, Ordering::Relaxed);
++        self.scan_preferred_tag_matches.store(0, Ordering::Relaxed);
++        self.lookup_calls.store(0, Ordering::Relaxed);
++        self.lookup_slots.store(0, Ordering::Relaxed);
++        self.lookup_base_slots.store(0, Ordering::Relaxed);
++        self.lookup_overflow_slots.store(0, Ordering::Relaxed);
++        self.lookup_tag_matches.store(0, Ordering::Relaxed);
++        self.lookup_preferred_tag_matches
++            .store(0, Ordering::Relaxed);
++        self.append_overflow_calls.store(0, Ordering::Relaxed);
++        self.append_overflow_ns.store(0, Ordering::Relaxed);
++        self.append_link_attempts.store(0, Ordering::Relaxed);
++        self.append_link_failures.store(0, Ordering::Relaxed);
++        self.append_link_race_deallocs.store(0, Ordering::Relaxed);
++        self.append_chain_depth_total.store(0, Ordering::Relaxed);
++        self.append_chain_depth_max.store(0, Ordering::Relaxed);
++        self.cas_attempts.store(0, Ordering::Relaxed);
++        self.cas_success.store(0, Ordering::Relaxed);
++        self.cas_fail.store(0, Ordering::Relaxed);
++        self.conflict_checks.store(0, Ordering::Relaxed);
++        self.conflict_ns.store(0, Ordering::Relaxed);
++        self.conflicts_found.store(0, Ordering::Relaxed);
++        self.tentative_clears.store(0, Ordering::Relaxed);
++        self.scan_chain_depth_total.store(0, Ordering::Relaxed);
++        self.scan_chain_depth_max.store(0, Ordering::Relaxed);
++    }
++
++    pub fn snapshot(&self) -> IndexInsertProfileSnapshot {
++        IndexInsertProfileSnapshot {
++            find_or_create_calls: self.find_or_create_calls.load(Ordering::Relaxed),
++            find_or_create_retries: self.find_or_create_retries.load(Ordering::Relaxed),
++            scan_calls: self.scan_calls.load(Ordering::Relaxed),
++            scan_ns: self.scan_ns.load(Ordering::Relaxed),
++            scan_slots: self.scan_slots.load(Ordering::Relaxed),
++            scan_tag_matches: self.scan_tag_matches.load(Ordering::Relaxed),
++            scan_preferred_tag_matches: self.scan_preferred_tag_matches.load(Ordering::Relaxed),
++            lookup_calls: self.lookup_calls.load(Ordering::Relaxed),
++            lookup_slots: self.lookup_slots.load(Ordering::Relaxed),
++            lookup_base_slots: self.lookup_base_slots.load(Ordering::Relaxed),
++            lookup_overflow_slots: self.lookup_overflow_slots.load(Ordering::Relaxed),
++            lookup_tag_matches: self.lookup_tag_matches.load(Ordering::Relaxed),
++            lookup_preferred_tag_matches: self.lookup_preferred_tag_matches.load(Ordering::Relaxed),
++            append_overflow_calls: self.append_overflow_calls.load(Ordering::Relaxed),
++            append_overflow_ns: self.append_overflow_ns.load(Ordering::Relaxed),
++            append_link_attempts: self.append_link_attempts.load(Ordering::Relaxed),
++            append_link_failures: self.append_link_failures.load(Ordering::Relaxed),
++            append_link_race_deallocs: self.append_link_race_deallocs.load(Ordering::Relaxed),
++            append_chain_depth_total: self.append_chain_depth_total.load(Ordering::Relaxed),
++            append_chain_depth_max: self.append_chain_depth_max.load(Ordering::Relaxed),
++            cas_attempts: self.cas_attempts.load(Ordering::Relaxed),
++            cas_success: self.cas_success.load(Ordering::Relaxed),
++            cas_fail: self.cas_fail.load(Ordering::Relaxed),
++            conflict_checks: self.conflict_checks.load(Ordering::Relaxed),
++            conflict_ns: self.conflict_ns.load(Ordering::Relaxed),
++            conflicts_found: self.conflicts_found.load(Ordering::Relaxed),
++            tentative_clears: self.tentative_clears.load(Ordering::Relaxed),
++            scan_chain_depth_total: self.scan_chain_depth_total.load(Ordering::Relaxed),
++            scan_chain_depth_max: self.scan_chain_depth_max.load(Ordering::Relaxed),
++        }
++    }
++
++    #[inline]
++    pub fn record_find_or_create_call(&self) {
++        self.find_or_create_calls.fetch_add(1, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_retry(&self) {
++        self.find_or_create_retries.fetch_add(1, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_scan(&self, elapsed: Duration) {
++        self.scan_calls.fetch_add(1, Ordering::Relaxed);
++        self.scan_ns
++            .fetch_add(dur_to_ns(elapsed), Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_scan_observations(
++        &self,
++        scan_slots: u64,
++        tag_matches: u64,
++        preferred_tag_matches: u64,
++        chain_depth: u64,
++    ) {
++        self.scan_slots.fetch_add(scan_slots, Ordering::Relaxed);
++        self.scan_tag_matches
++            .fetch_add(tag_matches, Ordering::Relaxed);
++        self.scan_preferred_tag_matches
++            .fetch_add(preferred_tag_matches, Ordering::Relaxed);
++        self.scan_chain_depth_total
++            .fetch_add(chain_depth, Ordering::Relaxed);
++        self.scan_chain_depth_max
++            .fetch_max(chain_depth, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_lookup_observations(
++        &self,
++        base_slots: u64,
++        overflow_slots: u64,
++        tag_matches: u64,
++        preferred_tag_matches: u64,
++    ) {
++        self.lookup_calls.fetch_add(1, Ordering::Relaxed);
++        self.lookup_slots
++            .fetch_add(base_slots + overflow_slots, Ordering::Relaxed);
++        self.lookup_base_slots
++            .fetch_add(base_slots, Ordering::Relaxed);
++        self.lookup_overflow_slots
++            .fetch_add(overflow_slots, Ordering::Relaxed);
++        self.lookup_tag_matches
++            .fetch_add(tag_matches, Ordering::Relaxed);
++        self.lookup_preferred_tag_matches
++            .fetch_add(preferred_tag_matches, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_append_overflow(&self, elapsed: Duration) {
++        self.append_overflow_calls.fetch_add(1, Ordering::Relaxed);
++        self.append_overflow_ns
++            .fetch_add(dur_to_ns(elapsed), Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_append_link_attempt(&self, success: bool) {
++        self.append_link_attempts.fetch_add(1, Ordering::Relaxed);
++        if !success {
++            self.append_link_failures.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++
++    #[inline]
++    pub fn record_append_link_race_deallocate(&self) {
++        self.append_link_race_deallocs
++            .fetch_add(1, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_append_chain_depth(&self, chain_depth: u64) {
++        self.append_chain_depth_total
++            .fetch_add(chain_depth, Ordering::Relaxed);
++        self.append_chain_depth_max
++            .fetch_max(chain_depth, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_cas_attempt(&self, success: bool) {
++        self.cas_attempts.fetch_add(1, Ordering::Relaxed);
++        if success {
++            self.cas_success.fetch_add(1, Ordering::Relaxed);
++        } else {
++            self.cas_fail.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++
++    #[inline]
++    pub fn record_conflict_check(&self, elapsed: Duration, conflict_found: bool) {
++        self.conflict_checks.fetch_add(1, Ordering::Relaxed);
++        self.conflict_ns
++            .fetch_add(dur_to_ns(elapsed), Ordering::Relaxed);
++        if conflict_found {
++            self.conflicts_found.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++
++    #[inline]
++    pub fn record_tentative_clear(&self) {
++        self.tentative_clears.fetch_add(1, Ordering::Relaxed);
++    }
++}
++
++impl Default for IndexInsertProfile {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++/// Global insert-path profiler state.
++pub static INDEX_INSERT_PROFILE: IndexInsertProfile = IndexInsertProfile::new();
+diff --git a/src/record.rs b/src/record.rs
+index 87d4047..6078204 100644
+--- a/src/record.rs
++++ b/src/record.rs
+@@ -105,6 +105,18 @@ impl RecordInfo {
+         }
+     }
+ 
++    /// Set the previous address assuming the caller has exclusive access to the record header.
++    ///
++    /// This is intended for the record initialization path before the record is published
++    /// (reachable from the hash index). In that phase, using a plain relaxed store avoids an
++    /// atomic RMW loop on the hot upsert/delete path.
++    #[inline]
++    pub fn set_previous_address_relaxed(&self, addr: Address) {
++        let current = self.control.load(Ordering::Relaxed);
++        let new_val = (current & !Self::PREV_ADDR_MASK) | (addr.control() & Self::PREV_ADDR_MASK);
++        self.control.store(new_val, Ordering::Relaxed);
++    }
++
+     /// Get the checkpoint version.
+     #[inline]
+     pub fn checkpoint_version(&self) -> u16 {
+@@ -127,6 +139,17 @@ impl RecordInfo {
+         }
+     }
+ 
++    /// Publish a fully initialized record by clearing the invalid flag.
++    ///
++    /// Readers load the header with `Acquire` (e.g. via `is_invalid()`), so a `Release` store
++    /// here is sufficient to publish all prior record writes.
++    #[inline]
++    pub fn publish_valid(&self) {
++        let mut control = self.control.load(Ordering::Relaxed);
++        control &= !Self::INVALID_BIT;
++        self.control.store(control, Ordering::Release);
++    }
++
+     /// Check if this is a tombstone (delete marker).
+     #[inline]
+     pub fn is_tombstone(&self) -> bool {
+diff --git a/src/stats/collector.rs b/src/stats/collector.rs
+index 3dd016f..0e2acb5 100644
+--- a/src/stats/collector.rs
++++ b/src/stats/collector.rs
+@@ -5,7 +5,7 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::time::{Duration, Instant};
+ 
+-use crate::stats::metrics::StoreStats;
++use crate::stats::metrics::{PhaseStatsSnapshot, StoreStats};
+ 
+ /// Configuration for statistics collection
+ #[derive(Debug, Clone)]
+@@ -69,6 +69,8 @@ pub struct StatsCollector {
+     enabled: AtomicBool,
+     /// Store statistics
+     pub store_stats: StoreStats,
++    /// Whether phase breakdown collection is enabled
++    phase_enabled: AtomicBool,
+     /// Start time for throughput calculation
+     start_time: Instant,
+ }
+@@ -81,6 +83,7 @@ impl StatsCollector {
+             config,
+             enabled: AtomicBool::new(enabled),
+             store_stats: StoreStats::new(),
++            phase_enabled: AtomicBool::new(false),
+             start_time: Instant::now(),
+         }
+     }
+@@ -110,6 +113,26 @@ impl StatsCollector {
+         self.enabled.store(false, Ordering::Release);
+     }
+ 
++    /// Enable per-phase breakdown collection (profiling mode).
++    pub fn enable_phase_stats(&self) {
++        self.phase_enabled.store(true, Ordering::Release);
++    }
++
++    /// Disable per-phase breakdown collection.
++    pub fn disable_phase_stats(&self) {
++        self.phase_enabled.store(false, Ordering::Release);
++    }
++
++    /// Check whether per-phase breakdown collection is enabled.
++    pub fn is_phase_stats_enabled(&self) -> bool {
++        self.phase_enabled.load(Ordering::Acquire)
++    }
++
++    /// Snapshot of per-phase breakdown counters.
++    pub fn phase_snapshot(&self) -> PhaseStatsSnapshot {
++        self.store_stats.phases.snapshot()
++    }
++
+     /// Get elapsed time since collection started
+     pub fn elapsed(&self) -> Duration {
+         self.start_time.elapsed()
+diff --git a/src/stats/metrics.rs b/src/stats/metrics.rs
+index af86816..b4522e3 100644
+--- a/src/stats/metrics.rs
++++ b/src/stats/metrics.rs
+@@ -136,6 +136,139 @@ impl OperationStats {
+     }
+ }
+ 
++/// Coarse per-phase latency breakdown for hot store operations.
++///
++/// This is intended for profiling runs. It is disabled by default to avoid adding `Instant::now()`
++/// calls to hot paths.
++#[allow(missing_docs)]
++#[derive(Debug, Default)]
++pub struct PhaseStats {
++    pub upsert_ops: AtomicU64,
++    pub upsert_hash_ns: AtomicU64,
++    pub upsert_index_ns: AtomicU64,
++    pub upsert_layout_ns: AtomicU64,
++    pub upsert_alloc_ns: AtomicU64,
++    pub upsert_init_ns: AtomicU64,
++    pub upsert_index_update_ns: AtomicU64,
++
++    pub read_ops: AtomicU64,
++    pub read_hash_ns: AtomicU64,
++    pub read_index_ns: AtomicU64,
++    pub read_chain_ns: AtomicU64,
++}
++
++#[allow(missing_docs)]
++#[derive(Debug, Clone, Copy, Default)]
++pub struct PhaseStatsSnapshot {
++    pub upsert_ops: u64,
++    pub upsert_hash_ns: u64,
++    pub upsert_index_ns: u64,
++    pub upsert_layout_ns: u64,
++    pub upsert_alloc_ns: u64,
++    pub upsert_init_ns: u64,
++    pub upsert_index_update_ns: u64,
++
++    pub read_ops: u64,
++    pub read_hash_ns: u64,
++    pub read_index_ns: u64,
++    pub read_chain_ns: u64,
++}
++
++#[allow(missing_docs)]
++impl PhaseStats {
++    pub fn reset(&self) {
++        self.upsert_ops.store(0, Ordering::Relaxed);
++        self.upsert_hash_ns.store(0, Ordering::Relaxed);
++        self.upsert_index_ns.store(0, Ordering::Relaxed);
++        self.upsert_layout_ns.store(0, Ordering::Relaxed);
++        self.upsert_alloc_ns.store(0, Ordering::Relaxed);
++        self.upsert_init_ns.store(0, Ordering::Relaxed);
++        self.upsert_index_update_ns.store(0, Ordering::Relaxed);
++
++        self.read_ops.store(0, Ordering::Relaxed);
++        self.read_hash_ns.store(0, Ordering::Relaxed);
++        self.read_index_ns.store(0, Ordering::Relaxed);
++        self.read_chain_ns.store(0, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn snapshot(&self) -> PhaseStatsSnapshot {
++        PhaseStatsSnapshot {
++            upsert_ops: self.upsert_ops.load(Ordering::Relaxed),
++            upsert_hash_ns: self.upsert_hash_ns.load(Ordering::Relaxed),
++            upsert_index_ns: self.upsert_index_ns.load(Ordering::Relaxed),
++            upsert_layout_ns: self.upsert_layout_ns.load(Ordering::Relaxed),
++            upsert_alloc_ns: self.upsert_alloc_ns.load(Ordering::Relaxed),
++            upsert_init_ns: self.upsert_init_ns.load(Ordering::Relaxed),
++            upsert_index_update_ns: self.upsert_index_update_ns.load(Ordering::Relaxed),
++            read_ops: self.read_ops.load(Ordering::Relaxed),
++            read_hash_ns: self.read_hash_ns.load(Ordering::Relaxed),
++            read_index_ns: self.read_index_ns.load(Ordering::Relaxed),
++            read_chain_ns: self.read_chain_ns.load(Ordering::Relaxed),
++        }
++    }
++
++    #[inline]
++    pub fn record_upsert_op(&self) {
++        self.upsert_ops.fetch_add(1, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_read_op(&self) {
++        self.read_ops.fetch_add(1, Ordering::Relaxed);
++    }
++
++    #[inline]
++    fn add_ns(counter: &AtomicU64, d: Duration) {
++        counter.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
++    }
++
++    #[inline]
++    pub fn record_upsert_hash(&self, d: Duration) {
++        Self::add_ns(&self.upsert_hash_ns, d);
++    }
++
++    #[inline]
++    pub fn record_upsert_index(&self, d: Duration) {
++        Self::add_ns(&self.upsert_index_ns, d);
++    }
++
++    #[inline]
++    pub fn record_upsert_layout(&self, d: Duration) {
++        Self::add_ns(&self.upsert_layout_ns, d);
++    }
++
++    #[inline]
++    pub fn record_upsert_alloc(&self, d: Duration) {
++        Self::add_ns(&self.upsert_alloc_ns, d);
++    }
++
++    #[inline]
++    pub fn record_upsert_init(&self, d: Duration) {
++        Self::add_ns(&self.upsert_init_ns, d);
++    }
++
++    #[inline]
++    pub fn record_upsert_index_update(&self, d: Duration) {
++        Self::add_ns(&self.upsert_index_update_ns, d);
++    }
++
++    #[inline]
++    pub fn record_read_hash(&self, d: Duration) {
++        Self::add_ns(&self.read_hash_ns, d);
++    }
++
++    #[inline]
++    pub fn record_read_index(&self, d: Duration) {
++        Self::add_ns(&self.read_index_ns, d);
++    }
++
++    #[inline]
++    pub fn record_read_chain(&self, d: Duration) {
++        Self::add_ns(&self.read_chain_ns, d);
++    }
++}
++
+ /// Statistics for the hash index
+ #[derive(Debug, Default)]
+ pub struct HashIndexStats {
+@@ -377,6 +510,8 @@ impl SessionStats {
+ pub struct StoreStats {
+     /// Operation statistics
+     pub operations: OperationStats,
++    /// Per-phase profiling counters (disabled by default, enabled via `StatsCollector`).
++    pub phases: PhaseStats,
+     /// Hash index statistics
+     pub hash_index: HashIndexStats,
+     /// Hybrid log statistics
+@@ -396,6 +531,7 @@ impl StoreStats {
+     /// Reset all statistics
+     pub fn reset(&self) {
+         self.operations.reset();
++        self.phases.reset();
+         self.hash_index.reset();
+         self.hybrid_log.reset();
+         self.allocator.reset();
+diff --git a/src/stats/mod.rs b/src/stats/mod.rs
+index 77490f6..c40eb66 100644
+--- a/src/stats/mod.rs
++++ b/src/stats/mod.rs
+@@ -50,7 +50,7 @@ pub mod reporter;
+ 
+ pub use collector::{StatsCollector, StatsConfig, StatsSnapshot};
+ pub use metrics::{
+-    AllocatorStats, HashIndexStats, HybridLogStats, OperationStats, OperationalStats, SessionStats,
+-    StoreStats,
++    AllocatorStats, HashIndexStats, HybridLogStats, OperationStats, OperationalStats, PhaseStats,
++    PhaseStatsSnapshot, SessionStats, StoreStats,
+ };
+ pub use reporter::{ReportFormat, StatsReporter};
+diff --git a/src/store/faster_kv.rs b/src/store/faster_kv.rs
+index bd859b0..e8defa6 100644
+--- a/src/store/faster_kv.rs
++++ b/src/store/faster_kv.rs
+@@ -519,6 +519,26 @@ where
+         self.stats_collector.enable();
+     }
+ 
++    /// Enable per-phase profiling counters (profiling mode).
++    pub fn enable_phase_stats(&self) {
++        self.stats_collector.enable_phase_stats();
++    }
++
++    /// Disable per-phase profiling counters.
++    pub fn disable_phase_stats(&self) {
++        self.stats_collector.disable_phase_stats();
++    }
++
++    /// Check if per-phase profiling counters are enabled.
++    pub fn is_phase_stats_enabled(&self) -> bool {
++        self.stats_collector.is_phase_stats_enabled()
++    }
++
++    /// Snapshot of per-phase profiling counters.
++    pub fn phase_stats_snapshot(&self) -> crate::stats::PhaseStatsSnapshot {
++        self.stats_collector.phase_snapshot()
++    }
++
+     /// Disable statistics collection
+     pub fn disable_stats(&self) {
+         self.stats_collector.disable();
+@@ -782,10 +802,38 @@ where
+     /// Synchronous read operation
+     pub(crate) fn read_sync(&self, ctx: &mut ThreadContext, key: &K) -> Result<Option<V>, Status> {
+         let start = Instant::now();
++        let phase_enabled =
++            self.stats_collector.is_enabled() && self.stats_collector.is_phase_stats_enabled();
++        if phase_enabled {
++            self.stats_collector.store_stats.phases.record_read_op();
++        }
++
++        let hash_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+         let hash = KeyHash::new(<K as PersistKey>::Codec::hash(key)?);
++        if let Some(t) = hash_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_read_hash(t.elapsed());
++        }
+ 
+         // Find entry in hash index
++        let index_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+         let result = self.hash_index.find_entry(hash);
++        if let Some(t) = index_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_read_index(t.elapsed());
++        }
+ 
+         if !result.found() {
+             self.record_read_stats(false, start);
+@@ -793,10 +841,21 @@ where
+         }
+ 
+         let mut address = result.entry.address();
++        let chain_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+ 
+         // Check read cache first if enabled
+         if address.in_readcache() {
+             if let Some(value) = self.try_read_from_cache(address, key) {
++                if let Some(t) = chain_start {
++                    self.stats_collector
++                        .store_stats
++                        .phases
++                        .record_read_chain(t.elapsed());
++                }
+                 self.record_read_stats(true, start);
+                 return Ok(Some(value));
+             }
+@@ -809,6 +868,12 @@ where
+             // Check read cache for chain entries
+             if address.in_readcache() {
+                 if let Some(value) = self.try_read_from_cache(address, key) {
++                    if let Some(t) = chain_start {
++                        self.stats_collector
++                            .store_stats
++                            .phases
++                            .record_read_chain(t.elapsed());
++                    }
+                     self.record_read_stats(true, start);
+                     return Ok(Some(value));
+                 }
+@@ -826,6 +891,12 @@ where
+                     match result {
+                         Ok(parsed) => {
+                             if parsed.key.as_ref() == Some(key) {
++                                if let Some(t) = chain_start {
++                                    self.stats_collector
++                                        .store_stats
++                                        .phases
++                                        .record_read_chain(t.elapsed());
++                                }
+                                 self.record_read_stats(parsed.value.is_some(), start);
+                                 return Ok(parsed.value);
+                             }
+@@ -852,6 +923,12 @@ where
+                 if submitted {
+                     ctx.on_pending_io_submitted();
+                 }
++                if let Some(t) = chain_start {
++                    self.stats_collector
++                        .store_stats
++                        .phases
++                        .record_read_chain(t.elapsed());
++                }
+                 return Err(Status::Pending);
+             }
+ 
+@@ -875,6 +952,12 @@ where
+                 if <K as PersistKey>::Codec::equals_encoded(view.key_bytes(), key)? {
+                     // Check for tombstone
+                     if view.is_tombstone() {
++                        if let Some(t) = chain_start {
++                            self.stats_collector
++                                .store_stats
++                                .phases
++                                .record_read_chain(t.elapsed());
++                        }
+                         self.record_read_stats(false, start);
+                         return Ok(None);
+                     }
+@@ -892,6 +975,12 @@ where
+                     }
+ 
+                     self.record_read_stats(true, start);
++                    if let Some(t) = chain_start {
++                        self.stats_collector
++                            .store_stats
++                            .phases
++                            .record_read_chain(t.elapsed());
++                    }
+                     return Ok(Some(value));
+                 }
+ 
+@@ -902,6 +991,12 @@ where
+             }
+         }
+ 
++        if let Some(t) = chain_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_read_chain(t.elapsed());
++        }
+         self.record_read_stats(false, start);
+         Ok(None)
+     }
+@@ -1019,13 +1114,41 @@ where
+     /// This is used by both `upsert_sync` and `rmw_sync` to avoid double-counting
+     /// operation statistics when RMW creates a new record via upsert.
+     fn upsert_internal(&self, ctx: &mut ThreadContext, key: K, value: V) -> (Status, usize) {
++        let phase_enabled =
++            self.stats_collector.is_enabled() && self.stats_collector.is_phase_stats_enabled();
++        if phase_enabled {
++            self.stats_collector.store_stats.phases.record_upsert_op();
++        }
++
++        let hash_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+         let hash = match <K as PersistKey>::Codec::hash(&key) {
+             Ok(h) => KeyHash::new(h),
+             Err(s) => return (s, 0),
+         };
++        if let Some(t) = hash_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_upsert_hash(t.elapsed());
++        }
+ 
+         // Find or create entry in hash index
+-        let result = self.hash_index.find_or_create_entry(hash);
++        let index_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
++        let result = self.find_or_create_entry_cached(ctx, hash);
++        if let Some(t) = index_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_upsert_index(t.elapsed());
++        }
+ 
+         let atomic_entry = match result.atomic_entry {
+             Some(entry) => entry,
+@@ -1038,18 +1161,40 @@ where
+             self.invalidate_cache_entry(old_address, &key);
+         }
+ 
++        let layout_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+         let (disk_len, alloc_len, key_len, value_len) =
+             match record_format::layout_for_ops::<K, V>(&key, Some(&value)) {
+                 Ok(v) => v,
+                 Err(s) => return (s, 0),
+             };
++        if let Some(t) = layout_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_upsert_layout(t.elapsed());
++        }
+ 
+         // Allocate space in the log
+         // SAFETY: Allocation is protected by epoch and internal synchronization
++        let alloc_start = if phase_enabled {
++            Some(Instant::now())
++        } else {
++            None
++        };
+         let address = match unsafe { self.hlog_mut().allocate(alloc_len as u32) } {
+             Ok(addr) => addr,
+             Err(status) => return (status, 0),
+         };
++        if let Some(t) = alloc_start {
++            self.stats_collector
++                .store_stats
++                .phases
++                .record_upsert_alloc(t.elapsed());
++        }
+ 
+         // Get pointer to the allocated space
+         // SAFETY: We just allocated this space, and access is protected by epoch
+@@ -1057,6 +1202,11 @@ where
+ 
+         if let Some(ptr) = record_ptr {
+             // Initialize the record
++            let init_start = if phase_enabled {
++                Some(Instant::now())
++            } else {
++                None
++            };
+             unsafe {
+                 const U32_BYTES: usize = std::mem::size_of::<u32>();
+                 const VARLEN_LENGTHS_SIZE: usize = 2 * U32_BYTES;
+@@ -1111,27 +1261,68 @@ where
+                         return (s, 0);
+                     }
+                 }
+-
+-                // The record is now fully initialized and can be scanned safely.
+-                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
++            }
++            if let Some(t) = init_start {
++                self.stats_collector
++                    .store_stats
++                    .phases
++                    .record_upsert_init(t.elapsed());
+             }
+ 
+-            // Update hash index
+-            let status = self.hash_index.try_update_entry(
+-                atomic_entry,
+-                result.entry.to_hash_bucket_entry(),
++            // SAFETY: The header was initialized above via `ptr::write`.
++            let header = unsafe { record_format::record_info_at(ptr.as_ptr()) };
++
++            // Update the hash index with a CAS-retry loop. If another thread updated the entry
++            // between `find_or_create_entry` and this point, patch the record header to point to
++            // the latest head and retry the CAS until it succeeds. This avoids losing updates
++            // without allocating a new record on contention.
++            //
++            // SAFETY: `atomic_entry` points to the bucket entry returned by `find_or_create_entry`.
++            let atomic_ref = unsafe { &*atomic_entry };
++            let stats_enabled = self.stats_collector.is_enabled();
++            let mut expected = result.entry.to_hash_bucket_entry();
++            let new_entry = crate::index::IndexHashBucketEntry::new_with_read_cache(
+                 address,
+                 hash.tag(),
+                 false,
+-            );
++                false,
++            )
++            .to_hash_bucket_entry();
+ 
+-            if status != Status::Ok {
+-                // CAS failed - another thread updated, need to retry
+-                // Record retry statistics
+-                if self.stats_collector.is_enabled() {
+-                    self.stats_collector.store_stats.operations.record_retry();
++            let index_update_start = if phase_enabled {
++                Some(Instant::now())
++            } else {
++                None
++            };
++            loop {
++                match atomic_ref.compare_exchange(
++                    expected,
++                    new_entry,
++                    Ordering::Release,
++                    Ordering::Relaxed,
++                ) {
++                    Ok(_) => break,
++                    Err(actual) => {
++                        if stats_enabled {
++                            self.stats_collector.store_stats.operations.record_retry();
++                        }
++
++                        let actual_index = crate::index::IndexHashBucketEntry::from(actual);
++                        let latest_prev = self.skip_read_cache(actual_index.address());
++                        header.set_previous_address_relaxed(latest_prev);
++                        expected = actual;
++                    }
+                 }
+             }
++            if let Some(t) = index_update_start {
++                self.stats_collector
++                    .store_stats
++                    .phases
++                    .record_upsert_index_update(t.elapsed());
++            }
++
++            // Publish the record only after the index points to it.
++            header.publish_valid();
+ 
+             (Status::Ok, disk_len)
+         } else {
+@@ -1139,6 +1330,40 @@ where
+         }
+     }
+ 
++    #[inline]
++    fn find_or_create_entry_cached(
++        &self,
++        ctx: &mut ThreadContext,
++        hash: KeyHash,
++    ) -> crate::index::FindResult {
++        let store_id = self as *const Self as usize;
++        ctx.prepare_index_entry_cache_for_store(store_id);
++
++        let version = self.hash_index.version();
++        if let Some(atomic_entry) = ctx.get_cached_index_entry(hash, version) {
++            // SAFETY: Cache entries are only populated from successful index lookups.
++            let atomic_ref = unsafe { &*atomic_entry };
++            let entry = atomic_ref.load_index(Ordering::Acquire);
++            if !entry.is_unused() && !entry.is_tentative() && entry.tag() == hash.tag() {
++                return crate::index::FindResult {
++                    entry,
++                    atomic_entry: Some(atomic_entry),
++                };
++            }
++            ctx.invalidate_cached_index_entry(hash);
++        }
++
++        let result = self.hash_index.find_or_create_entry(hash);
++        if let Some(atomic_entry) = result.atomic_entry {
++            // Avoid caching pointers captured across a concurrent index version flip.
++            if self.hash_index.version() == version {
++                ctx.put_cached_index_entry(hash, version, atomic_entry);
++            }
++        }
++
++        result
++    }
++
+     /// Synchronous upsert operation
+     ///
+     /// Inserts or updates a key-value pair.
+@@ -1249,18 +1474,48 @@ where
+                     }
+                 }
+ 
+-                // The tombstone is now fully initialized and can be scanned safely.
+-                record_format::record_info_at(ptr.as_ptr()).set_invalid(false);
++                // The record remains invalid until the index points to it.
+             }
+ 
+-            // Update hash index
+-            let _ = self.hash_index.try_update_entry(
+-                atomic_entry,
+-                result.entry.to_hash_bucket_entry(),
++            // SAFETY: The header was initialized above via `ptr::write`.
++            let header = unsafe { record_format::record_info_at(ptr.as_ptr()) };
++
++            // Update the hash index (CAS-retry loop, same strategy as `upsert_internal`).
++            // SAFETY: `atomic_entry` points to the bucket entry returned by `find_entry`.
++            let atomic_ref = unsafe { &*atomic_entry };
++            let stats_enabled = self.stats_collector.is_enabled();
++            let mut expected = result.entry.to_hash_bucket_entry();
++            let new_entry = crate::index::IndexHashBucketEntry::new_with_read_cache(
+                 address,
+                 hash.tag(),
+                 false,
+-            );
++                false,
++            )
++            .to_hash_bucket_entry();
++
++            loop {
++                match atomic_ref.compare_exchange(
++                    expected,
++                    new_entry,
++                    Ordering::Release,
++                    Ordering::Relaxed,
++                ) {
++                    Ok(_) => break,
++                    Err(actual) => {
++                        if stats_enabled {
++                            self.stats_collector.store_stats.operations.record_retry();
++                        }
++
++                        let actual_index = crate::index::IndexHashBucketEntry::from(actual);
++                        let latest_prev = self.skip_read_cache(actual_index.address());
++                        header.set_previous_address_relaxed(latest_prev);
++                        expected = actual;
++                    }
++                }
++            }
++
++            // Publish tombstone after the index points to it.
++            header.publish_valid();
+ 
+             // Record delete statistics
+             if self.stats_collector.is_enabled() {
+@@ -1293,7 +1548,7 @@ where
+         };
+ 
+         // Find or create entry in hash index
+-        let result = self.hash_index.find_or_create_entry(hash);
++        let result = self.find_or_create_entry_cached(ctx, hash);
+ 
+         let _atomic_entry = match result.atomic_entry {
+             Some(entry) => entry,
+@@ -1423,7 +1678,7 @@ where
+         };
+ 
+         // Find or create entry in hash index
+-        let result = self.hash_index.find_or_create_entry(hash);
++        let result = self.find_or_create_entry_cached(ctx, hash);
+ 
+         let _atomic_entry = match result.atomic_entry {
+             Some(entry) => entry,
+diff --git a/src/store/session.rs b/src/store/session.rs
+index 1e913d0..616e79d 100644
+--- a/src/store/session.rs
++++ b/src/store/session.rs
+@@ -21,6 +21,7 @@ use crate::checkpoint::SessionState;
+ use crate::codec::{KeyCodec, PersistKey, PersistValue};
+ use crate::device::StorageDevice;
+ use crate::epoch::{get_thread_tag, EpochGuard};
++use crate::index::{AtomicHashBucketEntry, KeyHash};
+ use crate::status::Status;
+ use crate::store::{Action, Phase};
+ use crate::store::{FasterKv, RecordView};
+@@ -40,6 +41,28 @@ pub(crate) struct ExecutionContext {
+     pub(crate) retry_requests: u32,
+ }
+ 
++const INDEX_ENTRY_CACHE_SIZE: usize = 64;
++
++#[derive(Debug, Clone, Copy)]
++struct IndexEntryCacheSlot {
++    hash: u64,
++    version: u8,
++    atomic_entry: *const AtomicHashBucketEntry,
++}
++
++impl IndexEntryCacheSlot {
++    const EMPTY: Self = Self {
++        hash: 0,
++        version: 0,
++        atomic_entry: std::ptr::null(),
++    };
++
++    #[inline]
++    const fn is_empty(self) -> bool {
++        self.atomic_entry.is_null()
++    }
++}
++
+ impl ExecutionContext {
+     fn new(id: u64, version: u32) -> Self {
+         Self {
+@@ -56,7 +79,7 @@ impl ExecutionContext {
+ /// Tracks per-thread state including the serial number for CPR (Concurrent Prefix Recovery).
+ /// The serial number is incremented with each successful mutating operation and is used to
+ /// validate recovery boundaries.
+-#[derive(Debug, Clone)]
++#[derive(Debug)]
+ pub struct ThreadContext {
+     /// Thread ID
+     pub thread_id: usize,
+@@ -78,6 +101,8 @@ pub struct ThreadContext {
+     pub(crate) last_cpr_state: u64,
+     /// Last on-disk address observed by `read()` when returning `Status::Pending`.
+     pub(crate) last_pending_read: Option<Address>,
++    index_entry_cache_store: usize,
++    index_entry_cache: [IndexEntryCacheSlot; INDEX_ENTRY_CACHE_SIZE],
+ }
+ 
+ impl ThreadContext {
+@@ -96,6 +121,62 @@ impl ThreadContext {
+             next_ctx_id: 2,
+             last_cpr_state: 0,
+             last_pending_read: None,
++            index_entry_cache_store: 0,
++            index_entry_cache: [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE],
++        }
++    }
++
++    #[inline]
++    fn index_cache_slot(hash: KeyHash) -> usize {
++        (hash.hash() as usize) & (INDEX_ENTRY_CACHE_SIZE - 1)
++    }
++
++    #[inline]
++    fn clear_index_entry_cache(&mut self) {
++        self.index_entry_cache = [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE];
++    }
++
++    #[inline]
++    pub(crate) fn prepare_index_entry_cache_for_store(&mut self, store_id: usize) {
++        if self.index_entry_cache_store != store_id {
++            self.index_entry_cache_store = store_id;
++            self.clear_index_entry_cache();
++        }
++    }
++
++    #[inline]
++    pub(crate) fn get_cached_index_entry(
++        &self,
++        hash: KeyHash,
++        version: u8,
++    ) -> Option<*const AtomicHashBucketEntry> {
++        let slot = self.index_entry_cache[Self::index_cache_slot(hash)];
++        if slot.is_empty() || slot.hash != hash.hash() || slot.version != version {
++            return None;
++        }
++        Some(slot.atomic_entry)
++    }
++
++    #[inline]
++    pub(crate) fn put_cached_index_entry(
++        &mut self,
++        hash: KeyHash,
++        version: u8,
++        atomic_entry: *const AtomicHashBucketEntry,
++    ) {
++        self.index_entry_cache[Self::index_cache_slot(hash)] = IndexEntryCacheSlot {
++            hash: hash.hash(),
++            version,
++            atomic_entry,
++        };
++    }
++
++    #[inline]
++    pub(crate) fn invalidate_cached_index_entry(&mut self, hash: KeyHash) {
++        let slot = Self::index_cache_slot(hash);
++        let cached = self.index_entry_cache[slot];
++        if !cached.is_empty() && cached.hash == hash.hash() {
++            self.index_entry_cache[slot] = IndexEntryCacheSlot::EMPTY;
+         }
+     }
+ 
+@@ -213,6 +294,26 @@ impl ThreadContext {
+         self.version = self.current.version;
+         self.pending_count = self.current.pending_ios;
+         self.retry_count = self.current.retry_requests;
++        self.clear_index_entry_cache();
++    }
++}
++
++impl Clone for ThreadContext {
++    fn clone(&self) -> Self {
++        Self {
++            thread_id: self.thread_id,
++            version: self.version,
++            serial_num: self.serial_num,
++            pending_count: self.pending_count,
++            retry_count: self.retry_count,
++            current: self.current.clone(),
++            prev: self.prev.clone(),
++            next_ctx_id: self.next_ctx_id,
++            last_cpr_state: self.last_cpr_state,
++            last_pending_read: self.last_pending_read,
++            index_entry_cache_store: 0,
++            index_entry_cache: [IndexEntryCacheSlot::EMPTY; INDEX_ENTRY_CACHE_SIZE],
++        }
+     }
+ }
+ 
+-- 
+2.39.5 (Apple Git-154)
+

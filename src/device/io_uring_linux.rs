@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use io_uring::{opcode, types, IoUring};
+use io_uring::{IoUring, opcode, types};
 use libc::iovec;
 use parking_lot::Mutex;
 
@@ -16,7 +16,7 @@ use crate::device::traits::SyncStorageDevice;
 use crate::status::Status;
 
 use super::io_uring_common::{
-    checked_offset, IoUringConfig, IoUringError, IoUringFeatures, IoUringStats,
+    IoUringConfig, IoUringError, IoUringFeatures, IoUringStats, checked_offset,
 };
 
 struct LinuxState {

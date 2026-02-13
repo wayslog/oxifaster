@@ -4,11 +4,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::thread;
 
+use oxifaster::Status;
 use oxifaster::device::FileSystemDisk;
 use oxifaster::log::{
     FasterLog, FasterLogConfig, FasterLogOpenOptions, FasterLogSelfCheckOptions, LogErrorKind,
 };
-use oxifaster::Status;
 use tempfile::tempdir;
 
 fn create_config() -> FasterLogConfig {

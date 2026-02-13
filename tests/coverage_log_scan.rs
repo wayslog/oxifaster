@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::thread;
 
+use oxifaster::Address;
+use oxifaster::Status;
 use oxifaster::device::NullDisk;
 use oxifaster::log::{
     FasterLog, FasterLogConfig, FasterLogOpenOptions, FasterLogSelfCheckOptions, LogErrorKind,
@@ -14,8 +16,6 @@ use oxifaster::log::{
 use oxifaster::scan::{
     ConcurrentLogScanIterator, LogPage, LogPageIterator, LogPageStatus, LogScanIterator, ScanRange,
 };
-use oxifaster::Address;
-use oxifaster::Status;
 
 // ---------------------------------------------------------------------------
 // Helper: create a small FasterLog on NullDisk suitable for unit tests.

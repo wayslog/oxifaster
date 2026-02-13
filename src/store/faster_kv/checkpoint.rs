@@ -2,8 +2,8 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -12,21 +12,20 @@ use uuid::Uuid;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
 use crate::cache::{ReadCache, ReadCacheConfig};
 use crate::checkpoint::{
-    create_checkpoint_directory, delta_log_path, delta_metadata_path, CheckpointState,
-    CheckpointToken, CheckpointType, DeltaLogMetadata, IndexMetadata, LogMetadata, RecoveryState,
-    SessionState,
+    CheckpointState, CheckpointToken, CheckpointType, DeltaLogMetadata, IndexMetadata, LogMetadata,
+    RecoveryState, SessionState, create_checkpoint_directory, delta_log_path, delta_metadata_path,
 };
 use crate::codec::{PersistKey, PersistValue};
 use crate::compaction::{CompactionConfig, Compactor};
 use crate::delta_log::{DeltaLog, DeltaLogConfig};
 use crate::device::StorageDevice;
-use crate::epoch::try_get_thread_id;
 use crate::epoch::LightEpoch;
+use crate::epoch::try_get_thread_id;
 use crate::index::{MemHashIndex, MemHashIndexConfig};
 use crate::stats::StatsCollector;
+use crate::store::ThreadContext;
 use crate::store::pending_io::PendingIoManager;
 use crate::store::state_transitions::{Action, AtomicSystemState, Phase, SystemState};
-use crate::store::ThreadContext;
 
 use super::cpr::{
     ActiveCheckpoint, ActiveCheckpointStart, CheckpointDurability, LogCheckpointBackend,

@@ -240,8 +240,8 @@ mod tests {
 
     #[test]
     fn test_gc_truncate_callback() {
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = called.clone();
@@ -264,8 +264,8 @@ mod tests {
 
     #[test]
     fn test_gc_complete_callback() {
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = called.clone();

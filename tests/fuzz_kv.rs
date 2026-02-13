@@ -293,7 +293,7 @@ fn fuzz_kv_stress_crud_compaction_growth() {
     let mut step = 0usize;
     while step < p.steps {
         let chunk = usize::min(2_000, p.steps - step);
-        let r = apply_random_ops(&store, &mut model, chunk, p.key_space, rng.gen());
+        let r = apply_random_ops(&store, &mut model, chunk, p.key_space, rng.r#gen());
         agg.reads += r.reads;
         agg.upserts_ok += r.upserts_ok;
         agg.upserts_oom += r.upserts_oom;

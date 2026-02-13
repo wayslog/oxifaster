@@ -7,16 +7,16 @@
 //! Based on C# FASTER's DeltaLog implementation.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use parking_lot::Mutex;
 
 use crate::device::StorageDevice;
 
 use super::entry::{
-    compute_entry_checksum, verify_checksum, DeltaLogEntry, DeltaLogEntryType, DeltaLogHeader,
-    DELTA_LOG_HEADER_SIZE,
+    DELTA_LOG_HEADER_SIZE, DeltaLogEntry, DeltaLogEntryType, DeltaLogHeader,
+    compute_entry_checksum, verify_checksum,
 };
 
 /// Configuration for DeltaLog

@@ -51,5 +51,5 @@ mod light_epoch;
 
 pub(crate) use light_epoch::current_thread_tag_for;
 pub use light_epoch::{
-    get_thread_id, get_thread_tag, try_get_thread_id, EpochAction, EpochGuard, LightEpoch,
+    EpochAction, EpochGuard, LightEpoch, get_thread_id, get_thread_tag, try_get_thread_id,
 };
