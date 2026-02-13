@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -14,8 +14,11 @@ use crate::index::{HashBucket, HashBucketEntry, HashBucketOverflowEntry};
 /// - Each bucket is allocated as a standalone `Box<HashBucket>`, so the pointer is stable.
 ///   Even if the backing `Vec` grows, bucket memory addresses do not move, so it is safe to use
 ///   the pointer after unlocking.
+/// - `committed_len` tracks the number of buckets visible to lock-free readers. Writers update
+///   it with Release after pushing new pointers; readers load it with Acquire before indexing.
 pub(super) struct OverflowBucketPool {
     buckets: RwLock<Vec<*mut HashBucket>>,
+    committed_len: AtomicUsize,
     free_list: Mutex<Vec<FixedPageAddress>>,
     refill_in_progress: AtomicBool,
 }
@@ -30,6 +33,7 @@ impl OverflowBucketPool {
     pub(super) fn new() -> Self {
         Self {
             buckets: RwLock::new(Vec::new()),
+            committed_len: AtomicUsize::new(0),
             free_list: Mutex::new(Vec::new()),
             refill_in_progress: AtomicBool::new(false),
         }
@@ -43,6 +47,7 @@ impl OverflowBucketPool {
         self.free_list.get_mut().clear();
         self.refill_in_progress
             .store(false, AtomicOrdering::Relaxed);
+        self.committed_len.store(0, AtomicOrdering::Relaxed);
         let mut buckets = self.buckets.write();
         for ptr in buckets.drain(..) {
             // SAFETY: `ptr` originates from `Box::into_raw` and is freed exactly once, here or in
@@ -52,7 +57,7 @@ impl OverflowBucketPool {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.buckets.read().len()
+        self.committed_len.load(AtomicOrdering::Acquire)
     }
 
     pub(super) fn buckets_read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<*mut HashBucket>> {
@@ -171,6 +176,8 @@ impl OverflowBucketPool {
                             spare_addrs.push(addr);
                         }
                     }
+                    self.committed_len
+                        .store(buckets.len(), AtomicOrdering::Release);
                 }
 
                 if !spare_addrs.is_empty() {
