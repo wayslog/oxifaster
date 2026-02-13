@@ -181,8 +181,10 @@ impl MemHashIndex {
 
             reader.read_exact(&mut entry_buf)?;
             let overflow_control = u64::from_le_bytes(entry_buf);
+            let overflow_address =
+                HashBucketOverflowEntry::from_control(overflow_control).address();
             bucket.overflow_entry.store(
-                HashBucketOverflowEntry::from_control(overflow_control),
+                HashBucketOverflowEntry::new(overflow_address),
                 Ordering::Release,
             );
         }
@@ -211,8 +213,10 @@ impl MemHashIndex {
 
             reader.read_exact(&mut entry_buf)?;
             let overflow_control = u64::from_le_bytes(entry_buf);
+            let overflow_address =
+                HashBucketOverflowEntry::from_control(overflow_control).address();
             bucket.overflow_entry.store(
-                HashBucketOverflowEntry::from_control(overflow_control),
+                HashBucketOverflowEntry::new(overflow_address),
                 Ordering::Release,
             );
         }

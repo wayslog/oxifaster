@@ -25,6 +25,7 @@ pub struct IndexInsertProfileSnapshot {
     pub scan_slots: u64,
     pub scan_tag_matches: u64,
     pub scan_preferred_tag_matches: u64,
+    pub scan_overflow_summary_skips: u64,
 
     pub lookup_calls: u64,
     pub lookup_slots: u64,
@@ -32,12 +33,14 @@ pub struct IndexInsertProfileSnapshot {
     pub lookup_overflow_slots: u64,
     pub lookup_tag_matches: u64,
     pub lookup_preferred_tag_matches: u64,
+    pub lookup_overflow_summary_skips: u64,
 
     pub append_overflow_calls: u64,
     pub append_overflow_ns: u64,
     pub append_link_attempts: u64,
     pub append_link_failures: u64,
     pub append_link_race_deallocs: u64,
+    pub append_reused_free_slots: u64,
     pub append_chain_depth_total: u64,
     pub append_chain_depth_max: u64,
 
@@ -102,8 +105,11 @@ impl fmt::Display for IndexInsertProfileSnapshot {
         };
         writeln!(
             f,
-            "    scan_detail: slots={} avg_slots_per_scan={avg_slots:.2} tag_matches={} preferred_tag_matches={}",
-            self.scan_slots, self.scan_tag_matches, self.scan_preferred_tag_matches
+            "    scan_detail: slots={} avg_slots_per_scan={avg_slots:.2} tag_matches={} preferred_tag_matches={} overflow_summary_skips={}",
+            self.scan_slots,
+            self.scan_tag_matches,
+            self.scan_preferred_tag_matches,
+            self.scan_overflow_summary_skips,
         )?;
         let avg_scan_chain_depth = if self.scan_calls == 0 {
             0.0
@@ -122,13 +128,14 @@ impl fmt::Display for IndexInsertProfileSnapshot {
         };
         writeln!(
             f,
-            "    lookup_detail: calls={} slots={} avg_slots_per_lookup={avg_lookup_slots:.2} base_slots={} overflow_slots={} tag_matches={} preferred_tag_matches={}",
+            "    lookup_detail: calls={} slots={} avg_slots_per_lookup={avg_lookup_slots:.2} base_slots={} overflow_slots={} tag_matches={} preferred_tag_matches={} overflow_summary_skips={}",
             self.lookup_calls,
             self.lookup_slots,
             self.lookup_base_slots,
             self.lookup_overflow_slots,
             self.lookup_tag_matches,
-            self.lookup_preferred_tag_matches
+            self.lookup_preferred_tag_matches,
+            self.lookup_overflow_summary_skips,
         )?;
         writeln!(
             f,
@@ -142,10 +149,11 @@ impl fmt::Display for IndexInsertProfileSnapshot {
         };
         writeln!(
             f,
-            "    append_detail: link_attempts={} link_failures={} race_deallocs={} avg_chain_depth={avg_append_chain_depth:.2} max_chain_depth={}",
+            "    append_detail: link_attempts={} link_failures={} race_deallocs={} reused_free_slots={} avg_chain_depth={avg_append_chain_depth:.2} max_chain_depth={}",
             self.append_link_attempts,
             self.append_link_failures,
             self.append_link_race_deallocs,
+            self.append_reused_free_slots,
             self.append_chain_depth_max,
         )?;
         writeln!(
@@ -169,6 +177,7 @@ pub struct IndexInsertProfile {
     scan_slots: AtomicU64,
     scan_tag_matches: AtomicU64,
     scan_preferred_tag_matches: AtomicU64,
+    scan_overflow_summary_skips: AtomicU64,
 
     lookup_calls: AtomicU64,
     lookup_slots: AtomicU64,
@@ -176,12 +185,14 @@ pub struct IndexInsertProfile {
     lookup_overflow_slots: AtomicU64,
     lookup_tag_matches: AtomicU64,
     lookup_preferred_tag_matches: AtomicU64,
+    lookup_overflow_summary_skips: AtomicU64,
 
     append_overflow_calls: AtomicU64,
     append_overflow_ns: AtomicU64,
     append_link_attempts: AtomicU64,
     append_link_failures: AtomicU64,
     append_link_race_deallocs: AtomicU64,
+    append_reused_free_slots: AtomicU64,
     append_chain_depth_total: AtomicU64,
     append_chain_depth_max: AtomicU64,
 
@@ -208,17 +219,20 @@ impl IndexInsertProfile {
             scan_slots: AtomicU64::new(0),
             scan_tag_matches: AtomicU64::new(0),
             scan_preferred_tag_matches: AtomicU64::new(0),
+            scan_overflow_summary_skips: AtomicU64::new(0),
             lookup_calls: AtomicU64::new(0),
             lookup_slots: AtomicU64::new(0),
             lookup_base_slots: AtomicU64::new(0),
             lookup_overflow_slots: AtomicU64::new(0),
             lookup_tag_matches: AtomicU64::new(0),
             lookup_preferred_tag_matches: AtomicU64::new(0),
+            lookup_overflow_summary_skips: AtomicU64::new(0),
             append_overflow_calls: AtomicU64::new(0),
             append_overflow_ns: AtomicU64::new(0),
             append_link_attempts: AtomicU64::new(0),
             append_link_failures: AtomicU64::new(0),
             append_link_race_deallocs: AtomicU64::new(0),
+            append_reused_free_slots: AtomicU64::new(0),
             append_chain_depth_total: AtomicU64::new(0),
             append_chain_depth_max: AtomicU64::new(0),
             cas_attempts: AtomicU64::new(0),
@@ -241,6 +255,7 @@ impl IndexInsertProfile {
         self.scan_slots.store(0, Ordering::Relaxed);
         self.scan_tag_matches.store(0, Ordering::Relaxed);
         self.scan_preferred_tag_matches.store(0, Ordering::Relaxed);
+        self.scan_overflow_summary_skips.store(0, Ordering::Relaxed);
         self.lookup_calls.store(0, Ordering::Relaxed);
         self.lookup_slots.store(0, Ordering::Relaxed);
         self.lookup_base_slots.store(0, Ordering::Relaxed);
@@ -248,11 +263,14 @@ impl IndexInsertProfile {
         self.lookup_tag_matches.store(0, Ordering::Relaxed);
         self.lookup_preferred_tag_matches
             .store(0, Ordering::Relaxed);
+        self.lookup_overflow_summary_skips
+            .store(0, Ordering::Relaxed);
         self.append_overflow_calls.store(0, Ordering::Relaxed);
         self.append_overflow_ns.store(0, Ordering::Relaxed);
         self.append_link_attempts.store(0, Ordering::Relaxed);
         self.append_link_failures.store(0, Ordering::Relaxed);
         self.append_link_race_deallocs.store(0, Ordering::Relaxed);
+        self.append_reused_free_slots.store(0, Ordering::Relaxed);
         self.append_chain_depth_total.store(0, Ordering::Relaxed);
         self.append_chain_depth_max.store(0, Ordering::Relaxed);
         self.cas_attempts.store(0, Ordering::Relaxed);
@@ -275,17 +293,22 @@ impl IndexInsertProfile {
             scan_slots: self.scan_slots.load(Ordering::Relaxed),
             scan_tag_matches: self.scan_tag_matches.load(Ordering::Relaxed),
             scan_preferred_tag_matches: self.scan_preferred_tag_matches.load(Ordering::Relaxed),
+            scan_overflow_summary_skips: self.scan_overflow_summary_skips.load(Ordering::Relaxed),
             lookup_calls: self.lookup_calls.load(Ordering::Relaxed),
             lookup_slots: self.lookup_slots.load(Ordering::Relaxed),
             lookup_base_slots: self.lookup_base_slots.load(Ordering::Relaxed),
             lookup_overflow_slots: self.lookup_overflow_slots.load(Ordering::Relaxed),
             lookup_tag_matches: self.lookup_tag_matches.load(Ordering::Relaxed),
             lookup_preferred_tag_matches: self.lookup_preferred_tag_matches.load(Ordering::Relaxed),
+            lookup_overflow_summary_skips: self
+                .lookup_overflow_summary_skips
+                .load(Ordering::Relaxed),
             append_overflow_calls: self.append_overflow_calls.load(Ordering::Relaxed),
             append_overflow_ns: self.append_overflow_ns.load(Ordering::Relaxed),
             append_link_attempts: self.append_link_attempts.load(Ordering::Relaxed),
             append_link_failures: self.append_link_failures.load(Ordering::Relaxed),
             append_link_race_deallocs: self.append_link_race_deallocs.load(Ordering::Relaxed),
+            append_reused_free_slots: self.append_reused_free_slots.load(Ordering::Relaxed),
             append_chain_depth_total: self.append_chain_depth_total.load(Ordering::Relaxed),
             append_chain_depth_max: self.append_chain_depth_max.load(Ordering::Relaxed),
             cas_attempts: self.cas_attempts.load(Ordering::Relaxed),
@@ -337,6 +360,12 @@ impl IndexInsertProfile {
     }
 
     #[inline]
+    pub fn record_scan_overflow_summary_skip(&self) {
+        self.scan_overflow_summary_skips
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub fn record_lookup_observations(
         &self,
         base_slots: u64,
@@ -358,6 +387,12 @@ impl IndexInsertProfile {
     }
 
     #[inline]
+    pub fn record_lookup_overflow_summary_skip(&self) {
+        self.lookup_overflow_summary_skips
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub fn record_append_overflow(&self, elapsed: Duration) {
         self.append_overflow_calls.fetch_add(1, Ordering::Relaxed);
         self.append_overflow_ns
@@ -375,6 +410,12 @@ impl IndexInsertProfile {
     #[inline]
     pub fn record_append_link_race_deallocate(&self) {
         self.append_link_race_deallocs
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_append_reused_free_slot(&self) {
+        self.append_reused_free_slots
             .fetch_add(1, Ordering::Relaxed);
     }
 
