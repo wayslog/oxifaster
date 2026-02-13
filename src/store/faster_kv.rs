@@ -374,8 +374,10 @@ where
         let state = self.system_state.load(Ordering::Relaxed);
 
         if state.phase == crate::store::Phase::Rest || state.action == crate::store::Action::None {
-            ctx.version = state.version;
-            ctx.current.version = state.version;
+            if ctx.version != state.version {
+                ctx.version = state.version;
+                ctx.current.version = state.version;
+            }
             return;
         }
 

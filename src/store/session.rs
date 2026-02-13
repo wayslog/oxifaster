@@ -410,22 +410,14 @@ where
         }
     }
 
-    fn try_take_completed_read(
-        &mut self,
-        key: &K,
-    ) -> Result<Option<Result<Option<V>, Status>>, Status> {
-        let hash = <K as PersistKey>::Codec::hash(key)?;
-        let Some(entries) = self.completed_reads.get_mut(&hash) else {
-            return Ok(None);
-        };
-        let Some(pos) = entries.iter().position(|e| e.key == *key) else {
-            return Ok(None);
-        };
+    fn try_take_completed_read(&mut self, hash: u64, key: &K) -> Option<Result<Option<V>, Status>> {
+        let entries = self.completed_reads.get_mut(&hash)?;
+        let pos = entries.iter().position(|e| e.key == *key)?;
         let entry = entries.swap_remove(pos);
         if entries.is_empty() {
             self.completed_reads.remove(&hash);
         }
-        Ok(Some(entry.result))
+        Some(entry.result)
     }
 
     fn enqueue_pending_read(&mut self, ctx_id: u64, key: K, hash: u64, address: Address) {
@@ -455,8 +447,7 @@ where
         self.ctx.on_retry_requests_ready(ctx_id, 1);
     }
 
-    fn cancel_one_pending_read(&mut self, key: &K) -> Result<(), Status> {
-        let hash = <K as PersistKey>::Codec::hash(key)?;
+    fn cancel_one_pending_read(&mut self, hash: u64, key: &K) {
         let current_id = self.ctx.current_ctx_id();
         let prev_id = self.ctx.prev_ctx_id();
 
@@ -480,8 +471,6 @@ where
             req.cancelled = true;
             break;
         }
-
-        Ok(())
     }
 
     fn drive_pending_reads_for_ctx(&mut self, ctx_id: u64, thread_tag: u64) {
@@ -721,30 +710,51 @@ where
         self.start();
         self.store.cpr_refresh(&mut self.ctx);
 
-        if let Some(result) = self.try_take_completed_read(key)? {
-            return result;
-        }
+        // Fast path: skip completed/pending map lookups when no async I/O is outstanding.
+        let has_pending = !self.completed_reads.is_empty() || !self.pending_reads.is_empty();
 
-        match self.store.read_sync(&mut self.ctx, key) {
-            Ok(value) => {
-                // Best-effort: if a prior attempt returned `Pending`, cancel it so that
-                // `WAIT_PENDING` does not wait indefinitely on an abandoned read.
-                let _ = self.cancel_one_pending_read(key);
-                Ok(value)
+        if has_pending {
+            let hash = <K as PersistKey>::Codec::hash(key)?;
+            if let Some(result) = self.try_take_completed_read(hash, key) {
+                return result;
             }
-            Err(Status::Pending) => {
-                if let Some(address) = self.ctx.last_pending_read.take() {
-                    let hash = <K as PersistKey>::Codec::hash(key)?;
-                    self.enqueue_pending_read(
-                        self.ctx.current_ctx_id(),
-                        key.clone(),
-                        hash,
-                        address,
-                    );
+
+            match self.store.read_sync(&mut self.ctx, key) {
+                Ok(value) => {
+                    self.cancel_one_pending_read(hash, key);
+                    Ok(value)
                 }
-                Err(Status::Pending)
+                Err(Status::Pending) => {
+                    if let Some(address) = self.ctx.last_pending_read.take() {
+                        self.enqueue_pending_read(
+                            self.ctx.current_ctx_id(),
+                            key.clone(),
+                            hash,
+                            address,
+                        );
+                    }
+                    Err(Status::Pending)
+                }
+                Err(status) => Err(status),
             }
-            Err(status) => Err(status),
+        } else {
+            // Common fast path: no pending I/O, skip hash + HashMap lookups entirely.
+            match self.store.read_sync(&mut self.ctx, key) {
+                Ok(value) => Ok(value),
+                Err(Status::Pending) => {
+                    if let Some(address) = self.ctx.last_pending_read.take() {
+                        let hash = <K as PersistKey>::Codec::hash(key)?;
+                        self.enqueue_pending_read(
+                            self.ctx.current_ctx_id(),
+                            key.clone(),
+                            hash,
+                            address,
+                        );
+                    }
+                    Err(Status::Pending)
+                }
+                Err(status) => Err(status),
+            }
         }
     }
 
