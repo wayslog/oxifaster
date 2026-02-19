@@ -514,6 +514,110 @@ pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> 
     Ok(())
 }
 
+/// Validate consistency between index and log metadata.
+///
+/// Checks that:
+/// - Versions match between index and log metadata
+/// - Begin addresses are consistent
+/// - Address ordering is valid (begin <= final)
+pub fn validate_metadata_consistency(
+    index_meta: &IndexMetadata,
+    log_meta: &LogMetadata,
+) -> io::Result<()> {
+    // Version consistency
+    if index_meta.version != log_meta.version {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Version mismatch: index={}, log={}",
+                index_meta.version, log_meta.version
+            ),
+        ));
+    }
+
+    // Begin address consistency
+    if index_meta.log_begin_address != log_meta.begin_address {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Begin address mismatch: index={}, log={}",
+                index_meta.log_begin_address, log_meta.begin_address
+            ),
+        ));
+    }
+
+    // Address ordering: begin <= final
+    if log_meta.begin_address > log_meta.final_address
+        && !log_meta.final_address.is_invalid()
+        && !log_meta.begin_address.is_invalid()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Invalid address ordering: begin={} > final={}",
+                log_meta.begin_address, log_meta.final_address
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate an incremental checkpoint chain for address continuity.
+///
+/// Checks that each incremental checkpoint's start_logical_address matches
+/// the previous checkpoint's final_address, ensuring no gaps or overlaps.
+pub fn validate_incremental_chain(chain: &[CheckpointInfo]) -> io::Result<()> {
+    if chain.len() < 2 {
+        return Ok(());
+    }
+
+    for i in 1..chain.len() {
+        let prev = &chain[i - 1];
+        let curr = &chain[i];
+
+        let prev_final = prev
+            .log_metadata
+            .as_ref()
+            .map(|m| m.final_address)
+            .unwrap_or(Address::INVALID);
+
+        let curr_start = curr
+            .log_metadata
+            .as_ref()
+            .map(|m| m.start_logical_address)
+            .unwrap_or(Address::INVALID);
+
+        // For incremental checkpoints, start should equal previous final
+        if curr.is_incremental() && curr_start != prev_final {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Incremental chain break at {}: start_logical_address={} != prev_final_address={}",
+                    curr.token, curr_start, prev_final
+                ),
+            ));
+        }
+
+        // Validate delta metadata if present
+        if let Some(delta_meta) = &curr.delta_metadata {
+            if delta_meta.prev_snapshot_final_address != prev_final.control() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Delta metadata mismatch at {}: prev_snapshot_final_address={} != prev_final={}",
+                        curr.token,
+                        delta_meta.prev_snapshot_final_address,
+                        prev_final.control()
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Build the complete incremental checkpoint chain for recovery
 ///
 /// Given an incremental checkpoint, this function finds all checkpoints in the chain
