@@ -481,6 +481,7 @@ where
                     if barrier_complete {
                         // Capture a coherent view for this checkpoint.
                         let session_states = self.get_session_states();
+                        // SAFETY: UnsafeCell access for read-only hlog metadata.
                         let (begin_address, final_address) = unsafe {
                             let hlog = &*self.hlog.get();
                             (hlog.get_begin_address(), hlog.get_tail_address())
@@ -637,7 +638,9 @@ where
         let snapshot_path = dir.join("log.snapshot");
 
         let write_log_meta = |use_snapshot_file: bool| -> io::Result<LogMetadata> {
+            // SAFETY: UnsafeCell access for read-only hlog metadata during checkpoint.
             let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
+            // SAFETY: UnsafeCell access for checkpoint metadata generation.
             let mut meta = unsafe {
                 (*self.hlog.get()).checkpoint_metadata_at(
                     token,
@@ -673,6 +676,7 @@ where
                     return Ok(());
                 }
 
+                // SAFETY: UnsafeCell access for snapshot write operation.
                 unsafe {
                     (*self.hlog.get()).write_log_snapshot(&snapshot_path, begin, final_address)?;
                 }
@@ -688,6 +692,7 @@ where
             LogCheckpointBackend::FoldOver => {
                 // Fold-over uses the main log device: ensure the prefix is flushed to the device.
                 // NOTE: flush_until() now calls device.flush() for durability (Workstream C).
+                // SAFETY: UnsafeCell access for flush operation.
                 unsafe {
                     (*self.hlog.get()).flush_until(final_address)?;
                 }
@@ -731,6 +736,7 @@ where
 
         let session_states = self.get_session_states();
 
+        // SAFETY: UnsafeCell access for checkpoint metadata generation.
         let mut metadata = unsafe { (*self.hlog.get()).checkpoint_metadata(token, version, true) };
         metadata.session_states = session_states;
         metadata.num_threads = metadata.session_states.len() as u32;
@@ -775,6 +781,7 @@ where
         let prev_final_address = prev_state.log_metadata.final_address;
         drop(prev_snapshot);
 
+        // SAFETY: UnsafeCell access for read-only hlog metadata.
         let flushed_address = unsafe { (*self.hlog.get()).get_flushed_until_address() };
 
         let delta_path = delta_log_path(&dir, 0);
@@ -782,6 +789,7 @@ where
         let delta_config = DeltaLogConfig::new(22); // 4MB pages
         let delta_log = DeltaLog::new(delta_device.clone(), delta_config, 0);
 
+        // SAFETY: UnsafeCell access for delta flush operation.
         let num_entries = unsafe {
             (*self.hlog.get()).flush_delta_to_device(
                 flushed_address,
@@ -813,6 +821,7 @@ where
         };
         delta_meta.write_to_file(&delta_meta_path)?;
 
+        // SAFETY: UnsafeCell access for checkpoint metadata generation.
         let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
         let mut meta = unsafe {
             (*self.hlog.get()).checkpoint_metadata_at(
