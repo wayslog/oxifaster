@@ -68,13 +68,18 @@ impl<D: StorageDevice> InternalStore<D> {
     }
 
     /// Get mutable reference to hlog (unsafe)
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive access, typically via epoch protection.
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
+        // SAFETY: Caller guarantees exclusive access via epoch protection.
         unsafe { &mut *self.hlog.get() }
     }
 
     /// Get immutable reference to hlog
     pub(super) fn hlog(&self) -> &PersistentMemoryMalloc<D> {
+        // SAFETY: UnsafeCell access is safe for shared reads when no concurrent writes.
         unsafe { &*self.hlog.get() }
     }
 
