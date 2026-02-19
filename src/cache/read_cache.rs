@@ -148,12 +148,14 @@ where
     fn record_at(&self, buffer: &[u64], address: Address) -> Option<*const u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        // SAFETY: offset is bounds-checked by record_offset, buffer is valid.
         Some(unsafe { Self::buffer_as_ptr(buffer).add(offset) })
     }
 
     fn record_at_mut(&self, buffer: &mut [u64], address: Address) -> Option<*mut u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        // SAFETY: offset is bounds-checked by record_offset, buffer is valid.
         Some(unsafe { Self::buffer_as_mut_ptr(buffer).add(offset) })
     }
 
