@@ -76,6 +76,7 @@ impl InternalHashTable {
             .expect("Invalid layout");
 
             // Allocate zeroed memory
+            // SAFETY: layout is valid (size > 0, alignment is power of 2 and >= CACHE_LINE_BYTES).
             let ptr = unsafe { alloc_zeroed(layout) };
             if ptr.is_null() {
                 return Status::OutOfMemory;
@@ -83,6 +84,7 @@ impl InternalHashTable {
             self.buckets = NonNull::new(ptr as *mut HashBucket);
         } else if let Some(ptr) = self.buckets {
             // Clear existing buckets
+            // SAFETY: ptr points to valid allocation of new_size HashBuckets.
             unsafe {
                 std::ptr::write_bytes(ptr.as_ptr(), 0, new_size as usize);
             }
@@ -108,6 +110,7 @@ impl InternalHashTable {
                     CACHE_LINE_BYTES,
                 )
                 .expect("Invalid layout");
+                // SAFETY: ptr was allocated via alloc_zeroed with this exact layout.
                 unsafe {
                     dealloc(ptr.as_ptr() as *mut u8, layout);
                 }
