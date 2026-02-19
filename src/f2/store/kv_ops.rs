@@ -59,7 +59,7 @@ where
         let max_size = self.hot_store.max_hlog_size.load(Ordering::Acquire);
         while self.hot_store.size() >= max_size {
             self.refresh();
-            std::hint::spin_loop();
+            std::thread::yield_now();
         }
 
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));

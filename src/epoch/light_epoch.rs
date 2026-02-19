@@ -70,7 +70,7 @@ fn try_allocate_thread_id() -> Option<ThreadIdGuard> {
         return Some(make_guard(id));
     }
 
-    match NEXT_THREAD_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+    match NEXT_THREAD_ID.fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
         if next < MAX_THREADS {
             Some(next + 1)
         } else {
