@@ -48,22 +48,21 @@ impl InternalHashTable {
 
     /// Initialize the hash table with the specified size
     ///
-    /// # Panics
-    /// Panics if size is not a power of two or exceeds i32::MAX
+    /// Returns `Status::InvalidArgument` if size is not a power of two,
+    /// exceeds `i32::MAX`, or alignment is invalid.
     pub fn initialize(&mut self, new_size: u64, alignment: usize) -> Status {
-        assert!(new_size < i32::MAX as u64, "Hash table size too large");
-        assert!(
-            is_power_of_two(new_size),
-            "Hash table size must be power of 2"
-        );
-        assert!(
-            is_power_of_two(alignment as u64),
-            "Alignment must be power of 2"
-        );
-        assert!(
-            alignment >= CACHE_LINE_BYTES,
-            "Alignment must be >= cache line size"
-        );
+        if new_size >= i32::MAX as u64 {
+            return Status::InvalidArgument;
+        }
+        if !is_power_of_two(new_size) {
+            return Status::InvalidArgument;
+        }
+        if !is_power_of_two(alignment as u64) {
+            return Status::InvalidArgument;
+        }
+        if alignment < CACHE_LINE_BYTES {
+            return Status::InvalidArgument;
+        }
 
         if self.size != new_size {
             // Free existing buckets if any
@@ -343,10 +342,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_hash_table_non_power_of_two() {
         let mut table = InternalHashTable::new();
-        table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
+        let result = table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
+        assert_eq!(result, Status::InvalidArgument);
     }
 
     #[test]

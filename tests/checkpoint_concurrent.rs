@@ -498,10 +498,11 @@ fn test_checkpoint_cpr_prefix_guarantee() {
         count_before, count_after
     );
 
-    // Most keys written before checkpoint should be present
-    assert!(
-        count_before > 4500,
-        "Most keys before checkpoint should be recovered"
+    // CPR prefix guarantee: all operations completed before the checkpoint
+    // was taken, so every key must be present after recovery.
+    assert_eq!(
+        count_before, 5000,
+        "All keys written before checkpoint must be recovered (prefix guarantee)"
     );
 
     // Keys after checkpoint may or may not be present (that's the prefix guarantee)

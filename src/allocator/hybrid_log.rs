@@ -41,16 +41,31 @@ pub struct HybridLogConfig {
 }
 
 impl HybridLogConfig {
-    /// Create a new configuration
+    /// Create a new configuration with default mutable fraction (0.25).
     pub fn new(memory_size: u64, page_size_bits: u32) -> Self {
+        Self::with_mutable_fraction(memory_size, page_size_bits, 0.25)
+    }
+
+    /// Create a new configuration with an explicit mutable fraction.
+    ///
+    /// `mutable_fraction` is clamped to `[0.0, 1.0]` and determines the
+    /// proportion of in-memory pages that belong to the mutable region.
+    pub fn with_mutable_fraction(
+        memory_size: u64,
+        page_size_bits: u32,
+        mutable_fraction: f64,
+    ) -> Self {
         let page_size = 1 << page_size_bits;
         let memory_pages = (memory_size / page_size as u64) as u32;
+        let fraction = mutable_fraction.clamp(0.0, 1.0);
+        let mutable_pages = ((memory_pages as f64) * fraction).round() as u32;
+        let mutable_pages = mutable_pages.max(1).min(memory_pages);
 
         Self {
             page_size,
             memory_pages,
-            mutable_pages: memory_pages / 4,
-            segment_size: 1 << 30, // 1 GB segments
+            mutable_pages,
+            segment_size: 1 << 30,
         }
     }
 }

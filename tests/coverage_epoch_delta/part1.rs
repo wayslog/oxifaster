@@ -91,7 +91,7 @@ fn cov_light_epoch_bump_current_epoch_with_action_multithread() {
         let ep = epoch.clone();
         let ctr = counter.clone();
         let handle = std::thread::spawn(move || {
-            let tid = get_thread_id();
+            let tid = get_thread_id().unwrap();
             for _ in 0..10 {
                 let c = ctr.clone();
                 ep.bump_current_epoch_with_action(move || {
@@ -115,7 +115,7 @@ fn cov_light_epoch_bump_current_epoch_with_action_multithread() {
     epoch.compute_new_safe_to_reclaim_epoch(epoch.current_epoch.load(Ordering::Acquire));
 
     // Trigger drain on a thread.
-    let tid = get_thread_id();
+    let tid = get_thread_id().unwrap();
     epoch.protect_and_drain(tid);
     epoch.unprotect(tid);
 
@@ -248,16 +248,16 @@ fn cov_epoch_guard_nested() {
 #[test]
 fn cov_get_thread_id_stable() {
     // Calling get_thread_id multiple times on the same thread should return the same id.
-    let id1 = get_thread_id();
-    let id2 = get_thread_id();
+    let id1 = get_thread_id().unwrap();
+    let id2 = get_thread_id().unwrap();
     assert_eq!(id1, id2);
 }
 
 #[test]
 fn cov_get_thread_id_different_threads() {
-    let id_main = get_thread_id();
+    let id_main = get_thread_id().unwrap();
 
-    let handle = std::thread::spawn(get_thread_id);
+    let handle = std::thread::spawn(|| get_thread_id().unwrap());
     let id_other = handle.join().unwrap();
 
     // Both should be valid thread IDs.
@@ -267,7 +267,7 @@ fn cov_get_thread_id_different_threads() {
 
 #[test]
 fn cov_get_thread_tag_returns_value() {
-    let _id = get_thread_id();
+    let _id = get_thread_id().unwrap();
     let tag = get_thread_tag();
     // Tag is a generation counter; for the first use of this slot it should be 0.
     // For reused slots it may be > 0. We just verify it doesn't panic.
@@ -280,7 +280,7 @@ fn cov_get_thread_tag_changes_on_reuse() {
     let mut seen_tags = std::collections::HashMap::new();
     for _ in 0..10 {
         let (id, tag) = std::thread::spawn(|| {
-            let id = get_thread_id();
+            let id = get_thread_id().unwrap();
             let tag = get_thread_tag();
             (id, tag)
         })

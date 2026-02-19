@@ -299,8 +299,11 @@ where
         let index_config = MemHashIndexConfig::new(config.table_size);
         hash_index.initialize(&index_config);
 
-        // Initialize hybrid log
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
 
         // Initialize compactor
@@ -1636,6 +1639,8 @@ where
                                         .record_latency(start.elapsed());
                                 }
                                 return Status::Ok;
+                            } else {
+                                return Status::Aborted;
                             }
                         }
                     }

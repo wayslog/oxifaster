@@ -216,6 +216,15 @@ where
 
         // Get the record
         let buffer = self.buffer.read().ok()?;
+
+        // Re-check safe_head_address after acquiring the lock to prevent TOCTOU:
+        // eviction may have advanced safe_head_address between the first check and
+        // the lock acquisition, which would let us read already-evicted data.
+        let safe_head_recheck = self.safe_head_address.load(Ordering::Acquire);
+        if rc_address.control() < safe_head_recheck {
+            return self.miss();
+        }
+
         let buffer_bytes_len = Self::buffer_bytes_len(&buffer);
         let record_ptr = self.record_at(&buffer, rc_address)?;
         let offset = self.record_offset(rc_address.control(), buffer_bytes_len)?;
@@ -359,7 +368,14 @@ where
         let mem_size_usize = usize::try_from(mem_size).map_err(|_| Status::ResourceExhausted)?;
         let size_usize = usize::try_from(size).map_err(|_| Status::ResourceExhausted)?;
 
+        const MAX_ALLOCATE_RETRIES: u32 = 512;
+        let mut retries = 0u32;
+
         loop {
+            if retries >= MAX_ALLOCATE_RETRIES {
+                return Err(Status::ResourceExhausted);
+            }
+            retries += 1;
             let tail = self.tail_address.load(Ordering::Acquire);
             let new_tail = tail + size;
 

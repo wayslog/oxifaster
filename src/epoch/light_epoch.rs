@@ -89,24 +89,21 @@ thread_local! {
     static THREAD_ID: RefCell<Option<ThreadIdGuard>> = const { RefCell::new(None) };
 }
 
+use crate::status::Status;
+
 /// Get the current thread's ID for epoch protection
 ///
 /// This returns a stable ID for the current thread that can be used
 /// as an index into the epoch table. The ID is allocated on first call
 /// and remains constant for the thread's lifetime.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if more than `MAX_THREADS` threads concurrently use the library.
+/// Returns `Status::TooManyThreads` if more than `MAX_THREADS` threads
+/// concurrently use the library.
 #[inline]
-pub fn get_thread_id() -> usize {
-    try_get_thread_id().unwrap_or_else(|| {
-        panic!(
-            "LightEpoch thread_id exhausted: MAX_THREADS={MAX_THREADS}. \
-             Too many threads are concurrently using oxifaster. \
-             Reduce thread concurrency or increase `oxifaster::constants::MAX_THREADS`."
-        )
-    })
+pub fn get_thread_id() -> Result<usize, Status> {
+    try_get_thread_id().ok_or(Status::TooManyThreads)
 }
 
 /// Try to get the current thread's ID for epoch protection.
@@ -726,7 +723,7 @@ mod tests {
 
         for _ in 0..(MAX_THREADS * 2) {
             let (id, tag) = std::thread::spawn(|| {
-                let id = get_thread_id();
+                let id = get_thread_id().unwrap();
                 let tag = get_thread_tag();
                 (id, tag)
             })
@@ -745,7 +742,7 @@ mod tests {
         // This would previously panic after MAX_THREADS spawns due to monotonically increasing IDs.
         for _ in 0..(MAX_THREADS * 2) {
             std::thread::spawn(|| {
-                let id = get_thread_id();
+                let id = get_thread_id().unwrap();
                 assert!(id < MAX_THREADS);
             })
             .join()

@@ -996,7 +996,11 @@ where
             .map_err(|err| record_failure(err, "recover_index"))?;
         recovery_state.index_recovered();
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
         hlog.recover(&cp_dir, Some(&log_meta))
             .map_err(|err| record_failure(err, "recover_log"))?;
@@ -1191,7 +1195,11 @@ where
         let mut hash_index = MemHashIndex::new();
         hash_index.recover(&cp_dir, Some(&index_meta))?;
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
 
         let system_state = AtomicSystemState::new(SystemState::rest(index_meta.version));
@@ -1253,7 +1261,11 @@ where
 
         let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
         hlog.recover(&cp_dir, Some(&log_meta))?;
 

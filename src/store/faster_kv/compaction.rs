@@ -11,6 +11,7 @@ use crate::compaction::{
     CompactionResult, CompactionStats,
 };
 use crate::device::StorageDevice;
+use crate::epoch::try_get_thread_id;
 use crate::index::KeyHash;
 use crate::record::RecordInfo;
 use crate::status::Status;
@@ -26,11 +27,11 @@ where
 {
     /// Simple compaction: shift log begin address and garbage collect index
     pub fn compact(&self, until_address: Address) -> Status {
-        // `compact` reclaims space by advancing `begin_address`, not `head_address`.
-        // `head_address` represents the on-disk boundary; advancing it affects the `Pending`
-        // read-back behavior (see `flush_and_shift_head`).
-        //
-        // To ensure the reclaimed range is durable (e.g. for diagnostics/read-back), flush first.
+        let state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
+        if state.is_action_in_progress() {
+            return Status::Aborted;
+        }
+
         if let Err(_e) = unsafe { self.hlog().flush_until(until_address) } {
             return Status::Corruption;
         }
@@ -52,6 +53,11 @@ where
     /// when `address < head_address`, `read()` returns `Status::Pending`. The caller drives I/O
     /// completion via `complete_pending()` and then retries `read()` to succeed.
     pub fn flush_and_shift_head(&self, new_head: Address) -> Status {
+        let state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
+        if state.is_action_in_progress() {
+            return Status::Aborted;
+        }
+
         if let Err(_e) = unsafe { self.hlog().flush_until(new_head) } {
             return Status::Corruption;
         }
@@ -92,10 +98,27 @@ where
     /// # Returns
     /// CompactionResult with status and statistics
     pub fn log_compact_until(&self, target_address: Option<Address>) -> CompactionResult {
+        // Reject compaction while a checkpoint is in progress to avoid
+        // shifting begin/head addresses under the checkpoint state machine.
+        let state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
+        if state.is_action_in_progress() {
+            return CompactionResult::failure(Status::Aborted);
+        }
+
         // Try to start compaction
         if let Err(status) = self.compactor.try_start() {
             return CompactionResult::failure(status);
         }
+
+        // Acquire epoch protection for the compaction thread
+        let thread_id = match try_get_thread_id() {
+            Some(tid) => tid,
+            None => {
+                self.compactor.complete();
+                return CompactionResult::failure(Status::TooManyThreads);
+            }
+        };
+        self.epoch.reentrant_protect(thread_id);
 
         if self.stats_collector.is_enabled() {
             self.stats_collector
@@ -300,6 +323,9 @@ where
             self.compactor.complete();
             CompactionResult::success(new_begin_address, stats)
         })();
+
+        // Release epoch protection before stats reporting
+        self.epoch.reentrant_unprotect(thread_id);
 
         if self.stats_collector.is_enabled() {
             if result.status == Status::Ok {
