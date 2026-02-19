@@ -176,7 +176,8 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         if tail.offset() == 0 {
             if tail_page == 0 {
                 writer.write_all(&u64::MAX.to_le_bytes())?;
-                writer.flush()?;
+                let file = writer.into_inner()?;
+                file.sync_all()?;
                 return rename_tmp_overwrite(&tmp_path, path);
             }
             tail_page = tail_page.saturating_sub(1);
@@ -191,7 +192,8 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         writer.write_all(&u64::MAX.to_le_bytes())?;
 
-        writer.flush()?;
+        let file = writer.into_inner()?;
+        file.sync_all()?;
         rename_tmp_overwrite(&tmp_path, path)
     }
 

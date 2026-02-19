@@ -33,8 +33,15 @@ use super::cpr::{
 use super::{CheckpointKind, FasterKv, FasterKvConfig, ReadCacheOps};
 
 fn fsync_dir_best_effort(dir: &Path) {
-    if let Ok(file) = std::fs::File::open(dir) {
-        let _ = file.sync_all();
+    match std::fs::File::open(dir) {
+        Ok(file) => {
+            if let Err(e) = file.sync_all() {
+                tracing::warn!(dir = %dir.display(), error = %e, "directory fsync failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "failed to open directory for fsync");
+        }
     }
 }
 
@@ -785,6 +792,11 @@ where
             )?
         };
 
+        // Ensure delta log data is durable before writing metadata
+        if durability == CheckpointDurability::FsyncOnCheckpoint {
+            std::fs::File::open(&delta_path).and_then(|f| f.sync_all())?;
+        }
+
         let delta_meta_path = delta_metadata_path(&dir);
         let delta_meta = DeltaLogMetadata {
             token: token.to_string(),
@@ -822,7 +834,6 @@ where
         meta.write_to_file(&meta_path)?;
 
         if durability == CheckpointDurability::FsyncOnCheckpoint {
-            std::fs::File::open(&delta_path).and_then(|f| f.sync_all())?;
             std::fs::File::open(&delta_meta_path).and_then(|f| f.sync_all())?;
             std::fs::File::open(&meta_path).and_then(|f| f.sync_all())?;
             fsync_dir_best_effort(&dir);

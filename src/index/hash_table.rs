@@ -116,36 +116,76 @@ impl InternalHashTable {
         self.size = 0;
     }
 
-    /// Get the bucket for the given hash
+    /// Get the bucket for the given hash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized.
     #[inline]
     pub fn bucket(&self, hash: KeyHash) -> &HashBucket {
-        debug_assert!(self.buckets.is_some());
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket called on uninitialized table");
         let index = hash.hash_table_index(self.size);
-        unsafe { &*self.buckets.unwrap().as_ptr().add(index) }
+        // SAFETY: index is computed via hash_table_index which masks to valid range,
+        // and buckets points to a valid allocation of `self.size` buckets.
+        unsafe { &*buckets.as_ptr().add(index) }
     }
 
-    /// Get a mutable bucket for the given hash
+    /// Get a mutable bucket for the given hash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized.
     #[inline]
     pub fn bucket_mut(&mut self, hash: KeyHash) -> &mut HashBucket {
-        debug_assert!(self.buckets.is_some());
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_mut called on uninitialized table");
         let index = hash.hash_table_index(self.size);
-        unsafe { &mut *self.buckets.unwrap().as_ptr().add(index) }
+        // SAFETY: index is computed via hash_table_index which masks to valid range,
+        // and buckets points to a valid allocation of `self.size` buckets.
+        unsafe { &mut *buckets.as_ptr().add(index) }
     }
 
-    /// Get the bucket at a specific index
+    /// Get the bucket at a specific index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized or index is out of bounds.
     #[inline]
     pub fn bucket_at(&self, index: u64) -> &HashBucket {
-        debug_assert!(index < self.size);
-        debug_assert!(self.buckets.is_some());
-        unsafe { &*self.buckets.unwrap().as_ptr().add(index as usize) }
+        assert!(
+            index < self.size,
+            "HashTable::bucket_at index {} out of bounds (size {})",
+            index,
+            self.size
+        );
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_at called on uninitialized table");
+        // SAFETY: index is bounds-checked above, buckets points to valid allocation.
+        unsafe { &*buckets.as_ptr().add(index as usize) }
     }
 
-    /// Get a mutable bucket at a specific index
+    /// Get a mutable bucket at a specific index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized or index is out of bounds.
     #[inline]
     pub fn bucket_at_mut(&mut self, index: u64) -> &mut HashBucket {
-        debug_assert!(index < self.size);
-        debug_assert!(self.buckets.is_some());
-        unsafe { &mut *self.buckets.unwrap().as_ptr().add(index as usize) }
+        assert!(
+            index < self.size,
+            "HashTable::bucket_at_mut index {} out of bounds (size {})",
+            index,
+            self.size
+        );
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_at_mut called on uninitialized table");
+        // SAFETY: index is bounds-checked above, buckets points to valid allocation.
+        unsafe { &mut *buckets.as_ptr().add(index as usize) }
     }
 
     /// Get the number of buckets
