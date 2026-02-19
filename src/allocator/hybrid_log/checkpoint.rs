@@ -281,6 +281,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         let device = self.device.clone();
         let fut = async move {
             for (page, offset, ptr, len) in reads {
+                // SAFETY: ptr/len come from AlignedBuffer which remains valid for the async block's lifetime.
                 let dst = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
                 let n = device.read(offset, dst).await?;
                 if n != len {

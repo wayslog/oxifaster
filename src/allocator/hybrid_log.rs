@@ -440,6 +440,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page(page) {
+            // SAFETY: offset is bounds-checked above, buf is valid for page_size bytes.
             let ptr = unsafe { buf.as_ptr().add(offset) as *mut u8 };
             NonNull::new(ptr)
         } else {
@@ -475,6 +476,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page_mut(page) {
+            // SAFETY: offset is bounds-checked above, buf is valid for page_size bytes.
             let ptr = unsafe { buf.as_mut_ptr().add(offset) };
             NonNull::new(ptr)
         } else {
