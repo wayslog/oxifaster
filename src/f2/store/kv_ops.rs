@@ -170,14 +170,17 @@ where
         // allocate and initialize the record (key/value) once, then only update
         // `header.previous_address` and retry updating the index.
         let record_size = Record::<K, V>::size();
+        // SAFETY: Allocation is protected by epoch.
         let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
 
+        // SAFETY: We just allocated this space, access is epoch-protected.
         let record_ptr = unsafe { store.hlog_mut().get_mut(address) };
         let Some(ptr) = record_ptr else {
             return Err(Status::OutOfMemory);
         };
 
         let record = ptr.as_ptr() as *mut Record<K, V>;
+        // SAFETY: ptr points to freshly allocated, properly sized memory.
         unsafe {
             Record::<K, V>::write_key(ptr.as_ptr(), key);
             Record::<K, V>::write_value(ptr.as_ptr(), value);
@@ -187,6 +190,7 @@ where
             let result = store.hash_index.find_or_create_entry(hash);
             let old_address = result.entry.address().readcache_address();
 
+            // SAFETY: record points to valid allocated memory.
             unsafe {
                 let header = RecordInfo::new(
                     old_address,
