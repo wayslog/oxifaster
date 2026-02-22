@@ -476,10 +476,16 @@ fn validate_required_files(checkpoint_dir: &Path, required_files: &[&str]) -> io
     Ok(())
 }
 
-/// Validate that a checkpoint directory contains all required files
+/// Validate that a checkpoint directory contains all required files and
+/// that metadata checksums are valid.
 pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
     validate_required_files(checkpoint_dir, &["index.meta", "index.dat", "log.meta"])?;
 
+    // Read and deserialize index metadata (triggers checksum verification)
+    let index_meta_path = checkpoint_dir.join("index.meta");
+    let _index_meta = crate::checkpoint::IndexMetadata::read_from_file(&index_meta_path)?;
+
+    // Read and deserialize log metadata (triggers checksum verification)
     let log_meta_path = checkpoint_dir.join("log.meta");
     let log_meta = crate::checkpoint::LogMetadata::read_from_file(&log_meta_path)?;
     if log_meta.use_snapshot_file {
@@ -490,8 +496,17 @@ pub fn validate_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
 }
 
 /// Validate that a checkpoint directory contains all required files for an incremental checkpoint
+/// and that all metadata checksums are valid.
 pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> {
     validate_required_files(checkpoint_dir, &["index.meta", "index.dat", "log.meta"])?;
+
+    // Read and deserialize index metadata (triggers checksum verification)
+    let index_meta_path = checkpoint_dir.join("index.meta");
+    let _index_meta = crate::checkpoint::IndexMetadata::read_from_file(&index_meta_path)?;
+
+    // Read and deserialize log metadata (triggers checksum verification)
+    let log_meta_path = checkpoint_dir.join("log.meta");
+    let _log_meta = crate::checkpoint::LogMetadata::read_from_file(&log_meta_path)?;
 
     // Check for delta log
     let delta_path = delta_log_path(checkpoint_dir, 0);
@@ -502,7 +517,7 @@ pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> 
         ));
     }
 
-    // Check for delta metadata
+    // Check for delta metadata and verify its checksum
     let delta_meta_path = delta_metadata_path(checkpoint_dir);
     if !delta_meta_path.exists() {
         return Err(io::Error::new(
@@ -510,6 +525,7 @@ pub fn validate_incremental_checkpoint(checkpoint_dir: &Path) -> io::Result<()> 
             "Missing delta metadata file",
         ));
     }
+    let _delta_meta = DeltaLogMetadata::read_from_file(&delta_meta_path)?;
 
     Ok(())
 }
