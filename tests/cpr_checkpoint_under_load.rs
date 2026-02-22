@@ -22,7 +22,7 @@ fn create_test_store(path: &std::path::Path) -> Arc<FasterKv<u64, u64, FileSyste
         page_size_bits: 14,       // 16 KiB
         mutable_fraction: 0.9,
     };
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn test_foldover_checkpoint_under_load_recovery_prefix() {
 
     let token = {
         let device = FileSystemDisk::single_file(&data_path).unwrap();
-        let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device));
+        let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device).unwrap());
         store.set_log_checkpoint_backend(LogCheckpointBackend::FoldOver);
         store.set_checkpoint_durability(CheckpointDurability::FsyncOnCheckpoint);
 

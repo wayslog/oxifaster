@@ -24,7 +24,7 @@ fn test_checkpoint_crash_durability() {
     {
         let config = FasterKvConfig::default();
         let device = FileSystemDisk::single_file(&db_path).unwrap();
-        let store = Arc::new(FasterKv::new(config, device));
+        let store = Arc::new(FasterKv::new(config, device).unwrap());
 
         let mut session = store.start_session().unwrap();
 
@@ -68,7 +68,7 @@ fn test_concurrent_write_checkpoint_crash() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store = Arc::new(FasterKv::new(config.clone(), device));
+    let store = Arc::new(FasterKv::new(config.clone(), device).unwrap());
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let store_clone = Arc::clone(&store);
@@ -127,7 +127,7 @@ fn test_flush_device_durability() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store = Arc::new(FasterKv::new(config.clone(), device));
+    let store = Arc::new(FasterKv::new(config.clone(), device).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -173,7 +173,7 @@ fn test_checkpoint_without_writes() {
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
     let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config.clone(), device));
+        Arc::new(FasterKv::new(config.clone(), device).unwrap());
 
     // Checkpoint empty store
     let token = store.checkpoint(&checkpoint_dir).unwrap();
@@ -200,7 +200,7 @@ fn test_multiple_checkpoints_durability() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store = Arc::new(FasterKv::new(config.clone(), device));
+    let store = Arc::new(FasterKv::new(config.clone(), device).unwrap());
 
     let mut session = store.start_session().unwrap();
 

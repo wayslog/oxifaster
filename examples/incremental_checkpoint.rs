@@ -50,7 +50,7 @@ fn main() -> std::io::Result<()> {
     };
 
     let device = FileSystemDisk::single_file(&data_path)?;
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device).unwrap());
 
     // Seed initial data.
     let mut session = expect_ok("start_session", store.start_session());

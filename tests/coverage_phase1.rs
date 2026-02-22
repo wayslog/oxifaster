@@ -476,7 +476,7 @@ fn test_mem_hash_index_config_default() {
 #[test]
 fn test_mem_hash_index_config_new() {
     use oxifaster::index::MemHashIndexConfig;
-    let config = MemHashIndexConfig::new(4096);
+    let config = MemHashIndexConfig::new(4096).unwrap();
     assert_eq!(config.table_size, 4096);
 }
 

@@ -1,7 +1,7 @@
 #[test]
 fn test_store_creation_default_config() {
     let config = FasterKvConfig::default();
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
     assert!(!store.has_read_cache());
     // Stats are disabled by default (StatsConfig default has enabled: false)
     assert!(!store.is_stats_enabled());
@@ -9,8 +9,8 @@ fn test_store_creation_default_config() {
 
 #[test]
 fn test_store_creation_custom_config() {
-    let config = FasterKvConfig::new(2048, 1 << 22);
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let config = FasterKvConfig::new(2048, 1 << 24);
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
     let state = store.system_state();
     assert!(state.is_rest());
     assert_eq!(state.version, 0);

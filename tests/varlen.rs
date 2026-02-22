@@ -253,7 +253,7 @@ fn create_test_store() -> Arc<FasterKv<Utf8, Utf8, NullDisk>> {
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 #[test]
@@ -330,10 +330,7 @@ fn test_fasterkv_varlen_raw_bytes() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store = Arc::new(FasterKv::<RawBytes, RawBytes, _>::new(
-        config,
-        NullDisk::new(),
-    ));
+    let store = Arc::new(FasterKv::<RawBytes, RawBytes, _>::new(config, NullDisk::new()).unwrap());
     let mut session = store.start_session().unwrap();
 
     let key = RawBytes::from(vec![0, 1, 2, 3, 4]);

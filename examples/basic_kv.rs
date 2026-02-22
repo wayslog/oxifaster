@@ -24,7 +24,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     };
 
     // 3. 创建 FasterKV 存储
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
     println!("存储创建成功!");
 
     // 4. 启动会话

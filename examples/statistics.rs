@@ -50,7 +50,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device).unwrap());
 
     // 插入数据
     {

@@ -26,12 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let store = match cache_config {
-        Some(cache) => Arc::new(FasterKv::with_read_cache(store_config, device, cache)),
-        None => Arc::new(FasterKv::with_compaction_config(
-            store_config,
-            device,
-            compaction_config,
-        )),
+        Some(cache) => Arc::new(FasterKv::with_read_cache(store_config, device, cache).unwrap()),
+        None => Arc::new(
+            FasterKv::with_compaction_config(store_config, device, compaction_config).unwrap(),
+        ),
     };
 
     let mut session = store

@@ -26,7 +26,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 fn create_store_with_small_pages() -> Arc<FasterKv<u64, u64, NullDisk>> {
@@ -37,7 +37,7 @@ fn create_store_with_small_pages() -> Arc<FasterKv<u64, u64, NullDisk>> {
         mutable_fraction: 0.5,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 // ============ compact() tests ============

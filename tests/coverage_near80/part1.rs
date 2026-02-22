@@ -1,7 +1,7 @@
 #[test]
 fn cov_index_grow_with_rehash_empty() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     // Grow with a rehash function that never finds records
@@ -23,7 +23,7 @@ fn cov_index_grow_external_not_in_progress() {
 #[test]
 fn cov_index_complete_grow_not_in_progress() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     // complete_grow when no grow is in progress should fail
@@ -34,7 +34,7 @@ fn cov_index_complete_grow_not_in_progress() {
 #[test]
 fn cov_index_complete_grow_chunks_remaining() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     // Start grow but don't migrate any chunks
@@ -49,7 +49,7 @@ fn cov_index_complete_grow_chunks_remaining() {
 fn cov_index_grow_custom_growth_factor() {
     let grow_config = GrowConfig::new().with_growth_factor(4);
     let mut index = MemHashIndex::with_grow_config(grow_config);
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
 
     let result = index.grow_with_rehash(|_| None);
@@ -62,7 +62,7 @@ fn cov_index_grow_custom_growth_factor() {
 #[allow(deprecated)]
 fn cov_index_deprecated_grow() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     // Test the deprecated grow() method
@@ -370,7 +370,7 @@ fn cov_faster_kv_head_address() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     // Insert some data
     let mut session = store.start_session().unwrap();
@@ -389,7 +389,7 @@ fn cov_faster_kv_conditional_insert_exists() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -410,7 +410,7 @@ fn cov_faster_kv_rmw_not_found() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -430,7 +430,7 @@ fn cov_faster_kv_rmw_abort() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -444,7 +444,7 @@ fn cov_faster_kv_rmw_abort() {
 #[test]
 fn cov_faster_kv_checkpoint_durability_settings() {
     let config = FasterKvConfig::default();
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     // Test log checkpoint backend settings
     let backend = store.log_checkpoint_backend();
@@ -463,7 +463,7 @@ fn cov_faster_kv_read_not_found() {
         page_size_bits: 12,
         mutable_fraction: 0.5,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -487,7 +487,7 @@ fn cov_hybrid_log_through_store() {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
+    let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 

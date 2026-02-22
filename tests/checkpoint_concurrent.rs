@@ -22,7 +22,8 @@ fn test_concurrent_checkpoint_under_write_load() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     let stop = Arc::new(AtomicBool::new(false));
     let checkpoint_taken = Arc::new(AtomicBool::new(false));
@@ -128,7 +129,8 @@ fn test_multiple_concurrent_checkpoints() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -240,7 +242,8 @@ fn test_checkpoint_with_concurrent_reads() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Write initial data
     {
@@ -343,7 +346,8 @@ fn test_checkpoint_thread_coordination() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     let checkpoint_start = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -435,7 +439,8 @@ fn test_checkpoint_cpr_prefix_guarantee() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Write data with serial number tracking
     {

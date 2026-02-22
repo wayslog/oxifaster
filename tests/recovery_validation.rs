@@ -18,7 +18,8 @@ fn test_recovery_validates_serial_numbers() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create a session and perform operations
     let mut session = store.start_session().unwrap();
@@ -86,7 +87,8 @@ fn test_recovery_with_session_continuation() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create session and save its state
     let session_state = {
