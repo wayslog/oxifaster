@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -415,6 +415,8 @@ where
         cleanup.clear_cpr = true;
 
         let mut driver_ctx = ThreadContext::new(driver_thread_id);
+        let timeout = self.wait_pending_timeout();
+        let mut wait_pending_started: Option<Instant> = None;
 
         loop {
             let current_state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
@@ -430,6 +432,25 @@ where
                 .unwrap_or(false);
             if !is_driver {
                 break;
+            }
+
+            if current_state.phase == Phase::WaitPending {
+                let started = wait_pending_started.get_or_insert_with(Instant::now);
+                if started.elapsed() >= timeout {
+                    tracing::error!(
+                        timeout_ms = timeout.as_millis(),
+                        "Checkpoint WaitPending phase timed out, aborting checkpoint"
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "Checkpoint WaitPending phase timed out after {}ms",
+                            timeout.as_millis()
+                        ),
+                    ));
+                }
+            } else {
+                wait_pending_started = None;
             }
 
             // Drive current phase (driver thread only).
@@ -518,6 +539,10 @@ where
                     let _ = self.cpr.with_active_mut(|active| {
                         active.set_phase(current_state.phase, current_state.version);
                     });
+
+                    // Help drain pending I/O completions for all participant threads.
+                    self.process_pending_io_completions();
+
                     let barrier_complete = self
                         .cpr
                         .with_active(|active| active.barrier_complete())
@@ -1030,8 +1055,18 @@ where
 
         let compactor = Compactor::with_config(compaction_config);
 
-        let read_cache: Option<Arc<dyn ReadCacheOps<K, V>>> = cache_config
-            .map(|cfg| Arc::new(ReadCache::<K, V>::new(cfg)) as Arc<dyn ReadCacheOps<K, V>>);
+        let read_cache: Option<Arc<dyn ReadCacheOps<K, V>>> = match cache_config {
+            Some(cfg) => Some(Arc::new(ReadCache::<K, V>::try_new(cfg).map_err(|status| {
+                record_failure(
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid read cache config: {status}"),
+                    ),
+                    "validate_read_cache_config",
+                )
+            })?) as Arc<dyn ReadCacheOps<K, V>>),
+            None => None,
+        };
         let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         let mut session_registry = HashMap::new();
@@ -1073,6 +1108,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -1250,6 +1286,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -1276,8 +1313,15 @@ where
         let epoch = Arc::new(LightEpoch::new());
 
         let mut hash_index = MemHashIndex::new();
-        let index_config = MemHashIndexConfig::new(config.table_size);
-        hash_index.initialize(&index_config);
+        let index_config = MemHashIndexConfig::new(config.table_size).map_err(|e| {
+            io::Error::other(format!("Invalid table_size {}: {e:?}", config.table_size))
+        })?;
+        let init_status = hash_index.initialize(&index_config);
+        if init_status != crate::Status::Ok {
+            return Err(io::Error::other(format!(
+                "Failed to initialize hash index: {init_status:?}"
+            )));
+        }
 
         let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
 
@@ -1322,6 +1366,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })

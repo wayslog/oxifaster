@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
@@ -64,6 +64,33 @@ impl FasterKvConfig {
             page_size_bits: 22, // 4 MB pages by default
             mutable_fraction: 0.9,
         }
+    }
+
+    /// Validate that all configuration values are within acceptable ranges.
+    ///
+    /// Returns `Err(Status::InvalidArgument)` if any field is invalid:
+    /// - `table_size` must be a power of 2 and less than 2^31
+    /// - `page_size_bits` must be in [10, 30]
+    /// - `log_memory_size` must be greater than one page (1 << page_size_bits)
+    /// - `mutable_fraction` must not be NaN
+    ///
+    /// Note: out-of-range `mutable_fraction` values are clamped downstream
+    /// by `HybridLogConfig::with_mutable_fraction()`, so they are not
+    /// rejected here for backward compatibility.
+    pub fn validate(&self) -> Result<(), Status> {
+        if !self.table_size.is_power_of_two() || self.table_size >= (1u64 << 31) {
+            return Err(Status::InvalidArgument);
+        }
+        if !(10..=30).contains(&self.page_size_bits) {
+            return Err(Status::InvalidArgument);
+        }
+        if self.log_memory_size <= (1u64 << self.page_size_bits) {
+            return Err(Status::InvalidArgument);
+        }
+        if self.mutable_fraction.is_nan() {
+            return Err(Status::InvalidArgument);
+        }
+        Ok(())
     }
 }
 
@@ -166,6 +193,9 @@ where
     default_log_checkpoint_backend: AtomicU32,
     /// Default durability mode for checkpoint artifacts.
     default_checkpoint_durability: AtomicU32,
+    /// Timeout (in milliseconds) for the WaitPending checkpoint phase.
+    /// Default: 30 000 ms (30 seconds).
+    wait_pending_timeout_ms: AtomicU64,
     /// Last snapshot checkpoint state for incremental checkpoints
     /// Used to track the base snapshot for incremental checkpoints
     last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
@@ -254,7 +284,7 @@ where
     D: StorageDevice,
 {
     /// Create a new FasterKV store
-    pub fn new(config: FasterKvConfig, device: D) -> Self {
+    pub fn new(config: FasterKvConfig, device: D) -> Result<Self, Status> {
         Self::with_compaction_config(config, device, CompactionConfig::default())
     }
 
@@ -263,7 +293,7 @@ where
         config: FasterKvConfig,
         device: D,
         compaction_config: CompactionConfig,
-    ) -> Self {
+    ) -> Result<Self, Status> {
         Self::with_full_config_impl(config, device, compaction_config, None)
     }
 
@@ -272,9 +302,9 @@ where
         config: FasterKvConfig,
         device: D,
         cache_config: ReadCacheConfig,
-    ) -> Self {
+    ) -> Result<Self, Status> {
         let read_cache: Arc<dyn ReadCacheOps<K, V>> =
-            Arc::new(ReadCache::<K, V>::new(cache_config));
+            Arc::new(ReadCache::<K, V>::try_new(cache_config)?);
         Self::with_full_config_impl(
             config,
             device,
@@ -288,7 +318,9 @@ where
         device: D,
         compaction_config: CompactionConfig,
         read_cache: Option<Arc<dyn ReadCacheOps<K, V>>>,
-    ) -> Self {
+    ) -> Result<Self, Status> {
+        config.validate()?;
+
         let device = Arc::new(device);
 
         // Initialize epoch
@@ -296,8 +328,11 @@ where
 
         // Initialize hash index
         let mut hash_index = MemHashIndex::new();
-        let index_config = MemHashIndexConfig::new(config.table_size);
-        hash_index.initialize(&index_config);
+        let index_config = MemHashIndexConfig::new(config.table_size)?;
+        let init_status = hash_index.initialize(&index_config);
+        if init_status != Status::Ok {
+            return Err(init_status);
+        }
 
         let log_config = HybridLogConfig::with_mutable_fraction(
             config.log_memory_size,
@@ -312,7 +347,7 @@ where
         // Pending I/O manager (dedicated thread, does not depend on an external Tokio runtime).
         let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
-        Self {
+        Ok(Self {
             epoch,
             system_state: AtomicSystemState::default(),
             hash_index,
@@ -331,9 +366,10 @@ where
             cpr: CprCoordinator::default(),
             default_log_checkpoint_backend: AtomicU32::new(LogCheckpointBackend::Snapshot as u32),
             default_checkpoint_durability: AtomicU32::new(CheckpointDurability::FasterLike as u32),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: PhantomData,
-        }
+        })
     }
 
     /// Get a reference to the epoch
@@ -371,6 +407,20 @@ where
     pub fn set_checkpoint_durability(&self, durability: CheckpointDurability) {
         self.default_checkpoint_durability
             .store(u32::from(durability as u8), Ordering::Release);
+    }
+
+    /// Get the WaitPending phase timeout for checkpoints.
+    pub fn wait_pending_timeout(&self) -> Duration {
+        Duration::from_millis(self.wait_pending_timeout_ms.load(Ordering::Acquire))
+    }
+
+    /// Configure the WaitPending phase timeout for checkpoints.
+    ///
+    /// If participant threads do not acknowledge the WaitPending phase within
+    /// this duration, the checkpoint is aborted. Default: 30 seconds.
+    pub fn set_wait_pending_timeout(&self, timeout: Duration) {
+        self.wait_pending_timeout_ms
+            .store(timeout.as_millis() as u64, Ordering::Release);
     }
 
     pub(crate) fn cpr_refresh(&self, ctx: &mut ThreadContext) {
@@ -445,6 +495,15 @@ where
                 }
             }
             crate::store::Phase::WaitPending => {
+                // Drive pending I/O completions so prev context can drain.
+                let thread_tag = get_thread_tag();
+                let prev_id = ctx.prev_ctx_id();
+                let completed =
+                    self.take_completed_io_for_context(ctx.thread_id, thread_tag, prev_id);
+                if completed > 0 {
+                    ctx.on_pending_io_completed(prev_id, completed);
+                }
+
                 if ctx.prev_ctx_is_drained()
                     && self
                         .cpr

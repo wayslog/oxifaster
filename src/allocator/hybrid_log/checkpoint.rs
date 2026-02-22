@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -5,7 +6,9 @@ use std::sync::atomic::Ordering;
 
 use crate::address::Address;
 use crate::checkpoint::LogMetadata;
+use crate::checkpoint::sidecar;
 use crate::device::StorageDevice;
+use crate::format::compute_xor_checksum;
 
 use super::PersistentMemoryMalloc;
 
@@ -147,6 +150,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     /// Write an in-memory snapshot of log pages in `[begin, final_address)`.
     ///
     /// The format is compatible with `read_log_snapshot` and is used by snapshot checkpoints.
+    /// A sidecar `.crc` file is written alongside with per-page XOR checksums.
     pub fn write_log_snapshot(
         &self,
         path: &Path,
@@ -178,15 +182,26 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 writer.write_all(&u64::MAX.to_le_bytes())?;
                 let file = writer.into_inner()?;
                 file.sync_all()?;
-                return rename_tmp_overwrite(&tmp_path, path);
+                rename_tmp_overwrite(&tmp_path, path)?;
+                // Write sidecar with empty page list
+                sidecar::write_snapshot_checksums(path, &[])?;
+                return Ok(());
             }
             tail_page = tail_page.saturating_sub(1);
         }
 
+        let mut page_checksums: Vec<(u64, u64)> = Vec::new();
         for page in begin_page..=tail_page {
             if let Some(page_data) = self.pages.get_page(page) {
+                // Copy page data into a local buffer so that the checksum is computed
+                // over exactly the bytes that are written to the snapshot file.
+                // Without this, a concurrent writer could modify the in-memory page
+                // between the write_all and checksum calls.
+                let page_buf = page_data.to_vec();
                 writer.write_all(&(page as u64).to_le_bytes())?;
-                writer.write_all(page_data)?;
+                writer.write_all(&page_buf)?;
+                let checksum = compute_xor_checksum(&page_buf);
+                page_checksums.push((page as u64, checksum));
             }
         }
 
@@ -194,7 +209,12 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         let file = writer.into_inner()?;
         file.sync_all()?;
-        rename_tmp_overwrite(&tmp_path, path)
+        rename_tmp_overwrite(&tmp_path, path)?;
+
+        // Write sidecar .crc file with per-page checksums
+        sidecar::write_snapshot_checksums(path, &page_checksums)?;
+
+        Ok(())
     }
 
     /// Recover the log from a checkpoint.
@@ -316,6 +336,10 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     }
 
     fn read_log_snapshot(&mut self, path: &Path) -> io::Result<(Address, Address)> {
+        // Load per-page checksums from sidecar file if available
+        let page_checksums = sidecar::read_snapshot_checksums(path)?;
+        let mut verified_checksum_pages = HashSet::new();
+
         let file = File::open(path)?;
         let mut reader = BufReader::with_capacity(1 << 20, file);
 
@@ -365,6 +389,27 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
             reader.read_exact(&mut page_data)?;
 
+            // Verify per-page checksum when a sidecar exists.
+            if let Some(checksums) = page_checksums.as_ref() {
+                let expected = checksums.get(&page_num).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Snapshot page {} missing checksum entry", page_num),
+                    )
+                })?;
+                let computed = compute_xor_checksum(&page_data);
+                if *expected != computed {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Snapshot page {} checksum mismatch: stored={:#x}, computed={:#x}",
+                            page_num, expected, computed
+                        ),
+                    ));
+                }
+                verified_checksum_pages.insert(page_num);
+            }
+
             let page = page_num as u32;
             if !self.pages.allocate_page(page, self.config.page_size) {
                 return Err(io::Error::new(
@@ -379,6 +424,27 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                 return Err(io::Error::other(format!(
                     "Page {page} not available after allocation"
                 )));
+            }
+        }
+
+        if let Some(checksums) = page_checksums.as_ref() {
+            if verified_checksum_pages.len() != checksums.len() {
+                let unexpected_page = checksums
+                    .keys()
+                    .find(|page_num| !verified_checksum_pages.contains(page_num))
+                    .copied();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    match unexpected_page {
+                        Some(page_num) => format!(
+                            "Snapshot checksum sidecar contains page {} not present in snapshot",
+                            page_num
+                        ),
+                        None => {
+                            "Snapshot checksum sidecar does not match snapshot pages".to_string()
+                        }
+                    },
+                ));
             }
         }
 

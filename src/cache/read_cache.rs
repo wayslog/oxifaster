@@ -74,8 +74,18 @@ where
     K: PersistKey,
     V: PersistValue,
 {
+    /// Try to create a new read cache with the given configuration.
+    pub fn try_new(config: ReadCacheConfig) -> Result<Self, Status> {
+        config.validate()?;
+        Ok(Self::new_with_validated_config(config))
+    }
+
     /// Create a new read cache with the given configuration
     pub fn new(config: ReadCacheConfig) -> Self {
+        Self::try_new(config).expect("ReadCacheConfig validation failed")
+    }
+
+    fn new_with_validated_config(config: ReadCacheConfig) -> Self {
         let mem_size = usize::try_from(config.mem_size).unwrap_or(usize::MAX);
         let word_capacity = mem_size.saturating_add(WORD_BYTES - 1) / WORD_BYTES;
         let buffer = if config.pre_allocate {
