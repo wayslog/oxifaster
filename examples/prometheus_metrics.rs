@@ -28,10 +28,8 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(
-        FasterKvConfig::default(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<u64, u64, _>::new(FasterKvConfig::default(), NullDisk::new()).unwrap());
     let mut session = expect_ok("start_session", store.start_session());
     session.upsert(1, 10);
     session.upsert(2, 20);

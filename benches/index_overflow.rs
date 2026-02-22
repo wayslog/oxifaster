@@ -45,7 +45,7 @@ fn bench_insert_same_bucket(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut index = MemHashIndex::new();
-                    index.initialize(&MemHashIndexConfig::new(TABLE_SIZE));
+                    index.initialize(&MemHashIndexConfig::new(TABLE_SIZE).unwrap());
                     index
                 },
                 |index| {

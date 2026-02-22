@@ -20,7 +20,7 @@ pub type TruncateCallback = Box<dyn FnOnce(Address) + Send>;
 /// Called after the begin address has been shifted, receiving the new begin address.
 /// This allows callers to perform post-shift operations or logging.
 pub type ShiftCompleteCallback = Box<dyn FnOnce(Address) + Send>;
-use crate::allocator::page_allocator::PageInfo;
+use crate::allocator::page_allocator::{FlushStatus, PageInfo};
 use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
 use crate::status::Status;
@@ -41,17 +41,55 @@ pub struct HybridLogConfig {
 }
 
 impl HybridLogConfig {
-    /// Create a new configuration
+    /// Create a new configuration with default mutable fraction (0.25).
     pub fn new(memory_size: u64, page_size_bits: u32) -> Self {
-        let page_size = 1 << page_size_bits;
+        Self::with_mutable_fraction(memory_size, page_size_bits, 0.25)
+    }
+
+    /// Create a new configuration with an explicit mutable fraction.
+    ///
+    /// `mutable_fraction` is clamped to `[0.0, 1.0]` and determines the
+    /// proportion of in-memory pages that belong to the mutable region.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `page_size_bits >= 32`, which would overflow the page size shift.
+    pub fn with_mutable_fraction(
+        memory_size: u64,
+        page_size_bits: u32,
+        mutable_fraction: f64,
+    ) -> Self {
+        assert!(
+            page_size_bits < 32,
+            "page_size_bits must be less than 32 to avoid overflow, got {page_size_bits}"
+        );
+        let page_size = 1usize << page_size_bits;
         let memory_pages = (memory_size / page_size as u64) as u32;
+        let fraction = mutable_fraction.clamp(0.0, 1.0);
+        let mutable_pages = ((memory_pages as f64) * fraction).round() as u32;
+        let mutable_pages = mutable_pages.max(1).min(memory_pages);
 
         Self {
             page_size,
             memory_pages,
-            mutable_pages: memory_pages / 4,
-            segment_size: 1 << 30, // 1 GB segments
+            mutable_pages,
+            segment_size: 1 << 30,
         }
+    }
+
+    /// Validate that all configuration values are within acceptable ranges.
+    ///
+    /// Returns `Err(Status::InvalidArgument)` if any field is invalid:
+    /// - `page_size` must be a power of 2
+    /// - `memory_pages` must be greater than 0
+    pub fn validate(&self) -> Result<(), Status> {
+        if !is_power_of_two(self.page_size as u64) {
+            return Err(Status::InvalidArgument);
+        }
+        if self.memory_pages == 0 {
+            return Err(Status::InvalidArgument);
+        }
+        Ok(())
     }
 }
 
@@ -233,13 +271,20 @@ pub struct PersistentMemoryMalloc<D: StorageDevice> {
 }
 
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
-    /// Create a new hybrid log allocator
+    /// Create a new hybrid log allocator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the configuration is invalid (e.g. page size not a power
+    /// of two or zero memory pages). Call `HybridLogConfig::validate()` to
+    /// check proactively and receive a `Result` instead.
     pub fn new(config: HybridLogConfig, device: Arc<D>) -> Self {
+        config
+            .validate()
+            .expect("HybridLogConfig validation failed");
+
         let buffer_size = config.memory_pages;
         let page_size = config.page_size;
-
-        assert!(is_power_of_two(page_size as u64));
-        assert!(buffer_size > 0);
 
         let mut pages = PageArray::new(buffer_size);
 
@@ -425,6 +470,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page(page) {
+            // SAFETY: offset is bounds-checked above, buf is valid for page_size bytes.
             let ptr = unsafe { buf.as_ptr().add(offset) as *mut u8 };
             NonNull::new(ptr)
         } else {
@@ -460,6 +506,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
 
         // Check if the page is in memory
         if let Some(buf) = self.pages.get_page_mut(page) {
+            // SAFETY: offset is bounds-checked above, buf is valid for page_size bytes.
             let ptr = unsafe { buf.as_mut_ptr().add(offset) };
             NonNull::new(ptr)
         } else {
@@ -485,8 +532,18 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         address < self.get_head_address()
     }
 
-    /// Handle a full page
+    /// Handle a full page.
+    ///
+    /// Evicts stale pages from the circular buffer (if it has wrapped) and then
+    /// advances the read-only boundary to schedule flushes for newly read-only
+    /// pages.
     fn on_page_full(&self, page: u32) -> Result<(), Status> {
+        // Before updating the read-only boundary, evict old pages whose buffer
+        // slot will be reused by the next page (page + 1). This ensures
+        // head_address is advanced past stale data before new allocations
+        // overwrite the buffer slot.
+        self.try_evict_for_new_page(page + 1)?;
+
         // Update read-only boundary if needed
         let new_read_only = Address::new(page.saturating_sub(self.config.mutable_pages), 0);
 
@@ -507,6 +564,96 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                     break;
                 }
                 Err(_) => continue,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Try to evict a single page from the in-memory buffer.
+    ///
+    /// A page can only be evicted when:
+    /// - It is entirely below the safe read-only address (all threads have
+    ///   acknowledged the read-only transition and the page has been flushed)
+    /// - Its flush status is `Flushed`
+    ///
+    /// On success, advances `head_address` and `safe_head_address` so that
+    /// `get()` will no longer return pointers into the evicted page, and
+    /// resets the page metadata for reuse by the circular buffer.
+    ///
+    /// Returns `true` if the page was successfully evicted.
+    fn try_evict_page(&self, page: u32) -> bool {
+        let page_end = Address::new(page + 1, 0);
+        let safe_ro = self.get_safe_read_only_address();
+
+        // SAFETY: The page must be entirely below safe_read_only_address.
+        // safe_read_only_address only advances past pages whose flush has
+        // completed, so this check also implies FlushStatus::Flushed.
+        if page_end > safe_ro {
+            return false;
+        }
+
+        // Belt-and-suspenders: verify flush status directly.
+        if self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
+            return false;
+        }
+
+        // Advance head_address so get() returns None for addresses on this page.
+        Self::try_advance_address(&self.head_address, page_end);
+        Self::try_advance_address(&self.safe_head_address, page_end);
+
+        // Reset page metadata so the buffer slot starts clean when reused.
+        self.pages.get_info(page).reset();
+
+        true
+    }
+
+    /// Evict pages to free the buffer slot needed by `new_page`.
+    ///
+    /// When the circular buffer wraps around, the buffer slot for `new_page`
+    /// is occupied by an older page (`new_page - buffer_size`). This method
+    /// evicts all pages from the current `head_address` through the
+    /// conflicting page so that `head_address` advances contiguously.
+    ///
+    /// Returns `Ok(())` if eviction succeeded or was not needed.
+    /// Returns `Err(Status::OutOfMemory)` if the conflicting page cannot be
+    /// evicted (not yet flushed to disk).
+    fn try_evict_for_new_page(&self, new_page: u32) -> Result<(), Status> {
+        if new_page < self.buffer_size {
+            return Ok(()); // Buffer has not wrapped yet.
+        }
+
+        let evict_through = new_page - self.buffer_size;
+        let current_head = self.get_head_address();
+        let current_head_page = current_head.page();
+
+        // Already evicted past the conflicting page.
+        if current_head_page > evict_through {
+            return Ok(());
+        }
+
+        // Evict all pages from current head through the conflicting page.
+        // head_address must advance contiguously.
+        for p in current_head_page..=evict_through {
+            if self.try_evict_page(p) {
+                continue;
+            }
+
+            // The page is not immediately evictable (flush may still be in
+            // progress). Wait briefly for the background flush worker to
+            // complete. The maximum wait is bounded; if the page is still not
+            // flushed after the deadline, the allocation cannot proceed.
+            let mut evicted = false;
+            for _ in 0..200 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                if self.try_evict_page(p) {
+                    evicted = true;
+                    break;
+                }
+            }
+
+            if !evicted {
+                return Err(Status::OutOfMemory);
             }
         }
 

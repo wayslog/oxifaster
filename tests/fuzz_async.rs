@@ -141,11 +141,14 @@ async fn drive_async_ops(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fuzz_async_smoke_public_api() {
     let p = fuzz_util::params("async_smoke", 5_000, 5_000);
-    let store = Arc::new(FasterKv::<u64, u64, _>::with_compaction_config(
-        small_store_config(),
-        NullDisk::new(),
-        CompactionConfig::default(),
-    ));
+    let store = Arc::new(
+        FasterKv::<u64, u64, _>::with_compaction_config(
+            small_store_config(),
+            NullDisk::new(),
+            CompactionConfig::default(),
+        )
+        .unwrap(),
+    );
     let mut session = store.start_async_session().expect("start_async_session");
 
     let mut model = HashMap::new();
@@ -160,7 +163,7 @@ async fn fuzz_async_stress_public_api() {
     let data_path = dir.path().join("oxifaster_fuzz_async_stress.dat");
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device).unwrap());
     let mut session = store.start_async_session().expect("start_async_session");
 
     let mut model = HashMap::new();

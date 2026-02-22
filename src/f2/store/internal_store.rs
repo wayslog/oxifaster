@@ -51,7 +51,8 @@ impl<D: StorageDevice> InternalStore<D> {
             (StoreType::Cold, Some(cfg)) => {
                 StoreIndex::new_cold(cfg).map_err(|e| format!("ColdIndex 初始化失败：{e:?}"))?
             }
-            _ => StoreIndex::new_memory(table_size),
+            _ => StoreIndex::new_memory(table_size)
+                .map_err(|e| format!("MemHashIndex initialization failed: {e:?}"))?,
         };
 
         let log_config = HybridLogConfig::new(log_mem_size, page_size_bits as u32);
@@ -68,13 +69,18 @@ impl<D: StorageDevice> InternalStore<D> {
     }
 
     /// Get mutable reference to hlog (unsafe)
+    ///
+    /// # Safety
+    /// Caller must ensure exclusive access, typically via epoch protection.
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn hlog_mut(&self) -> &mut PersistentMemoryMalloc<D> {
+        // SAFETY: Caller guarantees exclusive access via epoch protection.
         unsafe { &mut *self.hlog.get() }
     }
 
     /// Get immutable reference to hlog
     pub(super) fn hlog(&self) -> &PersistentMemoryMalloc<D> {
+        // SAFETY: UnsafeCell access is safe for shared reads when no concurrent writes.
         unsafe { &*self.hlog.get() }
     }
 

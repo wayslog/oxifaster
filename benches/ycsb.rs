@@ -91,7 +91,7 @@ fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, Nul
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 /// Create a test store with RawBytes key/value and NullDisk
@@ -106,7 +106,7 @@ fn create_raw_bytes_store(
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 /// Create a test store with FileSystemDisk (real disk I/O)
@@ -122,7 +122,7 @@ fn create_disk_store(
         mutable_fraction: 0.9,
     };
     let device = FileSystemDisk::single_file(path.join("data.db")).unwrap();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 /// Generate random bytes of specified size

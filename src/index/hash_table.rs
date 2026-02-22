@@ -48,22 +48,21 @@ impl InternalHashTable {
 
     /// Initialize the hash table with the specified size
     ///
-    /// # Panics
-    /// Panics if size is not a power of two or exceeds i32::MAX
+    /// Returns `Status::InvalidArgument` if size is not a power of two,
+    /// exceeds `i32::MAX`, or alignment is invalid.
     pub fn initialize(&mut self, new_size: u64, alignment: usize) -> Status {
-        assert!(new_size < i32::MAX as u64, "Hash table size too large");
-        assert!(
-            is_power_of_two(new_size),
-            "Hash table size must be power of 2"
-        );
-        assert!(
-            is_power_of_two(alignment as u64),
-            "Alignment must be power of 2"
-        );
-        assert!(
-            alignment >= CACHE_LINE_BYTES,
-            "Alignment must be >= cache line size"
-        );
+        if new_size >= i32::MAX as u64 {
+            return Status::InvalidArgument;
+        }
+        if !is_power_of_two(new_size) {
+            return Status::InvalidArgument;
+        }
+        if !is_power_of_two(alignment as u64) {
+            return Status::InvalidArgument;
+        }
+        if alignment < CACHE_LINE_BYTES {
+            return Status::InvalidArgument;
+        }
 
         if self.size != new_size {
             // Free existing buckets if any
@@ -77,6 +76,7 @@ impl InternalHashTable {
             .expect("Invalid layout");
 
             // Allocate zeroed memory
+            // SAFETY: layout is valid (size > 0, alignment is power of 2 and >= CACHE_LINE_BYTES).
             let ptr = unsafe { alloc_zeroed(layout) };
             if ptr.is_null() {
                 return Status::OutOfMemory;
@@ -84,6 +84,7 @@ impl InternalHashTable {
             self.buckets = NonNull::new(ptr as *mut HashBucket);
         } else if let Some(ptr) = self.buckets {
             // Clear existing buckets
+            // SAFETY: ptr points to valid allocation of new_size HashBuckets.
             unsafe {
                 std::ptr::write_bytes(ptr.as_ptr(), 0, new_size as usize);
             }
@@ -109,6 +110,7 @@ impl InternalHashTable {
                     CACHE_LINE_BYTES,
                 )
                 .expect("Invalid layout");
+                // SAFETY: ptr was allocated via alloc_zeroed with this exact layout.
                 unsafe {
                     dealloc(ptr.as_ptr() as *mut u8, layout);
                 }
@@ -117,36 +119,76 @@ impl InternalHashTable {
         self.size = 0;
     }
 
-    /// Get the bucket for the given hash
+    /// Get the bucket for the given hash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized.
     #[inline]
     pub fn bucket(&self, hash: KeyHash) -> &HashBucket {
-        debug_assert!(self.buckets.is_some());
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket called on uninitialized table");
         let index = hash.hash_table_index(self.size);
-        unsafe { &*self.buckets.unwrap().as_ptr().add(index) }
+        // SAFETY: index is computed via hash_table_index which masks to valid range,
+        // and buckets points to a valid allocation of `self.size` buckets.
+        unsafe { &*buckets.as_ptr().add(index) }
     }
 
-    /// Get a mutable bucket for the given hash
+    /// Get a mutable bucket for the given hash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized.
     #[inline]
     pub fn bucket_mut(&mut self, hash: KeyHash) -> &mut HashBucket {
-        debug_assert!(self.buckets.is_some());
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_mut called on uninitialized table");
         let index = hash.hash_table_index(self.size);
-        unsafe { &mut *self.buckets.unwrap().as_ptr().add(index) }
+        // SAFETY: index is computed via hash_table_index which masks to valid range,
+        // and buckets points to a valid allocation of `self.size` buckets.
+        unsafe { &mut *buckets.as_ptr().add(index) }
     }
 
-    /// Get the bucket at a specific index
+    /// Get the bucket at a specific index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized or index is out of bounds.
     #[inline]
     pub fn bucket_at(&self, index: u64) -> &HashBucket {
-        debug_assert!(index < self.size);
-        debug_assert!(self.buckets.is_some());
-        unsafe { &*self.buckets.unwrap().as_ptr().add(index as usize) }
+        assert!(
+            index < self.size,
+            "HashTable::bucket_at index {} out of bounds (size {})",
+            index,
+            self.size
+        );
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_at called on uninitialized table");
+        // SAFETY: index is bounds-checked above, buckets points to valid allocation.
+        unsafe { &*buckets.as_ptr().add(index as usize) }
     }
 
-    /// Get a mutable bucket at a specific index
+    /// Get a mutable bucket at a specific index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is not initialized or index is out of bounds.
     #[inline]
     pub fn bucket_at_mut(&mut self, index: u64) -> &mut HashBucket {
-        debug_assert!(index < self.size);
-        debug_assert!(self.buckets.is_some());
-        unsafe { &mut *self.buckets.unwrap().as_ptr().add(index as usize) }
+        assert!(
+            index < self.size,
+            "HashTable::bucket_at_mut index {} out of bounds (size {})",
+            index,
+            self.size
+        );
+        let buckets = self
+            .buckets
+            .expect("HashTable::bucket_at_mut called on uninitialized table");
+        // SAFETY: index is bounds-checked above, buckets points to valid allocation.
+        unsafe { &mut *buckets.as_ptr().add(index as usize) }
     }
 
     /// Get the number of buckets
@@ -343,10 +385,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_hash_table_non_power_of_two() {
         let mut table = InternalHashTable::new();
-        table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
+        let result = table.initialize(1000, CACHE_LINE_BYTES); // Not a power of 2
+        assert_eq!(result, Status::InvalidArgument);
     }
 
     #[test]

@@ -28,7 +28,7 @@
 //! use oxifaster::device::NullDisk;
 //!
 //! // Create store
-//! let store = Arc::new(FasterKv::new(FasterKvConfig::default(), NullDisk::new()));
+//! let store = Arc::new(FasterKv::new(FasterKvConfig::default(), NullDisk::new()).unwrap());
 //!
 //! // Start a session (bound to current thread)
 //! let mut session = store.start_session().expect("failed to start session");

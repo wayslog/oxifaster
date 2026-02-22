@@ -25,7 +25,7 @@
 //! use oxifaster::epoch::{EpochGuard, LightEpoch, get_thread_id};
 //!
 //! let epoch = Arc::new(LightEpoch::new());
-//! let tid = get_thread_id();
+//! let tid = get_thread_id().expect("too many threads");
 //!
 //! // Protect before accessing shared data
 //! epoch.protect(tid);

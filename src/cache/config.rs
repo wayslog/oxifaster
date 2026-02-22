@@ -63,12 +63,31 @@ impl Default for ReadCacheConfig {
 }
 
 impl ReadCacheConfig {
-    /// Create a new read cache configuration
+    /// Create a new read cache configuration.
     pub fn new(mem_size: u64) -> Self {
         Self {
             mem_size,
             ..Default::default()
         }
+    }
+
+    /// Validate that all configuration values are within acceptable ranges.
+    ///
+    /// Returns `Err(Status::InvalidArgument)` if any field is invalid:
+    /// - `mem_size` must be greater than 0
+    /// - `mutable_fraction` must not be NaN
+    ///
+    /// Note: out-of-range `mutable_fraction` values are clamped by
+    /// `with_mutable_fraction()`, so they are not rejected here for
+    /// backward compatibility.
+    pub fn validate(&self) -> Result<(), crate::status::Status> {
+        if self.mem_size == 0 {
+            return Err(crate::status::Status::InvalidArgument);
+        }
+        if self.mutable_fraction.is_nan() {
+            return Err(crate::status::Status::InvalidArgument);
+        }
+        Ok(())
     }
 
     /// Set the mutable fraction
@@ -178,5 +197,54 @@ mod tests {
         assert!((89 * 1024 * 1024..=91 * 1024 * 1024).contains(&mutable));
         assert!((9 * 1024 * 1024..=11 * 1024 * 1024).contains(&read_only));
         assert!(mutable + read_only <= 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_validate_ok() {
+        let config = ReadCacheConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_mutable_fraction_nan() {
+        let config = ReadCacheConfig {
+            mutable_fraction: f64::NAN,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_mutable_fraction_out_of_range_is_accepted() {
+        // Out-of-range values are NOT rejected -- they are clamped downstream
+        // by with_mutable_fraction(). This preserves backward compatibility.
+        let config = ReadCacheConfig {
+            mutable_fraction: 1.5,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        let config = ReadCacheConfig {
+            mutable_fraction: -0.1,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_zero_mem_size() {
+        let config = ReadCacheConfig {
+            mem_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_new_allows_zero_mem_size() {
+        // new() no longer validates; validation happens at consumption time
+        // (ReadCache::new). This preserves backward compatibility.
+        let config = ReadCacheConfig::new(0);
+        assert_eq!(config.mem_size, 0);
     }
 }

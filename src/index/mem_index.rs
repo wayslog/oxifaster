@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8};
 
 use crate::index::grow::{GrowConfig, GrowState};
 use crate::index::{AtomicHashBucketEntry, IndexHashBucketEntry, InternalHashTable};
+use crate::status::Status;
+use crate::utility::is_power_of_two;
 
 use self::overflow::OverflowBucketPool;
 
@@ -42,9 +44,18 @@ pub struct MemHashIndexConfig {
 }
 
 impl MemHashIndexConfig {
-    /// Create a new configuration
-    pub fn new(table_size: u64) -> Self {
-        Self { table_size }
+    /// Create a new configuration.
+    ///
+    /// Returns `Err(Status::InvalidArgument)` if `table_size` is not a power of 2
+    /// or is >= 2^31.
+    pub fn new(table_size: u64) -> Result<Self, Status> {
+        if !is_power_of_two(table_size) {
+            return Err(Status::InvalidArgument);
+        }
+        if table_size >= (1u64 << 31) {
+            return Err(Status::InvalidArgument);
+        }
+        Ok(Self { table_size })
     }
 }
 

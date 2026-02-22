@@ -15,7 +15,7 @@ fn create_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         page_size_bits: 12,       // 4 KB pages
         mutable_fraction: 0.9,
     };
-    Arc::new(FasterKv::new(config, NullDisk::new()))
+    Arc::new(FasterKv::new(config, NullDisk::new()).unwrap())
 }
 
 #[test]

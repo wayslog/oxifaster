@@ -394,7 +394,7 @@ fn test_store_with_raw_bytes() {
         mutable_fraction: 0.9,
     };
     let store: Arc<FasterKv<RawBytes, RawBytes, NullDisk>> =
-        Arc::new(FasterKv::new(config, NullDisk::new()));
+        Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -416,7 +416,7 @@ fn test_store_with_utf8() {
         mutable_fraction: 0.9,
     };
     let store: Arc<FasterKv<Utf8, Utf8, NullDisk>> =
-        Arc::new(FasterKv::new(config, NullDisk::new()));
+        Arc::new(FasterKv::new(config, NullDisk::new()).unwrap());
 
     let mut session = store.start_session().unwrap();
 
@@ -445,7 +445,7 @@ fn test_compaction_with_read_cache() {
         config,
         NullDisk::new(),
         cache_config,
-    ));
+    ).unwrap());
 
     let mut session = store.start_session().unwrap();
     for i in 0..100u64 {

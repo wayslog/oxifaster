@@ -121,7 +121,7 @@ fn main() {
         mutable_fraction: 0.9,
     };
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, NullDisk::new()));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, NullDisk::new()).unwrap());
     store.enable_stats();
     if args.phase_stats {
         store.enable_phase_stats();

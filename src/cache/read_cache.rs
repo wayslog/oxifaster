@@ -74,8 +74,18 @@ where
     K: PersistKey,
     V: PersistValue,
 {
+    /// Try to create a new read cache with the given configuration.
+    pub fn try_new(config: ReadCacheConfig) -> Result<Self, Status> {
+        config.validate()?;
+        Ok(Self::new_with_validated_config(config))
+    }
+
     /// Create a new read cache with the given configuration
     pub fn new(config: ReadCacheConfig) -> Self {
+        Self::try_new(config).expect("ReadCacheConfig validation failed")
+    }
+
+    fn new_with_validated_config(config: ReadCacheConfig) -> Self {
         let mem_size = usize::try_from(config.mem_size).unwrap_or(usize::MAX);
         let word_capacity = mem_size.saturating_add(WORD_BYTES - 1) / WORD_BYTES;
         let buffer = if config.pre_allocate {
@@ -148,12 +158,14 @@ where
     fn record_at(&self, buffer: &[u64], address: Address) -> Option<*const u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        // SAFETY: offset is bounds-checked by record_offset, buffer is valid.
         Some(unsafe { Self::buffer_as_ptr(buffer).add(offset) })
     }
 
     fn record_at_mut(&self, buffer: &mut [u64], address: Address) -> Option<*mut u8> {
         let buffer_bytes_len = Self::buffer_bytes_len(buffer);
         let offset = self.record_offset(address.control(), buffer_bytes_len)?;
+        // SAFETY: offset is bounds-checked by record_offset, buffer is valid.
         Some(unsafe { Self::buffer_as_mut_ptr(buffer).add(offset) })
     }
 
@@ -216,6 +228,15 @@ where
 
         // Get the record
         let buffer = self.buffer.read().ok()?;
+
+        // Re-check safe_head_address after acquiring the lock to prevent TOCTOU:
+        // eviction may have advanced safe_head_address between the first check and
+        // the lock acquisition, which would let us read already-evicted data.
+        let safe_head_recheck = self.safe_head_address.load(Ordering::Acquire);
+        if rc_address.control() < safe_head_recheck {
+            return self.miss();
+        }
+
         let buffer_bytes_len = Self::buffer_bytes_len(&buffer);
         let record_ptr = self.record_at(&buffer, rc_address)?;
         let offset = self.record_offset(rc_address.control(), buffer_bytes_len)?;
@@ -359,7 +380,14 @@ where
         let mem_size_usize = usize::try_from(mem_size).map_err(|_| Status::ResourceExhausted)?;
         let size_usize = usize::try_from(size).map_err(|_| Status::ResourceExhausted)?;
 
+        const MAX_ALLOCATE_RETRIES: u32 = 512;
+        let mut retries = 0u32;
+
         loop {
+            if retries >= MAX_ALLOCATE_RETRIES {
+                return Err(Status::ResourceExhausted);
+            }
+            retries += 1;
             let tail = self.tail_address.load(Ordering::Acquire);
             let new_tail = tail + size;
 

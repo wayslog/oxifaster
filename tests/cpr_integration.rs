@@ -18,7 +18,8 @@ fn test_cpr_version_tracking() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create session and check initial version
     let mut session = store.start_session().unwrap();
@@ -75,7 +76,8 @@ fn test_cpr_context_swapping() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create session
     let mut session = store.start_session().unwrap();
@@ -124,7 +126,8 @@ fn test_cpr_phase_transitions() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create session
     let mut session = store.start_session().unwrap();
@@ -177,7 +180,8 @@ fn test_refresh_with_cpr() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     // Create session
     let mut session = store.start_session().unwrap();
@@ -219,7 +223,8 @@ fn test_multiple_checkpoint_cycles() {
 
     let config = FasterKvConfig::default();
     let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> = Arc::new(FasterKv::new(config, device));
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config, device).unwrap());
 
     let mut versions = vec![];
 

@@ -227,11 +227,14 @@ fn fuzz_kv_smoke_crud_model() {
     std::fs::create_dir_all(&cp_dir).expect("create checkpoints dir");
 
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::with_compaction_config(
-        small_store_config(),
-        device,
-        CompactionConfig::default(),
-    ));
+    let store = Arc::new(
+        FasterKv::<u64, u64, _>::with_compaction_config(
+            small_store_config(),
+            device,
+            CompactionConfig::default(),
+        )
+        .unwrap(),
+    );
 
     let mut model = HashMap::new();
     let report = apply_random_ops(&store, &mut model, p.steps, p.key_space, p.seed);
@@ -273,15 +276,18 @@ fn fuzz_kv_stress_crud_compaction_growth() {
     std::fs::create_dir_all(&cp_dir).expect("create checkpoints dir");
 
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::with_compaction_config(
-        small_store_config(),
-        device,
-        CompactionConfig {
-            // Encourage compaction in long runs.
-            target_utilization: 0.6,
-            ..CompactionConfig::default()
-        },
-    ));
+    let store = Arc::new(
+        FasterKv::<u64, u64, _>::with_compaction_config(
+            small_store_config(),
+            device,
+            CompactionConfig {
+                // Encourage compaction in long runs.
+                target_utilization: 0.6,
+                ..CompactionConfig::default()
+            },
+        )
+        .unwrap(),
+    );
 
     let mut rng = fuzz_util::rng(p.seed);
     let mut model = HashMap::new();
@@ -403,7 +409,7 @@ fn fuzz_kv_stress_checkpoint_recovery_roundtrip() {
 
     let config = small_store_config();
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device).unwrap());
 
     let mut model = HashMap::new();
     let r = apply_random_ops(&store, &mut model, p.steps, p.key_space, p.seed);

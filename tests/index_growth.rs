@@ -17,14 +17,14 @@ use oxifaster::store::{FasterKv, FasterKvConfig};
 
 fn create_index(size: u64) -> MemHashIndex {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(size);
+    let config = MemHashIndexConfig::new(size).unwrap();
     index.initialize(&config);
     index
 }
 
 fn create_index_with_grow_config(size: u64, grow_config: GrowConfig) -> MemHashIndex {
     let mut index = MemHashIndex::with_grow_config(grow_config);
-    let config = MemHashIndexConfig::new(size);
+    let config = MemHashIndexConfig::new(size).unwrap();
     index.initialize(&config);
     index
 }
@@ -342,10 +342,10 @@ fn test_index_with_grow_config() {
 
 #[test]
 fn test_index_size_must_be_power_of_two() {
-    let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1000); // Not power of 2
-    let status = index.initialize(&config);
-    assert_eq!(status, Status::Corruption);
+    // MemHashIndexConfig::new now validates table_size up front
+    let result = MemHashIndexConfig::new(1000); // Not power of 2
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Status::InvalidArgument);
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn test_store_index_stats() {
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
 
     // Insert some data
     {

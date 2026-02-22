@@ -13,7 +13,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
 

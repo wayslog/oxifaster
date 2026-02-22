@@ -326,28 +326,28 @@ fn test_index_type_clone_copy() {
 
 #[test]
 fn test_store_index_new_memory() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     assert!(index.is_memory());
     assert!(!index.is_cold());
 }
 
 #[test]
 fn test_store_index_as_memory() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     let mem_idx = index.as_memory();
     assert!(mem_idx.is_some());
 }
 
 #[test]
 fn test_store_index_memory_as_cold_returns_none() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     let cold_idx = index.as_cold();
     assert!(cold_idx.is_none());
 }
 
 #[test]
 fn test_store_index_find_entry() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     let hash = KeyHash::new(12345);
     let result = index.find_entry(hash);
     // Should not find anything in empty index
@@ -356,7 +356,7 @@ fn test_store_index_find_entry() {
 
 #[test]
 fn test_store_index_find_or_create_entry() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     let hash = KeyHash::new(12345);
     let _result = index.find_or_create_entry(hash);
     // Entry should be created
@@ -364,7 +364,7 @@ fn test_store_index_find_or_create_entry() {
 
 #[test]
 fn test_store_index_garbage_collect() {
-    let index = StoreIndex::new_memory(1024);
+    let index = StoreIndex::new_memory(1024).unwrap();
     // Should not panic on empty index
     index.garbage_collect(Address::INVALID);
 }

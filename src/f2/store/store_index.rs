@@ -19,11 +19,14 @@ pub enum StoreIndex {
 
 impl StoreIndex {
     /// Create a new memory index
-    pub fn new_memory(table_size: u64) -> Self {
+    pub fn new_memory(table_size: u64) -> Result<Self, Status> {
         let mut index = MemHashIndex::new();
-        let config = MemHashIndexConfig::new(table_size);
-        index.initialize(&config);
-        Self::Memory(Box::new(index))
+        let config = MemHashIndexConfig::new(table_size)?;
+        let status = index.initialize(&config);
+        if status != Status::Ok {
+            return Err(status);
+        }
+        Ok(Self::Memory(Box::new(index)))
     }
 
     /// Create a new cold index

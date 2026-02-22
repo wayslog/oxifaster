@@ -18,7 +18,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         mutable_fraction: 0.9,
     };
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 // ============ AsyncSession Creation Tests ============

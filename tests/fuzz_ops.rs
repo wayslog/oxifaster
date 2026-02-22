@@ -60,7 +60,7 @@ fn fuzz_ops_smoke_self_check_and_recover_latest() {
 
     let data_path = dir.path().join("oxifaster_fuzz_ops.dat");
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device).unwrap());
 
     let _model = write_some_data(&store, p.seed, 2_000);
 
@@ -144,7 +144,7 @@ fn fuzz_ops_stress_self_check_with_many_checkpoints() {
 
     let data_path = dir.path().join("oxifaster_fuzz_ops_stress.dat");
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), device).unwrap());
 
     let _model = write_some_data(&store, p.seed, p.steps);
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -33,8 +33,15 @@ use super::cpr::{
 use super::{CheckpointKind, FasterKv, FasterKvConfig, ReadCacheOps};
 
 fn fsync_dir_best_effort(dir: &Path) {
-    if let Ok(file) = std::fs::File::open(dir) {
-        let _ = file.sync_all();
+    match std::fs::File::open(dir) {
+        Ok(file) => {
+            if let Err(e) = file.sync_all() {
+                tracing::warn!(dir = %dir.display(), error = %e, "directory fsync failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "failed to open directory for fsync");
+        }
     }
 }
 
@@ -408,6 +415,8 @@ where
         cleanup.clear_cpr = true;
 
         let mut driver_ctx = ThreadContext::new(driver_thread_id);
+        let timeout = self.wait_pending_timeout();
+        let mut wait_pending_started: Option<Instant> = None;
 
         loop {
             let current_state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
@@ -423,6 +432,25 @@ where
                 .unwrap_or(false);
             if !is_driver {
                 break;
+            }
+
+            if current_state.phase == Phase::WaitPending {
+                let started = wait_pending_started.get_or_insert_with(Instant::now);
+                if started.elapsed() >= timeout {
+                    tracing::error!(
+                        timeout_ms = timeout.as_millis(),
+                        "Checkpoint WaitPending phase timed out, aborting checkpoint"
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "Checkpoint WaitPending phase timed out after {}ms",
+                            timeout.as_millis()
+                        ),
+                    ));
+                }
+            } else {
+                wait_pending_started = None;
             }
 
             // Drive current phase (driver thread only).
@@ -474,6 +502,7 @@ where
                     if barrier_complete {
                         // Capture a coherent view for this checkpoint.
                         let session_states = self.get_session_states();
+                        // SAFETY: UnsafeCell access for read-only hlog metadata.
                         let (begin_address, final_address) = unsafe {
                             let hlog = &*self.hlog.get();
                             (hlog.get_begin_address(), hlog.get_tail_address())
@@ -510,6 +539,10 @@ where
                     let _ = self.cpr.with_active_mut(|active| {
                         active.set_phase(current_state.phase, current_state.version);
                     });
+
+                    // Help drain pending I/O completions for all participant threads.
+                    self.process_pending_io_completions();
+
                     let barrier_complete = self
                         .cpr
                         .with_active(|active| active.barrier_complete())
@@ -630,7 +663,9 @@ where
         let snapshot_path = dir.join("log.snapshot");
 
         let write_log_meta = |use_snapshot_file: bool| -> io::Result<LogMetadata> {
+            // SAFETY: UnsafeCell access for read-only hlog metadata during checkpoint.
             let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
+            // SAFETY: UnsafeCell access for checkpoint metadata generation.
             let mut meta = unsafe {
                 (*self.hlog.get()).checkpoint_metadata_at(
                     token,
@@ -666,6 +701,7 @@ where
                     return Ok(());
                 }
 
+                // SAFETY: UnsafeCell access for snapshot write operation.
                 unsafe {
                     (*self.hlog.get()).write_log_snapshot(&snapshot_path, begin, final_address)?;
                 }
@@ -681,6 +717,7 @@ where
             LogCheckpointBackend::FoldOver => {
                 // Fold-over uses the main log device: ensure the prefix is flushed to the device.
                 // NOTE: flush_until() now calls device.flush() for durability (Workstream C).
+                // SAFETY: UnsafeCell access for flush operation.
                 unsafe {
                     (*self.hlog.get()).flush_until(final_address)?;
                 }
@@ -724,6 +761,7 @@ where
 
         let session_states = self.get_session_states();
 
+        // SAFETY: UnsafeCell access for checkpoint metadata generation.
         let mut metadata = unsafe { (*self.hlog.get()).checkpoint_metadata(token, version, true) };
         metadata.session_states = session_states;
         metadata.num_threads = metadata.session_states.len() as u32;
@@ -768,6 +806,7 @@ where
         let prev_final_address = prev_state.log_metadata.final_address;
         drop(prev_snapshot);
 
+        // SAFETY: UnsafeCell access for read-only hlog metadata.
         let flushed_address = unsafe { (*self.hlog.get()).get_flushed_until_address() };
 
         let delta_path = delta_log_path(&dir, 0);
@@ -775,6 +814,7 @@ where
         let delta_config = DeltaLogConfig::new(22); // 4MB pages
         let delta_log = DeltaLog::new(delta_device.clone(), delta_config, 0);
 
+        // SAFETY: UnsafeCell access for delta flush operation.
         let num_entries = unsafe {
             (*self.hlog.get()).flush_delta_to_device(
                 flushed_address,
@@ -784,6 +824,11 @@ where
                 &delta_log,
             )?
         };
+
+        // Ensure delta log data is durable before writing metadata
+        if durability == CheckpointDurability::FsyncOnCheckpoint {
+            std::fs::File::open(&delta_path).and_then(|f| f.sync_all())?;
+        }
 
         let delta_meta_path = delta_metadata_path(&dir);
         let delta_meta = DeltaLogMetadata {
@@ -801,6 +846,7 @@ where
         };
         delta_meta.write_to_file(&delta_meta_path)?;
 
+        // SAFETY: UnsafeCell access for checkpoint metadata generation.
         let flushed_until = unsafe { (*self.hlog.get()).get_flushed_until_address() };
         let mut meta = unsafe {
             (*self.hlog.get()).checkpoint_metadata_at(
@@ -822,7 +868,6 @@ where
         meta.write_to_file(&meta_path)?;
 
         if durability == CheckpointDurability::FsyncOnCheckpoint {
-            std::fs::File::open(&delta_path).and_then(|f| f.sync_all())?;
             std::fs::File::open(&delta_meta_path).and_then(|f| f.sync_all())?;
             std::fs::File::open(&meta_path).and_then(|f| f.sync_all())?;
             fsync_dir_best_effort(&dir);
@@ -996,7 +1041,11 @@ where
             .map_err(|err| record_failure(err, "recover_index"))?;
         recovery_state.index_recovered();
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
         hlog.recover(&cp_dir, Some(&log_meta))
             .map_err(|err| record_failure(err, "recover_log"))?;
@@ -1006,8 +1055,18 @@ where
 
         let compactor = Compactor::with_config(compaction_config);
 
-        let read_cache: Option<Arc<dyn ReadCacheOps<K, V>>> = cache_config
-            .map(|cfg| Arc::new(ReadCache::<K, V>::new(cfg)) as Arc<dyn ReadCacheOps<K, V>>);
+        let read_cache: Option<Arc<dyn ReadCacheOps<K, V>>> = match cache_config {
+            Some(cfg) => Some(Arc::new(ReadCache::<K, V>::try_new(cfg).map_err(|status| {
+                record_failure(
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid read cache config: {status}"),
+                    ),
+                    "validate_read_cache_config",
+                )
+            })?) as Arc<dyn ReadCacheOps<K, V>>),
+            None => None,
+        };
         let pending_io = PendingIoManager::new(device.clone(), hlog.page_size());
 
         let mut session_registry = HashMap::new();
@@ -1049,6 +1108,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -1191,7 +1251,11 @@ where
         let mut hash_index = MemHashIndex::new();
         hash_index.recover(&cp_dir, Some(&index_meta))?;
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
 
         let system_state = AtomicSystemState::new(SystemState::rest(index_meta.version));
@@ -1222,6 +1286,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })
@@ -1248,12 +1313,23 @@ where
         let epoch = Arc::new(LightEpoch::new());
 
         let mut hash_index = MemHashIndex::new();
-        let index_config = MemHashIndexConfig::new(config.table_size);
-        hash_index.initialize(&index_config);
+        let index_config = MemHashIndexConfig::new(config.table_size).map_err(|e| {
+            io::Error::other(format!("Invalid table_size {}: {e:?}", config.table_size))
+        })?;
+        let init_status = hash_index.initialize(&index_config);
+        if init_status != crate::Status::Ok {
+            return Err(io::Error::other(format!(
+                "Failed to initialize hash index: {init_status:?}"
+            )));
+        }
 
         let log_meta = LogMetadata::read_from_file(&cp_dir.join("log.meta"))?;
 
-        let log_config = HybridLogConfig::new(config.log_memory_size, config.page_size_bits);
+        let log_config = HybridLogConfig::with_mutable_fraction(
+            config.log_memory_size,
+            config.page_size_bits,
+            config.mutable_fraction,
+        );
         let mut hlog = PersistentMemoryMalloc::new(log_config, device.clone());
         hlog.recover(&cp_dir, Some(&log_meta))?;
 
@@ -1290,6 +1366,7 @@ where
             default_checkpoint_durability: AtomicU32::new(
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
+            wait_pending_timeout_ms: AtomicU64::new(30_000),
             last_snapshot_checkpoint: RwLock::new(None),
             _marker: std::marker::PhantomData,
         })

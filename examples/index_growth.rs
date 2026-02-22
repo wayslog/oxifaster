@@ -48,7 +48,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
     // 2. 创建哈希索引
     println!("--- 2. 创建哈希索引 ---");
     let mut index = MemHashIndex::with_grow_config(grow_config.clone());
-    let config = MemHashIndexConfig::new(1 << 10); // 1024 buckets
+    let config = MemHashIndexConfig::new(1 << 10).unwrap(); // 1024 buckets
     index.initialize(&config);
 
     println!("  初始大小: {} 桶", index.size());
@@ -62,7 +62,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device).unwrap());
 
     {
         let mut session = store.start_session().unwrap();
@@ -193,7 +193,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
             .with_auto_grow(true)
             .with_max_load_factor(0.9),
     );
-    let config2 = MemHashIndexConfig::new(1024);
+    let config2 = MemHashIndexConfig::new(1024).unwrap();
     index2.initialize(&config2);
 
     println!("  索引大小: {}", index2.size());

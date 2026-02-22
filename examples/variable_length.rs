@@ -24,7 +24,7 @@ fn run_fasterkv_with_varlen_utf8<D: StorageDevice>(device_name: &str, device: D)
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(config, device));
+    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(config, device).unwrap());
 
     {
         let mut session = store.start_session().unwrap();
