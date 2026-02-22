@@ -23,7 +23,7 @@ where
     const VARLEN_HEADER_SIZE: usize = Self::RECORD_INFO_SIZE + Self::VARLEN_LENGTHS_SIZE;
 
     /// Drive and process background I/O completions (global).
-    fn process_pending_io_completions(&self) {
+    pub(super) fn process_pending_io_completions(&self) {
         let completions = self.pending_io.drain_completions();
         if completions.is_empty() {
             return;
@@ -277,7 +277,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
     fn create_varlen_test_store() -> Arc<FasterKv<Utf8, Utf8, NullDisk>> {
@@ -288,7 +288,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
     fn create_rawbytes_store() -> Arc<FasterKv<RawBytes, RawBytes, NullDisk>> {
@@ -299,7 +299,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
     #[test]

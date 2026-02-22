@@ -45,7 +45,7 @@
 //! use oxifaster::index::{MemHashIndex, MemHashIndexConfig, KeyHash};
 //!
 //! let mut index = MemHashIndex::new();
-//! index.initialize(&MemHashIndexConfig::new(1 << 20)); // 1M buckets
+//! index.initialize(&MemHashIndexConfig::new(1 << 20).unwrap()); // 1M buckets
 //!
 //! let hash = KeyHash::new(my_key.get_hash());
 //! let result = index.find_or_create_entry(hash);

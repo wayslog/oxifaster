@@ -129,7 +129,9 @@ impl MemHashIndex {
             }
         };
 
-        let config = MemHashIndexConfig::new(metadata.table_size);
+        let config = MemHashIndexConfig::new(metadata.table_size).map_err(|e| {
+            io::Error::other(format!("Invalid table_size {}: {e:?}", metadata.table_size))
+        })?;
         let status = self.initialize(&config);
         if status != Status::Ok {
             return Err(io::Error::other(format!(

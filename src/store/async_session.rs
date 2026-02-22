@@ -23,7 +23,7 @@
 //! use oxifaster::store::{FasterKv, AsyncSession};
 //!
 //! async fn example() {
-//!     let store = FasterKv::new(config, device);
+//!     let store = FasterKv::new(config, device).unwrap();
 //!     let mut session = store
 //!         .start_async_session()
 //!         .expect("failed to start async session");
@@ -413,7 +413,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
     #[test]

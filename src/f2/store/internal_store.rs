@@ -51,7 +51,8 @@ impl<D: StorageDevice> InternalStore<D> {
             (StoreType::Cold, Some(cfg)) => {
                 StoreIndex::new_cold(cfg).map_err(|e| format!("ColdIndex 初始化失败：{e:?}"))?
             }
-            _ => StoreIndex::new_memory(table_size),
+            _ => StoreIndex::new_memory(table_size)
+                .map_err(|e| format!("MemHashIndex initialization failed: {e:?}"))?,
         };
 
         let log_config = HybridLogConfig::new(log_mem_size, page_size_bits as u32);

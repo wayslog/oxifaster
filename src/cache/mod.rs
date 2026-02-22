@@ -42,7 +42,7 @@
 //!
 //! // Enable read cache with 256 MB
 //! let cache_config = ReadCacheConfig::new(256 * 1024 * 1024);
-//! let store = FasterKv::with_read_cache(config, device, cache_config);
+//! let store = FasterKv::with_read_cache(config, device, cache_config).unwrap();
 //!
 //! // Cache statistics
 //! if let Some(stats) = store.read_cache_stats() {
