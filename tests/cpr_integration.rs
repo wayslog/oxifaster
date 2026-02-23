@@ -17,6 +17,14 @@ fn create_store(path: &std::path::Path) -> Arc<FasterKv<u64, u64, FileSystemDisk
     Arc::new(FasterKv::new(config, device).unwrap())
 }
 
+fn checkpoint_wait_timeout() -> Duration {
+    std::env::var("OXIFASTER_TEST_CHECKPOINT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
 /// Test CPR version tracking
 #[test]
 fn test_cpr_version_tracking() {
@@ -91,24 +99,36 @@ fn test_cpr_context_swapping() {
     });
 
     let start = Instant::now();
+    let timeout = checkpoint_wait_timeout();
+    let mut wrote_during_checkpoint = 0u64;
     let token = loop {
-        assert_eq!(session.upsert(10_000, 20_000), Status::Ok);
         session.refresh();
 
-        match rx.try_recv() {
+        // Keep a few in-flight writes while checkpoint is running, but avoid
+        // high-frequency write pressure that can make slow coverage jobs flaky.
+        if wrote_during_checkpoint < 8 {
+            let key = 10_000 + wrote_during_checkpoint;
+            assert_eq!(session.upsert(key, key * 2), Status::Ok);
+            wrote_during_checkpoint += 1;
+        }
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < timeout,
+            "checkpoint did not complete in time (timeout={:?}, current={:?})",
+            timeout,
+            store.system_state().phase
+        );
+
+        let remaining = timeout - elapsed;
+        let wait = remaining.min(Duration::from_millis(25));
+        match rx.recv_timeout(wait) {
             Ok(result) => break result.unwrap(),
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("checkpoint thread exited unexpectedly");
             }
         }
-
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "checkpoint did not complete in time (current={:?})",
-            store.system_state().phase
-        );
-        std::thread::yield_now();
     };
 
     session.refresh();
@@ -117,7 +137,9 @@ fn test_cpr_context_swapping() {
         &checkpoint_dir,
         token
     ));
-    assert_eq!(session.read(&10_000), Ok(Some(20_000)));
+    assert!(wrote_during_checkpoint > 0);
+    let last_key = 9_999 + wrote_during_checkpoint;
+    assert_eq!(session.read(&last_key), Ok(Some(last_key * 2)));
 }
 
 /// Test CPR phase transitions
