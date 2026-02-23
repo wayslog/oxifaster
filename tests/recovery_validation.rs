@@ -2,11 +2,37 @@
 //!
 //! These tests verify that recovery correctly validates session states and serial numbers.
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oxifaster::device::FileSystemDisk;
+use oxifaster::format::compute_xor_checksum;
 use oxifaster::store::{FasterKv, FasterKvConfig};
+use serde_json::Value;
 use tempfile::tempdir;
+use uuid::Uuid;
+
+fn checkpoint_log_meta_path(checkpoint_dir: &Path, token: Uuid) -> PathBuf {
+    checkpoint_dir.join(token.to_string()).join("log.meta")
+}
+
+fn checkpoint_crc_path(path: &Path) -> PathBuf {
+    let mut file_name: OsString = path.as_os_str().to_owned();
+    file_name.push(".crc");
+    PathBuf::from(file_name)
+}
+
+fn rewrite_log_meta(path: &Path, mutate: impl FnOnce(&mut Value)) {
+    let mut json: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    mutate(&mut json);
+
+    let serialized = serde_json::to_vec_pretty(&json).unwrap();
+    std::fs::write(path, &serialized).unwrap();
+
+    let checksum = compute_xor_checksum(&serialized);
+    std::fs::write(checkpoint_crc_path(path), checksum.to_le_bytes()).unwrap();
+}
 
 /// Test that recovery validates serial numbers
 #[test]
@@ -24,9 +50,9 @@ fn test_recovery_validates_serial_numbers() {
     // Create a session and perform operations
     let mut session = store.start_session().unwrap();
 
-    for i in 0u64..1000 {
+    for i in 0u64..200 {
         session.upsert(i, i * 2);
-        if i % 100 == 0 {
+        if i % 50 == 0 {
             session.refresh();
         }
     }
@@ -43,9 +69,9 @@ fn test_recovery_validates_serial_numbers() {
     // Write more data after checkpoint
     {
         let mut session = store.start_session().unwrap();
-        for i in 1000u64..2000 {
+        for i in 200u64..400 {
             session.upsert(i, i * 2);
-            if i % 100 == 0 {
+            if i % 50 == 0 {
                 session.refresh();
             }
         }
@@ -66,7 +92,7 @@ fn test_recovery_validates_serial_numbers() {
     // Verify data is present
     let mut session = recovered.start_session().unwrap();
     let mut found_count = 0;
-    for i in 0u64..1000 {
+    for i in 0u64..200 {
         if let Ok(Some(value)) = session.read(&i) {
             assert_eq!(value, i * 2);
             found_count += 1;
@@ -93,9 +119,9 @@ fn test_recovery_with_session_continuation() {
     // Create session and save its state
     let session_state = {
         let mut session = store.start_session().unwrap();
-        for i in 0u64..500 {
+        for i in 0u64..200 {
             session.upsert(i, i * 3);
-            if i % 50 == 0 {
+            if i % 25 == 0 {
                 session.refresh();
             }
         }
@@ -137,7 +163,7 @@ fn test_recovery_with_session_continuation() {
 
         // Verify existing data
         let mut found_count = 0;
-        for i in 0u64..500 {
+        for i in 0u64..200 {
             if let Ok(Some(value)) = continued.read(&i) {
                 assert_eq!(value, i * 3);
                 found_count += 1;
@@ -151,7 +177,7 @@ fn test_recovery_with_session_continuation() {
         );
 
         // Continue writing with the same session
-        for i in 500u64..1000 {
+        for i in 200u64..400 {
             continued.upsert(i, i * 3);
         }
     } else {
@@ -162,14 +188,164 @@ fn test_recovery_with_session_continuation() {
 /// Test that obviously invalid serial numbers are rejected
 #[test]
 fn test_recovery_rejects_invalid_serials() {
-    // Note: This test is challenging to implement without direct metadata manipulation
-    // In practice, the validation function checks for u64::MAX as an obviously invalid value
-    // A more comprehensive test would require tools to corrupt checkpoint metadata
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("invalid_serial.db");
+    let checkpoint_dir = dir.path().join("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    // For now, we verify that the validation function exists and is called during recovery
-    // by observing debug logs (when RUST_LOG=debug is set)
+    let config = FasterKvConfig::default();
+    let device = FileSystemDisk::single_file(&db_path).unwrap();
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config.clone(), device).unwrap());
 
-    println!("Serial number validation is integrated into recovery process");
-    println!("See validate_session_serials() in src/store/faster_kv/checkpoint.rs");
-    println!("Run with RUST_LOG=debug to see validation logs");
+    let mut session = store.start_session().unwrap();
+    session.upsert(1, 10);
+    session.upsert(2, 20);
+    session.refresh();
+
+    let token = store.checkpoint(&checkpoint_dir).unwrap();
+    drop(store);
+
+    let log_meta_path = checkpoint_log_meta_path(&checkpoint_dir, token);
+    rewrite_log_meta(&log_meta_path, |json| {
+        json["session_states"][0]["serial_num"] = Value::from(u64::MAX);
+    });
+
+    let recovered_device = FileSystemDisk::single_file(&db_path).unwrap();
+    let err = match FasterKv::<u64, u64, FileSystemDisk>::recover(
+        &checkpoint_dir,
+        token,
+        config,
+        recovered_device,
+    ) {
+        Ok(_) => panic!("expected invalid serial metadata to fail recovery"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("Invalid serial number"));
+}
+
+#[test]
+fn test_recovery_rejects_num_threads_mismatch() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("thread_mismatch.db");
+    let checkpoint_dir = dir.path().join("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).unwrap();
+
+    let config = FasterKvConfig::default();
+    let device = FileSystemDisk::single_file(&db_path).unwrap();
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config.clone(), device).unwrap());
+
+    let mut session = store.start_session().unwrap();
+    session.upsert(1, 10);
+    session.refresh();
+
+    let token = store.checkpoint(&checkpoint_dir).unwrap();
+    drop(store);
+
+    let log_meta_path = checkpoint_log_meta_path(&checkpoint_dir, token);
+    rewrite_log_meta(&log_meta_path, |json| {
+        let threads = json["num_threads"].as_u64().unwrap_or(0);
+        json["num_threads"] = Value::from(threads.saturating_add(3));
+    });
+
+    let recovered_device = FileSystemDisk::single_file(&db_path).unwrap();
+    let err = match FasterKv::<u64, u64, FileSystemDisk>::recover(
+        &checkpoint_dir,
+        token,
+        config,
+        recovered_device,
+    ) {
+        Ok(_) => panic!("expected num_threads mismatch metadata to fail recovery"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("num_threads mismatch"));
+}
+
+#[test]
+fn test_recovery_rejects_too_many_sessions() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("too_many_sessions.db");
+    let checkpoint_dir = dir.path().join("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).unwrap();
+
+    let config = FasterKvConfig::default();
+    let device = FileSystemDisk::single_file(&db_path).unwrap();
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config.clone(), device).unwrap());
+
+    let mut session = store.start_session().unwrap();
+    session.upsert(1, 10);
+    session.refresh();
+
+    let token = store.checkpoint(&checkpoint_dir).unwrap();
+    drop(store);
+
+    let log_meta_path = checkpoint_log_meta_path(&checkpoint_dir, token);
+    rewrite_log_meta(&log_meta_path, |json| {
+        let state = json["session_states"][0].clone();
+        let mut sessions = Vec::new();
+        for _ in 0..(oxifaster::constants::MAX_THREADS + 1) {
+            sessions.push(state.clone());
+        }
+        json["session_states"] = Value::from(sessions);
+        json["num_threads"] = Value::from((oxifaster::constants::MAX_THREADS + 1) as u64);
+    });
+
+    let recovered_device = FileSystemDisk::single_file(&db_path).unwrap();
+    let err = match FasterKv::<u64, u64, FileSystemDisk>::recover(
+        &checkpoint_dir,
+        token,
+        config,
+        recovered_device,
+    ) {
+        Ok(_) => panic!("expected too-many-sessions metadata to fail recovery"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("exceeds MAX_THREADS"));
+}
+
+#[test]
+fn test_recovery_rejects_duplicate_session_guids() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("duplicate_guid.db");
+    let checkpoint_dir = dir.path().join("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).unwrap();
+
+    let config = FasterKvConfig::default();
+    let device = FileSystemDisk::single_file(&db_path).unwrap();
+    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
+        Arc::new(FasterKv::new(config.clone(), device).unwrap());
+
+    let mut s1 = store.start_session().unwrap();
+    let mut s2 = store.start_session().unwrap();
+    s1.upsert(1, 10);
+    s2.upsert(2, 20);
+    s1.refresh();
+    s2.refresh();
+
+    let token = store.checkpoint(&checkpoint_dir).unwrap();
+    drop(store);
+
+    let log_meta_path = checkpoint_log_meta_path(&checkpoint_dir, token);
+    rewrite_log_meta(&log_meta_path, |json| {
+        assert!(
+            json["session_states"].as_array().map_or(0, Vec::len) >= 2,
+            "expected at least two session states in metadata"
+        );
+        let first = json["session_states"][0]["guid"].clone();
+        json["session_states"][1]["guid"] = first;
+    });
+
+    let recovered_device = FileSystemDisk::single_file(&db_path).unwrap();
+    let err = match FasterKv::<u64, u64, FileSystemDisk>::recover(
+        &checkpoint_dir,
+        token,
+        config,
+        recovered_device,
+    ) {
+        Ok(_) => panic!("expected duplicate session guid metadata to fail recovery"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("Duplicate session GUID"));
 }

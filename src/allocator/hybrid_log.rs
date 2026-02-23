@@ -7,6 +7,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use parking_lot::Mutex;
+
 use crate::address::{Address, AtomicAddress, AtomicPageOffset};
 
 /// Callback type for truncation notification.
@@ -25,6 +27,8 @@ use crate::constants::PAGE_SIZE;
 use crate::device::StorageDevice;
 use crate::status::Status;
 use crate::utility::{AlignedBuffer, is_power_of_two};
+use auto_flush::AutoFlushController;
+pub use auto_flush::{AutoFlushConfig, AutoFlushMetrics};
 use flush_worker::{FlushManager, FlushShared};
 
 /// Configuration for the hybrid log allocator
@@ -101,57 +105,6 @@ impl Default for HybridLogConfig {
             mutable_pages: 16,
             segment_size: 1 << 30,
         }
-    }
-}
-
-/// Configuration for automatic background flushing
-#[derive(Debug, Clone)]
-pub struct AutoFlushConfig {
-    /// Enable automatic background flushing
-    pub enabled: bool,
-    /// Interval between flush checks in milliseconds
-    pub check_interval_ms: u64,
-    /// Minimum number of pages in read-only region before triggering flush
-    pub min_readonly_pages: u32,
-}
-
-impl Default for AutoFlushConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            check_interval_ms: 100,
-            min_readonly_pages: 4,
-        }
-    }
-}
-
-impl AutoFlushConfig {
-    /// Create a new auto-flush configuration with default values
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Enable or disable automatic flushing
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
-    /// Set the check interval in milliseconds
-    pub fn with_check_interval_ms(mut self, interval_ms: u64) -> Self {
-        self.check_interval_ms = interval_ms.max(10); // Minimum 10ms
-        self
-    }
-
-    /// Set the minimum number of read-only pages before flushing
-    pub fn with_min_readonly_pages(mut self, pages: u32) -> Self {
-        self.min_readonly_pages = pages.max(1);
-        self
-    }
-
-    /// Check if auto-flush is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
     }
 }
 
@@ -268,6 +221,8 @@ pub struct PersistentMemoryMalloc<D: StorageDevice> {
     flush_shared: Arc<FlushShared<D>>,
     /// Flush worker
     flush_manager: FlushManager<D>,
+    /// Automatic flush worker state
+    auto_flush: Mutex<AutoFlushController<D>>,
 }
 
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
@@ -323,6 +278,7 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
             pending_flushes,
             flush_shared,
             flush_manager,
+            auto_flush: Mutex::new(AutoFlushController::new()),
         }
     }
 
@@ -841,10 +797,17 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
     }
 }
 
+mod auto_flush;
 mod checkpoint;
 mod delta;
 mod flush;
 mod flush_worker;
+
+impl<D: StorageDevice> Drop for PersistentMemoryMalloc<D> {
+    fn drop(&mut self) {
+        self.stop_auto_flush();
+    }
+}
 
 // SAFETY: `PersistentMemoryMalloc` is safe to send/share between threads because:
 // - All concurrent state is stored in atomics (`*_address`, `tail_page_offset`, `pending_flushes`).

@@ -49,11 +49,22 @@ fn fuzz_log_smoke_append_commit_reopen_scan() {
         }
 
         if rng.gen_ratio(1, 64) && committed_upto > 0 {
-            // Read a random committed entry.
-            let idx = rng.gen_range(0..committed_upto);
-            let (addr, expected) = &entries[idx];
-            let got = log.read_entry(*addr).expect("read_entry");
-            assert_eq!(&got, expected);
+            // Read a random committed entry that is still visible.
+            //
+            // FasterLog may advance begin_address and reclaim old regions under sustained appends.
+            // A reclaimed address is no longer guaranteed to return the original payload.
+            let begin = log.get_begin_address();
+            let visible_committed: Vec<_> = entries[..committed_upto]
+                .iter()
+                .filter(|(addr, _)| *addr >= begin)
+                .collect();
+
+            if !visible_committed.is_empty() {
+                let idx = rng.gen_range(0..visible_committed.len());
+                let (addr, expected) = visible_committed[idx];
+                let got = log.read_entry(*addr).expect("read_entry");
+                assert_eq!(&got, expected);
+            }
         }
     }
 

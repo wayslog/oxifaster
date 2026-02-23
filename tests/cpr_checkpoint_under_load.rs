@@ -215,3 +215,73 @@ fn test_foldover_checkpoint_under_load_recovery_prefix() {
         }
     }
 }
+
+#[test]
+fn test_checkpoint_rejects_concurrent_start_during_wait_pending() {
+    let dir = tempdir().unwrap();
+    let data_path = dir.path().join("data_concurrent_checkpoint.db");
+    let checkpoint_dir = tempdir().unwrap();
+
+    let store = create_test_store(&data_path);
+    let mut session = store.start_session().unwrap();
+
+    // Force a pending read so the first checkpoint stalls in WAIT_PENDING.
+    assert_eq!(session.upsert(11, 1100), Status::Ok);
+    let tail = store.log_stats().tail_address;
+    assert_eq!(store.flush_and_shift_head(tail), Status::Ok);
+    assert_eq!(session.read(&11), Err(Status::Pending));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let store_for_checkpoint = store.clone();
+    let checkpoint_base = checkpoint_dir.path().to_path_buf();
+
+    std::thread::spawn(move || {
+        let result = store_for_checkpoint.checkpoint(&checkpoint_base);
+        tx.send(result).unwrap();
+    });
+
+    let start = Instant::now();
+    loop {
+        session.refresh();
+        if store.system_state().phase == Phase::WaitPending {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "checkpoint did not reach WAIT_PENDING in time (current={:?})",
+            store.system_state().phase
+        );
+        std::thread::yield_now();
+    }
+
+    // A second checkpoint request should be rejected while the first one is active.
+    let err = store.checkpoint(checkpoint_dir.path()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+
+    // Drain pending work and let the first checkpoint complete.
+    assert!(session.complete_pending(true));
+    session.refresh();
+
+    let start = Instant::now();
+    let token = loop {
+        session.refresh();
+        match rx.try_recv() {
+            Ok(result) => break result.unwrap(),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("checkpoint thread exited unexpectedly");
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "first checkpoint did not complete in time (current={:?})",
+            store.system_state().phase
+        );
+        std::thread::yield_now();
+    };
+
+    assert!(FasterKv::<u64, u64, FileSystemDisk>::checkpoint_exists(
+        checkpoint_dir.path(),
+        token
+    ));
+}

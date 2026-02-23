@@ -69,6 +69,78 @@ fn test_auto_compaction_multiple_workers_stop() {
 }
 
 #[test]
+fn test_auto_flush_enable_disable() {
+    let store = create_test_store();
+    assert!(!store.auto_flush_enabled());
+
+    let config = AutoFlushConfig::new()
+        .with_enabled(true)
+        .with_check_interval_ms(25)
+        .with_min_readonly_pages(1);
+    store.enable_auto_flush(config);
+
+    assert!(store.auto_flush_enabled());
+    let active_config = store.auto_flush_config();
+    assert!(active_config.enabled);
+    assert_eq!(active_config.check_interval_ms, 25);
+    assert_eq!(active_config.min_readonly_pages, 1);
+
+    store.disable_auto_flush();
+    assert!(!store.auto_flush_enabled());
+    assert!(!store.auto_flush_config().enabled);
+}
+
+#[test]
+fn test_auto_flush_metrics_snapshot_readable() {
+    let store = create_test_store();
+    let metrics = store.auto_flush_metrics();
+    assert_eq!(metrics.runs_total, 0);
+    assert_eq!(metrics.bytes_total, 0);
+    assert_eq!(metrics.failures_total, 0);
+}
+
+#[test]
+fn test_stats_snapshot_contains_auto_flush_metrics() {
+    let store = Arc::new(
+        FasterKv::new(
+            FasterKvConfig {
+                table_size: 1024,
+                log_memory_size: 1 << 16, // 64 KB (16 pages at 4 KB)
+                page_size_bits: 12,       // 4 KB pages
+                mutable_fraction: 0.1,
+            },
+            NullDisk::new(),
+        )
+        .unwrap(),
+    );
+
+    store.enable_auto_flush(
+        AutoFlushConfig::new()
+            .with_enabled(true)
+            .with_check_interval_ms(10)
+            .with_min_readonly_pages(1),
+    );
+
+    let mut session = store.start_session().unwrap();
+    for i in 0..50_000u64 {
+        session.upsert(i, i);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && store.auto_flush_metrics().runs_total == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let live = store.auto_flush_metrics();
+    let snapshot = store.stats_snapshot();
+    store.disable_auto_flush();
+
+    assert_eq!(snapshot.auto_flush_runs, live.runs_total);
+    assert_eq!(snapshot.auto_flush_bytes, live.bytes_total);
+    assert_eq!(snapshot.auto_flush_failures, live.failures_total);
+}
+
+#[test]
 fn test_upsert_and_read() {
     let store = create_test_store();
     let mut session = store.start_session().unwrap();
@@ -233,6 +305,90 @@ fn test_checkpoint_with_data() {
 }
 
 #[test]
+fn test_checkpoint_with_callbacks_invoked_on_success() {
+    let store = create_test_store();
+    let mut session = store.start_session().unwrap();
+    session.upsert(1, 100);
+    session.upsert(2, 200);
+    let expected_max_serial = store
+        .get_session_states()
+        .iter()
+        .map(|s| s.serial_num)
+        .max()
+        .unwrap_or(0);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (index_tx, index_rx) = std::sync::mpsc::channel();
+    let (log_tx, log_rx) = std::sync::mpsc::channel();
+
+    let token = store
+        .checkpoint_with_callbacks(
+            temp_dir.path(),
+            Some(Box::new(move |status| {
+                index_tx.send(status).unwrap();
+            })),
+            Some(Box::new(move |status, serial| {
+                log_tx.send((status, serial)).unwrap();
+            })),
+        )
+        .unwrap();
+
+    assert!(FasterKv::<u64, u64, NullDisk>::checkpoint_exists(
+        temp_dir.path(),
+        token
+    ));
+
+    let index_status = index_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (log_status, max_serial) = log_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    assert_eq!(index_status, Status::Ok);
+    assert_eq!(log_status, Status::Ok);
+    assert_eq!(max_serial, expected_max_serial);
+}
+
+#[test]
+fn test_checkpoint_with_callbacks_invoked_on_failure() {
+    let store = create_test_store();
+    let mut session = store.start_session().unwrap();
+    session.upsert(1, 100);
+    let expected_max_serial = store
+        .get_session_states()
+        .iter()
+        .map(|s| s.serial_num)
+        .max()
+        .unwrap_or(0);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let invalid_checkpoint_base = temp_dir.path().join("not_a_directory");
+    std::fs::write(&invalid_checkpoint_base, b"file").unwrap();
+
+    let (index_tx, index_rx) = std::sync::mpsc::channel();
+    let (log_tx, log_rx) = std::sync::mpsc::channel();
+
+    let version_before = store.system_state().version;
+    let result = store.checkpoint_with_callbacks(
+        &invalid_checkpoint_base,
+        Some(Box::new(move |status| {
+            index_tx.send(status).unwrap();
+        })),
+        Some(Box::new(move |status, serial| {
+            log_tx.send((status, serial)).unwrap();
+        })),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(store.system_state().phase, Phase::Rest);
+    assert_eq!(store.system_state().version, version_before);
+
+    let index_status = index_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (log_status, max_serial) = log_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    assert_eq!(index_status, Status::Corruption);
+    assert_eq!(log_status, Status::Corruption);
+    assert_eq!(max_serial, expected_max_serial);
+}
+
+#[test]
 fn test_get_checkpoint_info() {
     let store = create_test_store();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -310,11 +466,9 @@ fn test_checkpoint_failure_rolls_back_version() {
     let cp_dir = temp_dir.path().join(token.to_string());
     std::fs::create_dir_all(cp_dir.join("log.snapshot")).unwrap();
 
-    assert!(
-        store
-            .checkpoint_with_action_internal(temp_dir.path(), Action::CheckpointFull, token)
-            .is_err()
-    );
+    assert!(store
+        .checkpoint_with_action_internal(temp_dir.path(), Action::CheckpointFull, token)
+        .is_err());
 
     let state = store.system_state();
     assert_eq!(state.phase, Phase::Rest);

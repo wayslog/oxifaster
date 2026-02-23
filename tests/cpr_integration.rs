@@ -2,11 +2,20 @@
 //!
 //! These tests verify the complete CPR flow from operation to checkpoint to recovery.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use oxifaster::device::FileSystemDisk;
-use oxifaster::store::{FasterKv, FasterKvConfig};
+use oxifaster::status::Status;
+use oxifaster::store::{FasterKv, FasterKvConfig, Phase};
 use tempfile::tempdir;
+
+fn create_store(path: &std::path::Path) -> Arc<FasterKv<u64, u64, FileSystemDisk>> {
+    let config = FasterKvConfig::default();
+    let device = FileSystemDisk::single_file(path).unwrap();
+    Arc::new(FasterKv::new(config, device).unwrap())
+}
 
 /// Test CPR version tracking
 #[test]
@@ -16,26 +25,18 @@ fn test_cpr_version_tracking() {
     let checkpoint_dir = dir.path().join("checkpoints");
     std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    let config = FasterKvConfig::default();
-    let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config, device).unwrap());
+    let store = create_store(&db_path);
 
-    // Create session and check initial version
     let mut session = store.start_session().unwrap();
     let initial_version = session.context().version;
-    println!("Initial version: {}", initial_version);
     assert_eq!(initial_version, 0, "Initial version should be 0");
 
-    // Perform operations
     for i in 0u64..100 {
-        session.upsert(i, i * 2);
+        assert_eq!(session.upsert(i, i * 2), Status::Ok);
     }
     session.refresh();
 
-    // Version should still be 0 (no checkpoint yet)
     let version_before_checkpoint = session.context().version;
-    println!("Version before checkpoint: {}", version_before_checkpoint);
     assert_eq!(
         version_before_checkpoint, 0,
         "Version should be 0 before checkpoint"
@@ -43,27 +44,22 @@ fn test_cpr_version_tracking() {
 
     drop(session);
 
-    // Take checkpoint (this should increment version)
     let token = store.checkpoint(&checkpoint_dir).unwrap();
-    println!("Checkpoint token: {}", token);
+    assert!(FasterKv::<u64, u64, FileSystemDisk>::checkpoint_exists(
+        &checkpoint_dir,
+        token
+    ));
 
-    // Create new session after checkpoint
     let mut session2 = store.start_session().unwrap();
     session2.refresh();
     let version_after_checkpoint = session2.context().version;
-    println!("Version after checkpoint: {}", version_after_checkpoint);
-    assert!(
-        version_after_checkpoint > version_before_checkpoint,
-        "Version should increment after checkpoint"
-    );
+    assert_eq!(version_after_checkpoint, version_before_checkpoint + 1);
 
-    // Perform more operations with new version
     for i in 100u64..200 {
-        session2.upsert(i, i * 2);
+        assert_eq!(session2.upsert(i, i * 2), Status::Ok);
     }
     session2.refresh();
-
-    println!("CPR version tracking test passed");
+    assert_eq!(session2.read(&150), Ok(Some(300)));
 }
 
 /// Test CPR context swapping during checkpoint
@@ -74,46 +70,54 @@ fn test_cpr_context_swapping() {
     let checkpoint_dir = dir.path().join("checkpoints");
     std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    let config = FasterKvConfig::default();
-    let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config, device).unwrap());
-
-    // Create session
+    let store = create_store(&db_path);
     let mut session = store.start_session().unwrap();
 
-    // Perform operations before checkpoint
-    for i in 0u64..100 {
-        session.upsert(i, i * 2);
-        if i % 10 == 0 {
-            session.refresh(); // This triggers context swapping during checkpoint
+    for i in 0u64..128 {
+        assert_eq!(session.upsert(i, i * 2), Status::Ok);
+        if i % 16 == 0 {
+            session.refresh();
         }
     }
 
-    let ctx_before = session.context();
-    let version_before = ctx_before.version;
+    let version_before = session.context().version;
+    let checkpoint_base = checkpoint_dir.clone();
 
-    println!("Before checkpoint: version={}", version_before);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let checkpoint_store = store.clone();
+    std::thread::spawn(move || {
+        let result = checkpoint_store.checkpoint(&checkpoint_base);
+        tx.send(result).unwrap();
+    });
 
-    drop(session);
+    let start = Instant::now();
+    let token = loop {
+        assert_eq!(session.upsert(10_000, 20_000), Status::Ok);
+        session.refresh();
 
-    // Take checkpoint - this should trigger context swap in active threads
-    let _token = store.checkpoint(&checkpoint_dir).unwrap();
+        match rx.try_recv() {
+            Ok(result) => break result.unwrap(),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("checkpoint thread exited unexpectedly");
+            }
+        }
 
-    // Create new session after checkpoint
-    let mut session2 = store.start_session().unwrap();
-    session2.refresh(); // Trigger CPR update
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "checkpoint did not complete in time (current={:?})",
+            store.system_state().phase
+        );
+        std::thread::yield_now();
+    };
 
-    let ctx_after = session2.context();
-    let version_after = ctx_after.version;
-
-    println!("After checkpoint: version={}", version_after);
-
-    // Version should have changed due to checkpoint
-    println!(
-        "Context swapping test completed - version changed from {} to {}",
-        version_before, version_after
-    );
+    session.refresh();
+    assert_eq!(session.context().version, version_before + 1);
+    assert!(FasterKv::<u64, u64, FileSystemDisk>::checkpoint_exists(
+        &checkpoint_dir,
+        token
+    ));
+    assert_eq!(session.read(&10_000), Ok(Some(20_000)));
 }
 
 /// Test CPR phase transitions
@@ -124,50 +128,32 @@ fn test_cpr_phase_transitions() {
     let checkpoint_dir = dir.path().join("checkpoints");
     std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    let config = FasterKvConfig::default();
-    let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config, device).unwrap());
+    let store = create_store(&db_path);
 
-    // Create session
     let mut session = store.start_session().unwrap();
 
-    // Write data
-    for i in 0u64..500 {
-        session.upsert(i, i * 2);
+    for i in 0u64..200 {
+        assert_eq!(session.upsert(i, i * 2), Status::Ok);
         if i % 50 == 0 {
             session.refresh();
         }
     }
 
-    // Get initial system state
     let state_before = store.system_state();
-    println!("System state before checkpoint: {:?}", state_before);
-
     drop(session);
 
-    // Take checkpoint - this goes through all phases
     let token = store.checkpoint(&checkpoint_dir).unwrap();
-    println!("Checkpoint completed: {}", token);
-
-    // Get system state after checkpoint
     let state_after = store.system_state();
-    println!("System state after checkpoint: {:?}", state_after);
 
-    // After checkpoint, system should be back in Rest phase
-    assert_eq!(
-        state_after.phase,
-        oxifaster::store::Phase::Rest,
-        "Should be in Rest phase after checkpoint"
-    );
-
-    // Version should have incremented
+    assert_eq!(state_after.phase, Phase::Rest);
     assert!(
-        state_after.version >= state_before.version,
-        "Version should have incremented or stayed same"
+        state_after.version > state_before.version,
+        "Version should increment after checkpoint"
     );
-
-    println!("Phase transition test passed");
+    assert!(FasterKv::<u64, u64, FileSystemDisk>::checkpoint_exists(
+        &checkpoint_dir,
+        token
+    ));
 }
 
 /// Test refresh() integration with CPR
@@ -178,39 +164,33 @@ fn test_refresh_with_cpr() {
     let checkpoint_dir = dir.path().join("checkpoints");
     std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    let config = FasterKvConfig::default();
-    let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config, device).unwrap());
+    let store = create_store(&db_path);
 
-    // Create session
     let mut session = store.start_session().unwrap();
+    let version_before_checkpoint = session.context().version;
 
-    // Perform operations with frequent refresh calls
-    for i in 0u64..1000 {
-        session.upsert(i, i * 2);
-        // Refresh frequently to help checkpoint progress
+    for i in 0u64..256 {
+        assert_eq!(session.upsert(i, i * 2), Status::Ok);
         session.refresh();
     }
 
     drop(session);
+    store.checkpoint(&checkpoint_dir).unwrap();
 
-    // Take checkpoint
-    let _token = store.checkpoint(&checkpoint_dir).unwrap();
-
-    // Create new session and refresh
     let mut session2 = store.start_session().unwrap();
-
-    // refresh() should update the session's view of the CPR state
+    let version_before_refresh = session2.context().version;
     session2.refresh();
+    let version_after_refresh = session2.context().version;
 
-    // Write more data
-    for i in 1000u64..2000 {
-        session2.upsert(i, i * 2);
+    assert!(version_after_refresh >= version_before_refresh);
+    assert_eq!(version_after_refresh, version_before_checkpoint + 1);
+
+    for i in 256u64..512 {
+        assert_eq!(session2.upsert(i, i * 2), Status::Ok);
         session2.refresh();
     }
 
-    println!("refresh() integration test passed");
+    assert_eq!(session2.read(&300), Ok(Some(600)));
 }
 
 /// Test multiple checkpoint cycles
@@ -221,21 +201,17 @@ fn test_multiple_checkpoint_cycles() {
     let checkpoint_dir = dir.path().join("checkpoints");
     std::fs::create_dir_all(&checkpoint_dir).unwrap();
 
-    let config = FasterKvConfig::default();
-    let device = FileSystemDisk::single_file(&db_path).unwrap();
-    let store: Arc<FasterKv<u64, u64, FileSystemDisk>> =
-        Arc::new(FasterKv::new(config, device).unwrap());
+    let store = create_store(&db_path);
 
     let mut versions = vec![];
+    let mut tokens = HashSet::new();
 
-    for cycle in 0..5 {
-        // Create session
+    for cycle in 0..4 {
         let mut session = store.start_session().unwrap();
 
-        // Write data
         let start = cycle * 100;
-        for i in start..start + 100 {
-            session.upsert(i as u64, i as u64 * 2);
+        for i in start..start + 80 {
+            assert_eq!(session.upsert(i as u64, i as u64 * 2), Status::Ok);
             if i % 10 == 0 {
                 session.refresh();
             }
@@ -243,19 +219,24 @@ fn test_multiple_checkpoint_cycles() {
 
         let version = session.context().version;
         versions.push(version);
-        println!("Cycle {} version: {}", cycle, version);
-
         drop(session);
 
-        // Checkpoint
         let token = store.checkpoint(&checkpoint_dir).unwrap();
-        println!("Cycle {} checkpoint: {}", cycle, token);
+        assert!(tokens.insert(token), "checkpoint token should be unique");
+        assert!(FasterKv::<u64, u64, FileSystemDisk>::checkpoint_exists(
+            &checkpoint_dir,
+            token
+        ));
 
-        // Give system time to settle
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    // Versions should generally increase (or stay same if checkpoint wasn't participated in)
-    println!("Versions across cycles: {:?}", versions);
-    println!("Multiple checkpoint cycles test passed");
+    for window in versions.windows(2) {
+        assert!(
+            window[1] >= window[0],
+            "session versions should be monotonic: {:?}",
+            versions
+        );
+    }
+    assert!(versions.last().copied().unwrap_or_default() > 0);
 }

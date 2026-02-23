@@ -714,6 +714,13 @@ fn test_wait_pending_timeout_aborts_checkpoint() {
     assert_eq!(state.phase, Phase::Rest);
 
     store.unregister_thread(idle_tid);
+
+    // A subsequent checkpoint should succeed after the timed-out attempt.
+    let retry_token = store.checkpoint(dir.path()).unwrap();
+    assert!(FasterKv::<u64, u64, NullDisk>::checkpoint_exists(
+        dir.path(),
+        retry_token
+    ));
 }
 
 // ============ Page Eviction Integration Tests ============

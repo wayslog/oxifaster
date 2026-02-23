@@ -1,5 +1,5 @@
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -1143,7 +1143,40 @@ where
     /// This ensures that the recovered session states have reasonable serial numbers
     /// that are consistent with the checkpoint boundary.
     fn validate_session_serials(log_meta: &LogMetadata) -> io::Result<()> {
+        let session_count = log_meta.session_states.len();
+        if session_count > crate::constants::MAX_THREADS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Checkpoint contains {} sessions, exceeds MAX_THREADS={}",
+                    session_count,
+                    crate::constants::MAX_THREADS
+                ),
+            ));
+        }
+
+        if log_meta.num_threads as usize != session_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Checkpoint num_threads mismatch: header={}, session_states={}",
+                    log_meta.num_threads, session_count
+                ),
+            ));
+        }
+
+        let mut seen_guids = HashSet::with_capacity(session_count);
         for session_state in &log_meta.session_states {
+            if !seen_guids.insert(session_state.guid) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Duplicate session GUID in checkpoint: {}",
+                        session_state.guid
+                    ),
+                ));
+            }
+
             // Skip validation for new sessions (serial number 0)
             if session_state.serial_num == 0 {
                 continue;

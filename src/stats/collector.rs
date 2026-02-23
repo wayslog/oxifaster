@@ -278,6 +278,21 @@ impl StatsCollector {
                 .operational
                 .pending_io_failed
                 .load(Ordering::Relaxed),
+            auto_flush_runs: self
+                .store_stats
+                .operational
+                .auto_flush_runs
+                .load(Ordering::Relaxed),
+            auto_flush_bytes: self
+                .store_stats
+                .operational
+                .auto_flush_bytes
+                .load(Ordering::Relaxed),
+            auto_flush_failures: self
+                .store_stats
+                .operational
+                .auto_flush_failures
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -351,6 +366,12 @@ pub struct StatsSnapshot {
     pub pending_io_completed: u64,
     /// Pending I/O failures
     pub pending_io_failed: u64,
+    /// Auto-flush runs completed successfully
+    pub auto_flush_runs: u64,
+    /// Auto-flush bytes advanced
+    pub auto_flush_bytes: u64,
+    /// Auto-flush failures
+    pub auto_flush_failures: u64,
 }
 
 impl StatsSnapshot {

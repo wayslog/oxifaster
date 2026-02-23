@@ -2,6 +2,7 @@
 //!
 //! This module provides the main FasterKV store implementation.
 
+mod auto_flush;
 mod checkpoint;
 mod compaction;
 mod cpr;
@@ -617,6 +618,7 @@ where
 
     /// Get a snapshot of all statistics
     pub fn stats_snapshot(&self) -> crate::stats::StatsSnapshot {
+        self.refresh_auto_flush_operational_stats();
         self.stats_collector.snapshot()
     }
 
@@ -637,6 +639,7 @@ where
 
     /// Get operational statistics (checkpoint/compaction/growth/recovery)
     pub fn operational_stats(&self) -> &crate::stats::OperationalStats {
+        self.refresh_auto_flush_operational_stats();
         &self.stats_collector.store_stats.operational
     }
 
@@ -648,6 +651,14 @@ where
     /// Get the storage device
     pub fn device(&self) -> &Arc<D> {
         &self.device
+    }
+
+    fn refresh_auto_flush_operational_stats(&self) {
+        let auto = self.auto_flush_metrics();
+        self.stats_collector
+            .store_stats
+            .operational
+            .set_auto_flush_metrics(auto.runs_total, auto.bytes_total, auto.failures_total);
     }
 
     /// Returns the approximate number of entries in the hash index.

@@ -292,6 +292,24 @@ impl PrometheusRenderer {
             "Total pending I/O failures recorded.",
             snapshot.pending_io_failed,
         );
+        self.metric_counter_u64(
+            &mut out,
+            "oxifaster_auto_flush_runs_total",
+            "Total automatic hybrid-log flush runs completed successfully.",
+            snapshot.auto_flush_runs,
+        );
+        self.metric_counter_u64(
+            &mut out,
+            "oxifaster_auto_flush_bytes_total",
+            "Total bytes advanced by automatic hybrid-log flushing.",
+            snapshot.auto_flush_bytes,
+        );
+        self.metric_counter_u64(
+            &mut out,
+            "oxifaster_auto_flush_failures_total",
+            "Total automatic hybrid-log flush failures.",
+            snapshot.auto_flush_failures,
+        );
 
         out
     }
@@ -596,11 +614,15 @@ mod tests {
             pending_io_submitted: 0,
             pending_io_completed: 0,
             pending_io_failed: 0,
+            auto_flush_runs: 0,
+            auto_flush_bytes: 0,
+            auto_flush_failures: 0,
         };
 
         let out = PrometheusRenderer::new().render_snapshot(&snapshot);
         assert!(out.contains("oxifaster_operations_total 3"));
         assert!(out.contains("# TYPE oxifaster_reads_total counter"));
+        assert!(out.contains("oxifaster_auto_flush_runs_total 0"));
     }
 
     #[cfg(feature = "prometheus")]
@@ -640,13 +662,24 @@ mod tests {
             pending_io_submitted: 0,
             pending_io_completed: 0,
             pending_io_failed: 0,
+            auto_flush_runs: 0,
+            auto_flush_bytes: 0,
+            auto_flush_failures: 0,
         };
         let renderer = PrometheusRenderer::new();
         let render = Arc::new(move || renderer.render_snapshot(&snapshot));
 
-        let server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), render)
-            .await
-            .unwrap();
+        let server = match MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), render).await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "Skipping prometheus HTTP bind test in restricted environment: {}",
+                    err
+                );
+                return;
+            }
+            Err(err) => panic!("failed to bind metrics server: {err}"),
+        };
         let addr = server.local_addr();
 
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();

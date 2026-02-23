@@ -1,5 +1,6 @@
 mod tests {
     use super::*;
+    use crate::allocator::AutoFlushConfig;
     use crate::compaction::AutoCompactionConfig;
     use crate::device::NullDisk;
     use crate::store::{Action, Phase};

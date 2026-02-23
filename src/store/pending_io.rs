@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 
-use crossbeam::channel::{Receiver, Sender, unbounded};
+use crossbeam::channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use parking_lot::Mutex;
 
 use crate::address::Address;
@@ -60,8 +60,11 @@ pub(crate) struct PendingIoManager<D: StorageDevice> {
 }
 
 impl<D: StorageDevice> PendingIoManager<D> {
+    const MAX_INFLIGHT_READS: usize = 8192;
+    const REQUEST_QUEUE_CAPACITY: usize = 4096;
+
     pub(crate) fn new(device: Arc<D>, page_size: usize) -> Self {
-        let (tx, req_rx) = unbounded::<IoRequest>();
+        let (tx, req_rx) = bounded::<IoRequest>(Self::REQUEST_QUEUE_CAPACITY);
         let (comp_tx, rx) = unbounded::<IoCompletion>();
 
         const U32_BYTES: usize = std::mem::size_of::<u32>();
@@ -234,7 +237,7 @@ impl<D: StorageDevice> PendingIoManager<D> {
     ///
     /// Returns:
     /// - `true`: the request was newly submitted (caller should increment pending count)
-    /// - `false`: a request is already inflight (caller should not increment pending count)
+    /// - `false`: the request was deduplicated or dropped due to backpressure
     pub(crate) fn submit_read_bytes(
         &self,
         thread_id: usize,
@@ -248,25 +251,26 @@ impl<D: StorageDevice> PendingIoManager<D> {
             if !inflight.insert(address.control()) {
                 return false;
             }
+            if inflight.len() > Self::MAX_INFLIGHT_READS {
+                inflight.remove(&address.control());
+                return false;
+            }
         }
 
-        // If send fails, the worker has exited; treat as "not submitted" and allow retry.
-        if self
-            .tx
-            .send(IoRequest::ReadBytes {
-                thread_id,
-                thread_tag,
-                ctx_id,
-                address,
-                len,
-            })
-            .is_err()
-        {
-            self.inflight_reads.lock().remove(&address.control());
-            return false;
+        match self.tx.try_send(IoRequest::ReadBytes {
+            thread_id,
+            thread_tag,
+            ctx_id,
+            address,
+            len,
+        }) {
+            Ok(()) => true,
+            // If the queue is saturated or the worker has exited, allow retry from caller.
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.inflight_reads.lock().remove(&address.control());
+                false
+            }
         }
-
-        true
     }
 
     pub(crate) fn submit_read_varlen_record(
@@ -281,23 +285,24 @@ impl<D: StorageDevice> PendingIoManager<D> {
             if !inflight.insert(address.control()) {
                 return false;
             }
+            if inflight.len() > Self::MAX_INFLIGHT_READS {
+                inflight.remove(&address.control());
+                return false;
+            }
         }
 
-        if self
-            .tx
-            .send(IoRequest::ReadVarLenRecord {
-                thread_id,
-                thread_tag,
-                ctx_id,
-                address,
-            })
-            .is_err()
-        {
-            self.inflight_reads.lock().remove(&address.control());
-            return false;
+        match self.tx.try_send(IoRequest::ReadVarLenRecord {
+            thread_id,
+            thread_tag,
+            ctx_id,
+            address,
+        }) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.inflight_reads.lock().remove(&address.control());
+                false
+            }
         }
-
-        true
     }
 
     /// Drain a batch of completion events (non-blocking).

@@ -59,26 +59,30 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
         };
 
         for page in pages_to_flush {
-            match self.flush_shared.page_flush_status(page) {
-                FlushStatus::Flushed => {}
-                FlushStatus::Dirty => {
-                    if !self.flush_shared.try_mark_flushing(page) {
-                        while self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                        continue;
+            loop {
+                match self.flush_shared.page_flush_status(page) {
+                    FlushStatus::Flushed => break,
+                    FlushStatus::Flushing => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-
-                    if let Some(page_data) = self.pages.get_page(page) {
-                        if let Err(e) = write_page_sync(page, page_data) {
-                            self.flush_shared.mark_page_dirty_after_error(page);
-                            if tracing::enabled!(tracing::Level::WARN) {
-                                tracing::warn!(page, error = %e, "hybrid log flush failed");
-                            }
-                            return Err(e);
+                    FlushStatus::Dirty => {
+                        if !self.flush_shared.try_mark_flushing(page) {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            continue;
                         }
-                        self.flush_shared.mark_page_flushed(page);
-                    } else {
+
+                        if let Some(page_data) = self.pages.get_page(page) {
+                            if let Err(e) = write_page_sync(page, page_data) {
+                                self.flush_shared.mark_page_dirty_after_error(page);
+                                if tracing::enabled!(tracing::Level::WARN) {
+                                    tracing::warn!(page, error = %e, "hybrid log flush failed");
+                                }
+                                return Err(e);
+                            }
+                            self.flush_shared.mark_page_flushed(page);
+                            break;
+                        }
+
                         self.flush_shared.mark_page_dirty_after_error(page);
                         if tracing::enabled!(tracing::Level::WARN) {
                             tracing::warn!(page, "hybrid log flush failed: missing page");
@@ -86,11 +90,6 @@ impl<D: StorageDevice> PersistentMemoryMalloc<D> {
                         return Err(io::Error::other(format!(
                             "missing in-memory page {page} during flush"
                         )));
-                    }
-                }
-                FlushStatus::Flushing => {
-                    while self.flush_shared.page_flush_status(page) != FlushStatus::Flushed {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
             }
