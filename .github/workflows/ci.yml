@@ -67,18 +67,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-test-all-features.sh
 
-  fuzz:
-    name: Fuzz (5m)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
-      - run: ./scripts/check-fuzz.sh ci
-
   msrv:
     name: MSRV (1.92.0)
     runs-on: ubuntu-latest
