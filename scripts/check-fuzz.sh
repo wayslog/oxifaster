@@ -41,18 +41,39 @@ TIMEOUT_PER_INPUT="${OXIFASTER_FUZZ_TIMEOUT:-20}"
 MAX_LEN="${OXIFASTER_FUZZ_MAX_LEN:-4096}"
 RSS_LIMIT_MB="${OXIFASTER_FUZZ_RSS_LIMIT_MB:-4096}"
 
-if ! cargo +nightly fuzz --help >/dev/null 2>&1; then
+declare -a FUZZ_CMD=()
+
+# Prefer explicit nightly invocations first.
+if command -v rustup >/dev/null 2>&1 && rustup run nightly cargo fuzz --help >/dev/null 2>&1; then
+  FUZZ_CMD=(rustup run nightly cargo fuzz)
+elif cargo +nightly fuzz --help >/dev/null 2>&1; then
+  FUZZ_CMD=(cargo +nightly fuzz)
+elif cargo fuzz --help >/dev/null 2>&1 && rustc --version | grep -q "nightly"; then
+  # Fallback for environments where current cargo/rustc are already nightly.
+  FUZZ_CMD=(cargo fuzz)
+else
   echo "cargo-fuzz with nightly is required."
   echo "Install with:"
   echo "  rustup toolchain install nightly"
   echo "  cargo install cargo-fuzz"
+  echo
+  echo "Diagnostics:"
+  echo "  cargo version: $(cargo --version 2>/dev/null || echo unavailable)"
+  if command -v rustup >/dev/null 2>&1; then
+    echo "  rustup version: $(rustup --version | head -n1)"
+    echo "  installed toolchains:"
+    rustup toolchain list || true
+  else
+    echo "  rustup: not found"
+  fi
   exit 1
 fi
 
 echo "==> Running cargo-fuzz target: fasterkv_public_api"
+echo "    command=${FUZZ_CMD[*]}"
 echo "    mode=$MODE max_total_time=${MAX_TOTAL_TIME}s timeout=${TIMEOUT_PER_INPUT}s max_len=${MAX_LEN} rss_limit_mb=${RSS_LIMIT_MB}"
 
-cargo +nightly fuzz run fasterkv_public_api -- \
+"${FUZZ_CMD[@]}" run fasterkv_public_api -- \
   -max_total_time="${MAX_TOTAL_TIME}" \
   -timeout="${TIMEOUT_PER_INPUT}" \
   -max_len="${MAX_LEN}" \
