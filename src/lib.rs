@@ -39,7 +39,7 @@
 //! // Create a store with default configuration
 //! let config = FasterKvConfig::default();
 //! let device = NullDisk::new();
-//! let store = Arc::new(FasterKv::new(config, device));
+//! let store = Arc::new(FasterKv::new(config, device).unwrap());
 //!
 //! // Start a session (required for all operations)
 //! let mut session = store.start_session().expect("failed to start session");
@@ -94,7 +94,7 @@
 //! use oxifaster::cache::ReadCacheConfig;
 //!
 //! let cache_config = ReadCacheConfig::new(256 * 1024 * 1024); // 256 MB cache
-//! let store = FasterKv::with_read_cache(config, device, cache_config);
+//! let store = FasterKv::with_read_cache(config, device, cache_config).unwrap();
 //! ```
 //!
 //! ### Log Compaction

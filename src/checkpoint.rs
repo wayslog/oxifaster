@@ -57,6 +57,7 @@ pub mod binary_format;
 mod locks;
 mod recovery;
 pub mod serialization;
+pub(crate) mod sidecar;
 mod state;
 
 pub use locks::{

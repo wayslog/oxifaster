@@ -148,10 +148,8 @@ fn run_varlen_fuzz(
 #[test]
 fn fuzz_kv_varlen_smoke() {
     let p = fuzz_util::params("kv_varlen_smoke", 2_000, 1);
-    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(
-        small_store_config(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<Utf8, Utf8, _>::new(small_store_config(), NullDisk::new()).unwrap());
 
     let report = run_varlen_fuzz(&store, p.steps, p.seed);
     if fuzz_util::verbose() {
@@ -176,10 +174,8 @@ fn fuzz_kv_varlen_smoke() {
 #[ignore]
 fn fuzz_kv_varlen_stress() {
     let p = fuzz_util::params("kv_varlen_stress", 50_000, 1);
-    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(
-        small_store_config(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<Utf8, Utf8, _>::new(small_store_config(), NullDisk::new()).unwrap());
 
     let report = run_varlen_fuzz(&store, p.steps, p.seed);
     let snap = store.stats_snapshot();

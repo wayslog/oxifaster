@@ -49,6 +49,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-test.sh
 
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-examples.sh
+
   test-all-features:
     name: Test (all features)
     runs-on: ubuntu-latest

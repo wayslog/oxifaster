@@ -100,6 +100,8 @@ impl fmt::Display for Status {
     }
 }
 
+impl std::error::Error for Status {}
+
 /// Internal operation status used within FASTER
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -574,5 +576,18 @@ mod tests {
     fn test_index_operation_type_debug() {
         let debug_str = format!("{:?}", IndexOperationType::Retrieve);
         assert!(debug_str.contains("Retrieve"));
+    }
+
+    #[test]
+    fn test_status_implements_std_error() {
+        let status = Status::IoError;
+
+        // Verify it works as &dyn std::error::Error
+        let err: &dyn std::error::Error = &status;
+        assert_eq!(err.to_string(), "IoError");
+
+        // Verify it works as Box<dyn std::error::Error>
+        let boxed: Box<dyn std::error::Error> = Box::new(status);
+        assert_eq!(boxed.to_string(), "IoError");
     }
 }

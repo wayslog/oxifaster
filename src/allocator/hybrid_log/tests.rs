@@ -1,5 +1,8 @@
 use super::*;
 use crate::device::NullDisk;
+use crate::device::SyncStorageDevice;
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn create_test_allocator() -> PersistentMemoryMalloc<NullDisk> {
@@ -10,6 +13,98 @@ fn create_test_allocator() -> PersistentMemoryMalloc<NullDisk> {
         segment_size: 1 << 20,
     };
     let device = Arc::new(NullDisk::new());
+    PersistentMemoryMalloc::new(config, device)
+}
+
+struct DelayedDisk {
+    delay: Duration,
+    size: AtomicU64,
+}
+
+impl DelayedDisk {
+    fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            size: AtomicU64::new(0),
+        }
+    }
+}
+
+impl SyncStorageDevice for DelayedDisk {
+    fn read_sync(&self, _offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        buf.fill(0);
+        Ok(buf.len())
+    }
+
+    fn write_sync(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(self.delay);
+        let new_end = offset + buf.len() as u64;
+        self.size.fetch_max(new_end, Ordering::AcqRel);
+        Ok(buf.len())
+    }
+
+    fn flush_sync(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn truncate_sync(&self, size: u64) -> io::Result<()> {
+        self.size.store(size, Ordering::Release);
+        Ok(())
+    }
+
+    fn size_sync(&self) -> io::Result<u64> {
+        Ok(self.size.load(Ordering::Acquire))
+    }
+}
+
+struct FailingDisk {
+    failed: AtomicBool,
+}
+
+impl FailingDisk {
+    fn new() -> Self {
+        Self {
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+}
+
+impl SyncStorageDevice for FailingDisk {
+    fn read_sync(&self, _offset: u64, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    fn write_sync(&self, _offset: u64, _buf: &[u8]) -> io::Result<usize> {
+        self.failed.store(true, Ordering::Release);
+        Err(io::Error::other("injected write failure"))
+    }
+
+    fn flush_sync(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn truncate_sync(&self, _size: u64) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn size_sync(&self) -> io::Result<u64> {
+        Ok(0)
+    }
+}
+
+fn create_auto_flush_allocator<D: crate::device::StorageDevice>(
+    device: Arc<D>,
+) -> PersistentMemoryMalloc<D> {
+    let config = HybridLogConfig {
+        page_size: 256,
+        memory_pages: 8,
+        mutable_pages: 1,
+        segment_size: 1 << 20,
+    };
     PersistentMemoryMalloc::new(config, device)
 }
 
@@ -29,6 +124,20 @@ fn wait_for_safe_read_only(
         "timeout waiting for safe_read_only to reach {target}, current={}",
         allocator.get_safe_read_only_address()
     );
+}
+
+fn wait_for_condition<F>(timeout: Duration, mut predicate: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("condition not satisfied within {:?}", timeout);
 }
 
 #[test]
@@ -389,6 +498,93 @@ fn test_recover_fails_without_snapshot() {
 }
 
 #[test]
+fn test_recover_fails_when_sidecar_missing_page_checksum() {
+    let config = HybridLogConfig {
+        page_size: 4096,
+        memory_pages: 16,
+        mutable_pages: 4,
+        segment_size: 1 << 20,
+    };
+    let device = Arc::new(NullDisk::new());
+    let allocator = PersistentMemoryMalloc::new(config, device);
+
+    allocator.allocate(1000).unwrap();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let token = uuid::Uuid::new_v4();
+    let cp_dir = temp_dir.path().join(token.to_string());
+    std::fs::create_dir_all(&cp_dir).unwrap();
+    allocator.checkpoint(&cp_dir, token, 1).unwrap();
+
+    let crc_path = cp_dir.join("log.snapshot.crc");
+    std::fs::write(&crc_path, 0u64.to_le_bytes()).unwrap();
+
+    let device = Arc::new(NullDisk::new());
+    let mut recovered = PersistentMemoryMalloc::new(
+        HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16,
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        },
+        device,
+    );
+
+    let err = recovered.recover(&cp_dir, None).unwrap_err();
+    assert!(
+        err.to_string().contains("missing checksum entry"),
+        "expected missing checksum error, got: {err}"
+    );
+}
+
+#[test]
+fn test_recover_fails_when_sidecar_has_extra_page() {
+    let config = HybridLogConfig {
+        page_size: 4096,
+        memory_pages: 16,
+        mutable_pages: 4,
+        segment_size: 1 << 20,
+    };
+    let device = Arc::new(NullDisk::new());
+    let allocator = PersistentMemoryMalloc::new(config, device);
+
+    allocator.allocate(1000).unwrap();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let token = uuid::Uuid::new_v4();
+    let cp_dir = temp_dir.path().join(token.to_string());
+    std::fs::create_dir_all(&cp_dir).unwrap();
+    allocator.checkpoint(&cp_dir, token, 1).unwrap();
+
+    let snapshot_path = cp_dir.join("log.snapshot");
+    let mut checksums: Vec<(u64, u64)> =
+        crate::checkpoint::sidecar::read_snapshot_checksums(&snapshot_path)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .collect();
+    checksums.push((u64::MAX - 1, 0xDEADBEEF));
+    crate::checkpoint::sidecar::write_snapshot_checksums(&snapshot_path, &checksums).unwrap();
+
+    let device = Arc::new(NullDisk::new());
+    let mut recovered = PersistentMemoryMalloc::new(
+        HybridLogConfig {
+            page_size: 4096,
+            memory_pages: 16,
+            mutable_pages: 4,
+            segment_size: 1 << 20,
+        },
+        device,
+    );
+
+    let err = recovered.recover(&cp_dir, None).unwrap_err();
+    assert!(
+        err.to_string().contains("not present in snapshot"),
+        "expected sidecar mismatch error, got: {err}"
+    );
+}
+
+#[test]
 fn test_recovered_data_is_readable() {
     let config = HybridLogConfig {
         page_size: 4096,
@@ -476,6 +672,7 @@ fn test_auto_flush_config_default() {
     assert!(!config.enabled);
     assert_eq!(config.check_interval_ms, 100);
     assert_eq!(config.min_readonly_pages, 4);
+    assert_eq!(config.memory_pressure_threshold_percent, 85);
 }
 
 #[test]
@@ -511,15 +708,26 @@ fn test_auto_flush_config_with_min_readonly_pages() {
 }
 
 #[test]
+fn test_auto_flush_config_with_memory_pressure_threshold() {
+    let config = AutoFlushConfig::new().with_memory_pressure_threshold_percent(60);
+    assert_eq!(config.memory_pressure_threshold_percent, 60);
+
+    let config = AutoFlushConfig::new().with_memory_pressure_threshold_percent(0);
+    assert_eq!(config.memory_pressure_threshold_percent, 1);
+}
+
+#[test]
 fn test_auto_flush_config_clone() {
     let config = AutoFlushConfig::new()
         .with_enabled(true)
         .with_check_interval_ms(50)
-        .with_min_readonly_pages(2);
+        .with_min_readonly_pages(2)
+        .with_memory_pressure_threshold_percent(70);
     let cloned = config.clone();
     assert!(cloned.enabled);
     assert_eq!(cloned.check_interval_ms, 50);
     assert_eq!(cloned.min_readonly_pages, 2);
+    assert_eq!(cloned.memory_pressure_threshold_percent, 70);
 }
 
 #[test]
@@ -527,4 +735,328 @@ fn test_auto_flush_config_debug() {
     let config = AutoFlushConfig::new();
     let debug_str = format!("{:?}", config);
     assert!(debug_str.contains("AutoFlushConfig"));
+}
+
+#[test]
+fn test_auto_flush_start_stop() {
+    let allocator = create_test_allocator();
+    let config = AutoFlushConfig::new()
+        .with_enabled(true)
+        .with_check_interval_ms(20)
+        .with_min_readonly_pages(1);
+
+    assert!(allocator.start_auto_flush(config.clone()));
+    assert!(allocator.is_auto_flush_running());
+    assert_eq!(allocator.auto_flush_config().check_interval_ms, 20);
+    assert!(!allocator.start_auto_flush(config));
+    assert!(allocator.stop_auto_flush());
+    assert!(!allocator.is_auto_flush_running());
+    assert!(!allocator.stop_auto_flush());
+}
+
+#[test]
+fn test_auto_flush_success_metrics() {
+    let device = Arc::new(DelayedDisk::new(Duration::from_millis(20)));
+    let allocator = create_auto_flush_allocator(device);
+    let page_size = allocator.page_size() as u32;
+
+    for _ in 0..6 {
+        allocator.allocate(page_size).unwrap();
+    }
+
+    allocator.set_auto_flush_config(
+        AutoFlushConfig::new()
+            .with_enabled(true)
+            .with_check_interval_ms(10)
+            .with_min_readonly_pages(1),
+    );
+
+    wait_for_condition(Duration::from_secs(3), || {
+        allocator.auto_flush_metrics().runs_total > 0
+    });
+
+    let metrics = allocator.auto_flush_metrics();
+    allocator.stop_auto_flush();
+    assert!(metrics.runs_total > 0);
+    assert_eq!(metrics.failures_total, 0);
+}
+
+#[test]
+fn test_auto_flush_triggers_under_memory_pressure() {
+    let device = Arc::new(DelayedDisk::new(Duration::from_millis(10)));
+    let allocator = create_auto_flush_allocator(device);
+    let page_size = allocator.page_size() as u32;
+
+    for _ in 0..8 {
+        allocator.allocate(page_size).unwrap();
+    }
+
+    allocator.set_auto_flush_config(
+        AutoFlushConfig::new()
+            .with_enabled(true)
+            .with_check_interval_ms(10)
+            .with_min_readonly_pages(128)
+            .with_memory_pressure_threshold_percent(10),
+    );
+
+    wait_for_condition(Duration::from_secs(3), || {
+        allocator.auto_flush_metrics().runs_total > 0
+    });
+
+    let metrics = allocator.auto_flush_metrics();
+    allocator.stop_auto_flush();
+    assert!(metrics.runs_total > 0);
+}
+
+#[test]
+fn test_auto_flush_failure_metrics() {
+    let device = Arc::new(FailingDisk::new());
+    let allocator = create_auto_flush_allocator(Arc::clone(&device));
+    let page_size = allocator.page_size() as u32;
+
+    for _ in 0..6 {
+        allocator.allocate(page_size).unwrap();
+    }
+
+    allocator.set_auto_flush_config(
+        AutoFlushConfig::new()
+            .with_enabled(true)
+            .with_check_interval_ms(10)
+            .with_min_readonly_pages(1),
+    );
+
+    wait_for_condition(Duration::from_secs(2), || {
+        allocator.auto_flush_metrics().failures_total > 0
+    });
+
+    let metrics = allocator.auto_flush_metrics();
+    allocator.stop_auto_flush();
+
+    assert!(device.has_failed());
+    assert!(metrics.failures_total > 0);
+}
+
+#[test]
+fn test_auto_flush_disabled_does_not_run() {
+    let device = Arc::new(DelayedDisk::new(Duration::from_millis(20)));
+    let allocator = create_auto_flush_allocator(device);
+    let page_size = allocator.page_size() as u32;
+
+    for _ in 0..6 {
+        allocator.allocate(page_size).unwrap();
+    }
+
+    allocator.set_auto_flush_config(
+        AutoFlushConfig::new()
+            .with_enabled(false)
+            .with_check_interval_ms(10)
+            .with_min_readonly_pages(1),
+    );
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    let metrics = allocator.auto_flush_metrics();
+    assert!(!allocator.is_auto_flush_running());
+    assert_eq!(metrics.runs_total, 0);
+    assert_eq!(metrics.failures_total, 0);
+}
+
+// ============ HybridLogConfig Validation Tests ============
+
+#[test]
+fn test_hybrid_log_config_validate_ok() {
+    let config = HybridLogConfig::default();
+    assert!(config.validate().is_ok());
+
+    let config = HybridLogConfig::new(1 << 20, 12);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_hybrid_log_config_validate_zero_memory_pages() {
+    let config = HybridLogConfig {
+        page_size: 4096,
+        memory_pages: 0,
+        mutable_pages: 0,
+        segment_size: 1 << 30,
+    };
+    assert_eq!(
+        config.validate(),
+        Err(crate::status::Status::InvalidArgument)
+    );
+}
+
+#[test]
+fn test_hybrid_log_config_validate_non_power_of_two_page_size() {
+    let config = HybridLogConfig {
+        page_size: 3000,
+        memory_pages: 16,
+        mutable_pages: 4,
+        segment_size: 1 << 30,
+    };
+    assert_eq!(
+        config.validate(),
+        Err(crate::status::Status::InvalidArgument)
+    );
+}
+
+#[test]
+#[should_panic(expected = "page_size_bits must be less than 32")]
+fn test_hybrid_log_config_page_size_bits_overflow() {
+    HybridLogConfig::with_mutable_fraction(1 << 30, 32, 0.5);
+}
+
+// ============ Page Eviction Tests ============
+
+#[test]
+fn test_page_eviction_wraps_buffer() {
+    // Use a small buffer (8 pages) and small page size (4096 bytes) so that
+    // the circular buffer wraps quickly. With mutable_pages = 2 and 8 total
+    // pages, the read-only region starts after 2 pages are mutable, and the
+    // buffer wraps when page 8 is allocated (slot 0 needs to be reused).
+    let page_size_bits = 12; // 4096 bytes
+    let page_size: usize = 1 << page_size_bits;
+    let buffer_pages: u32 = 8;
+    let mutable_pages: u32 = 2;
+
+    let config = HybridLogConfig {
+        page_size,
+        memory_pages: buffer_pages,
+        mutable_pages,
+        segment_size: 1 << 30,
+    };
+
+    let device = Arc::new(crate::device::NullDisk::new());
+    let hlog = PersistentMemoryMalloc::new(config, device);
+
+    // Allocate records that fill many more pages than buffer_size.
+    // Each record is 64 bytes. With 4096-byte pages, that is 64 records per page.
+    // We want to fill at least 3x the buffer (24 pages) to force eviction.
+    let record_size: u32 = 64;
+    let records_per_page = page_size as u32 / record_size;
+    let total_records = records_per_page * buffer_pages * 3;
+
+    let mut success_count: u32 = 0;
+    for _ in 0..total_records {
+        match hlog.allocate(record_size) {
+            Ok(_addr) => {
+                success_count += 1;
+            }
+            Err(crate::status::Status::OutOfMemory) => {
+                // Eviction could not keep up; that is acceptable under NullDisk
+                // if the flush worker has not processed pages yet. The test
+                // verifies that we get *significantly* past the buffer size.
+                break;
+            }
+            Err(e) => panic!("Unexpected error from allocate: {:?}", e),
+        }
+    }
+
+    // We should have been able to allocate well beyond the initial buffer_pages
+    // worth of records because eviction reclaims old buffer slots.
+    let pages_allocated = success_count / records_per_page;
+    assert!(
+        pages_allocated > buffer_pages,
+        "Expected to allocate more than {} pages worth of records, but only got {} pages ({} records)",
+        buffer_pages,
+        pages_allocated,
+        success_count
+    );
+
+    // Verify head_address has advanced (pages were evicted).
+    let head = hlog.get_head_address();
+    assert!(
+        head > Address::new(0, 0),
+        "head_address should have advanced due to eviction, but is still at {:?}",
+        head
+    );
+}
+
+#[test]
+fn test_page_eviction_advances_safe_head() {
+    let page_size_bits = 12; // 4096 bytes
+    let page_size: usize = 1 << page_size_bits;
+    let buffer_pages: u32 = 8;
+    let mutable_pages: u32 = 2;
+
+    let config = HybridLogConfig {
+        page_size,
+        memory_pages: buffer_pages,
+        mutable_pages,
+        segment_size: 1 << 30,
+    };
+
+    let device = Arc::new(crate::device::NullDisk::new());
+    let hlog = PersistentMemoryMalloc::new(config, device);
+
+    // Fill enough to force at least one eviction.
+    let record_size: u32 = 64;
+    let records_per_page = page_size as u32 / record_size;
+    let total_records = records_per_page * (buffer_pages + 4);
+
+    for _ in 0..total_records {
+        if hlog.allocate(record_size).is_err() {
+            break;
+        }
+    }
+
+    // After eviction, get() for evicted addresses should return None.
+    let evicted_addr = Address::new(0, 0);
+    // SAFETY: We are checking that evicted addresses return None.
+    let result = unsafe { hlog.get(evicted_addr) };
+    if hlog.get_head_address() > evicted_addr {
+        assert!(
+            result.is_none(),
+            "get() should return None for evicted address"
+        );
+    }
+}
+
+#[test]
+fn test_try_evict_page_not_flushed() {
+    // Verify that try_evict_page returns false when the page has not been flushed.
+    let page_size: usize = 4096;
+    let buffer_pages: u32 = 8;
+    let mutable_pages: u32 = 2;
+
+    let config = HybridLogConfig {
+        page_size,
+        memory_pages: buffer_pages,
+        mutable_pages,
+        segment_size: 1 << 30,
+    };
+
+    let device = Arc::new(crate::device::NullDisk::new());
+    let hlog = PersistentMemoryMalloc::new(config, device);
+
+    // Without allocating anything, page 0 should not be evictable since
+    // safe_read_only_address has not advanced.
+    let evictable = hlog.try_evict_page(0);
+    assert!(
+        !evictable,
+        "Page 0 should not be evictable when safe_read_only_address is 0"
+    );
+}
+
+#[test]
+fn test_try_evict_for_new_page_no_wrap() {
+    // When new_page < buffer_size, no eviction is needed.
+    let page_size: usize = 4096;
+    let buffer_pages: u32 = 8;
+    let mutable_pages: u32 = 2;
+
+    let config = HybridLogConfig {
+        page_size,
+        memory_pages: buffer_pages,
+        mutable_pages,
+        segment_size: 1 << 30,
+    };
+
+    let device = Arc::new(crate::device::NullDisk::new());
+    let hlog = PersistentMemoryMalloc::new(config, device);
+
+    // new_page < buffer_size, should return Ok immediately.
+    assert!(hlog.try_evict_for_new_page(5).is_ok());
+    assert!(hlog.try_evict_for_new_page(0).is_ok());
+    assert!(hlog.try_evict_for_new_page(buffer_pages - 1).is_ok());
 }

@@ -657,9 +657,11 @@ impl<D: StorageDevice> FasterLog<D> {
         Ok(addresses)
     }
 
-    /// Commit all entries up to the current tail
+    /// Enqueue a commit up to the current tail.
     ///
-    /// Makes all appended entries durable.
+    /// This schedules a background flush but returns immediately without
+    /// waiting for durability. Use [`wait_for_commit`] on the returned
+    /// address, or call [`commit_wait`] for a synchronous durable commit.
     pub fn commit(&self) -> Result<Address, Status> {
         let tail = self.get_tail_address();
 
@@ -686,6 +688,15 @@ impl<D: StorageDevice> FasterLog<D> {
         }
 
         Ok(tail)
+    }
+
+    /// Commit and wait until all entries are durable on stable storage.
+    ///
+    /// Equivalent to calling [`commit`] followed by [`wait_for_commit`].
+    pub fn commit_wait(&self) -> Result<Address, Status> {
+        let addr = self.commit()?;
+        self.wait_for_commit(addr)?;
+        Ok(addr)
     }
 
     /// Wait for commit to complete up to the specified address

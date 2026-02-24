@@ -16,7 +16,7 @@ fn config() -> FasterKvConfig {
 
 #[test]
 fn test_read_view_fixed_record() {
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config(), NullDisk::new()));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config(), NullDisk::new()).unwrap());
     let mut session = store.start_session().unwrap();
 
     let key = 42u64;
@@ -41,7 +41,7 @@ fn test_read_view_fixed_record() {
 
 #[test]
 fn test_read_view_varlen_utf8() {
-    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(config(), NullDisk::new()));
+    let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(config(), NullDisk::new()).unwrap());
     let mut session = store.start_session().unwrap();
 
     let key = Utf8::from("k1");

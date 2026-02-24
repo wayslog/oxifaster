@@ -19,7 +19,7 @@ fn conditional_insert_after_delete_should_succeed() {
     let data_path = dir.path().join("oxifaster_conditional_insert.dat");
 
     let device = FileSystemDisk::single_file(&data_path).expect("open device");
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(test_store_config(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(test_store_config(), device).unwrap());
 
     let mut s = store.start_session().expect("start_session");
     assert_eq!(s.upsert(1, 10), Status::Ok);

@@ -570,6 +570,12 @@ pub struct OperationalStats {
     pub pending_io_completed: AtomicU64,
     /// Pending I/O failures
     pub pending_io_failed: AtomicU64,
+    /// Auto-flush runs completed successfully
+    pub auto_flush_runs: AtomicU64,
+    /// Auto-flush bytes advanced
+    pub auto_flush_bytes: AtomicU64,
+    /// Auto-flush failures
+    pub auto_flush_failures: AtomicU64,
 }
 
 impl OperationalStats {
@@ -648,6 +654,13 @@ impl OperationalStats {
         self.pending_io_failed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Set the latest auto-flush metrics snapshot.
+    pub fn set_auto_flush_metrics(&self, runs: u64, bytes: u64, failures: u64) {
+        self.auto_flush_runs.store(runs, Ordering::Relaxed);
+        self.auto_flush_bytes.store(bytes, Ordering::Relaxed);
+        self.auto_flush_failures.store(failures, Ordering::Relaxed);
+    }
+
     /// Reset all statistics
     pub fn reset(&self) {
         self.checkpoints_started.store(0, Ordering::Relaxed);
@@ -664,6 +677,9 @@ impl OperationalStats {
         self.pending_io_submitted.store(0, Ordering::Relaxed);
         self.pending_io_completed.store(0, Ordering::Relaxed);
         self.pending_io_failed.store(0, Ordering::Relaxed);
+        self.auto_flush_runs.store(0, Ordering::Relaxed);
+        self.auto_flush_bytes.store(0, Ordering::Relaxed);
+        self.auto_flush_failures.store(0, Ordering::Relaxed);
     }
 }
 

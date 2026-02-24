@@ -1,5 +1,6 @@
 mod tests {
     use super::*;
+    use crate::allocator::AutoFlushConfig;
     use crate::compaction::AutoCompactionConfig;
     use crate::device::NullDisk;
     use crate::store::{Action, Phase};
@@ -13,7 +14,7 @@ mod tests {
             mutable_fraction: 0.9,
         };
         let device = NullDisk::new();
-        Arc::new(FasterKv::new(config, device))
+        Arc::new(FasterKv::new(config, device).unwrap())
     }
 
 

@@ -409,9 +409,7 @@ fn fuzz_kv_pending_smoke_disk_and_cache() {
         .with_pre_allocate(false)
         .with_copy_to_tail(true);
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::with_read_cache(
-        config, device, cache,
-    ));
+    let store = Arc::new(FasterKv::<u64, u64, _>::with_read_cache(config, device, cache).unwrap());
 
     let report = run_pending_fuzz(&store, p.steps, p.key_space, p.seed);
     if fuzz_util::verbose() {
@@ -469,9 +467,7 @@ fn fuzz_kv_pending_stress_disk_and_cache() {
         .with_pre_allocate(false)
         .with_copy_to_tail(true);
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::with_read_cache(
-        config, device, cache,
-    ));
+    let store = Arc::new(FasterKv::<u64, u64, _>::with_read_cache(config, device, cache).unwrap());
 
     let report = run_pending_fuzz(&store, p.steps, p.key_space, p.seed);
     let snap = store.stats_snapshot();

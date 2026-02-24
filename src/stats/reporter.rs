@@ -212,6 +212,15 @@ impl StatsReporter {
                     snapshot.pending_io_failed
                 ),
             );
+            push_line(
+                &mut output,
+                format_args!(
+                    "  Auto Flush: {} runs / {} bytes / {} failed",
+                    snapshot.auto_flush_runs,
+                    snapshot.auto_flush_bytes,
+                    snapshot.auto_flush_failures
+                ),
+            );
         }
 
         output
@@ -340,10 +349,17 @@ impl StatsReporter {
         push_line(
             &mut output,
             format_args!(
-                "    \"pending_io\": {{ \"submitted\": {}, \"completed\": {}, \"failed\": {} }}",
+                "    \"pending_io\": {{ \"submitted\": {}, \"completed\": {}, \"failed\": {} }},",
                 snapshot.pending_io_submitted,
                 snapshot.pending_io_completed,
                 snapshot.pending_io_failed
+            ),
+        );
+        push_line(
+            &mut output,
+            format_args!(
+                "    \"auto_flush\": {{ \"runs\": {}, \"bytes\": {}, \"failed\": {} }}",
+                snapshot.auto_flush_runs, snapshot.auto_flush_bytes, snapshot.auto_flush_failures
             ),
         );
         push_line(&mut output, format_args!("  }}"));
@@ -354,7 +370,7 @@ impl StatsReporter {
 
     fn format_csv(&self, snapshot: &StatsSnapshot) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{:.2},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{:.2},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             snapshot.elapsed.as_millis(),
             snapshot.total_operations,
             snapshot.reads,
@@ -383,7 +399,10 @@ impl StatsReporter {
             snapshot.recoveries_failed,
             snapshot.pending_io_submitted,
             snapshot.pending_io_completed,
-            snapshot.pending_io_failed
+            snapshot.pending_io_failed,
+            snapshot.auto_flush_runs,
+            snapshot.auto_flush_bytes,
+            snapshot.auto_flush_failures
         )
     }
 
@@ -400,7 +419,7 @@ impl StatsReporter {
 
     /// Get CSV header line
     pub fn csv_header() -> &'static str {
-        "elapsed_ms,total_ops,reads,read_hits,upserts,rmws,deletes,pending,throughput,hit_rate,index_entries,bytes_allocated,memory_in_use,peak_memory,pages_flushed,checkpoints_started,checkpoints_completed,checkpoints_failed,compactions_started,compactions_completed,compactions_failed,index_grows_started,index_grows_completed,index_grows_failed,recoveries_started,recoveries_failed,pending_io_submitted,pending_io_completed,pending_io_failed"
+        "elapsed_ms,total_ops,reads,read_hits,upserts,rmws,deletes,pending,throughput,hit_rate,index_entries,bytes_allocated,memory_in_use,peak_memory,pages_flushed,checkpoints_started,checkpoints_completed,checkpoints_failed,compactions_started,compactions_completed,compactions_failed,index_grows_started,index_grows_completed,index_grows_failed,recoveries_started,recoveries_failed,pending_io_submitted,pending_io_completed,pending_io_failed,auto_flush_runs,auto_flush_bytes,auto_flush_failures"
     }
 }
 
@@ -444,6 +463,9 @@ mod tests {
             pending_io_submitted: 10,
             pending_io_completed: 9,
             pending_io_failed: 1,
+            auto_flush_runs: 0,
+            auto_flush_bytes: 0,
+            auto_flush_failures: 0,
         }
     }
 
@@ -457,6 +479,7 @@ mod tests {
         assert!(output.contains("Total:    1000"));
         assert!(output.contains("Reads:    500"));
         assert!(output.contains("Throughput: 100.00 ops/sec"));
+        assert!(output.contains("Auto Flush: 0 runs / 0 bytes / 0 failed"));
     }
 
     #[test]
@@ -468,6 +491,7 @@ mod tests {
         assert!(output.contains("\"total\": 1000"));
         assert!(output.contains("\"throughput\": 100.00"));
         assert!(output.contains("\"hit_rate\": 0.8000"));
+        assert!(output.contains("\"auto_flush\": { \"runs\": 0, \"bytes\": 0, \"failed\": 0 }"));
     }
 
     #[test]
@@ -479,7 +503,7 @@ mod tests {
         // CSV should be a single line with comma-separated values
         assert!(!output.contains('\n'));
         let values: Vec<&str> = output.split(',').collect();
-        assert_eq!(values.len(), 29);
+        assert_eq!(values.len(), 32);
     }
 
     #[test]
@@ -497,7 +521,7 @@ mod tests {
     fn test_csv_header() {
         let header = StatsReporter::csv_header();
         let fields: Vec<&str> = header.split(',').collect();
-        assert_eq!(fields.len(), 29);
+        assert_eq!(fields.len(), 32);
         assert!(header.contains("elapsed_ms"));
         assert!(header.contains("throughput"));
     }

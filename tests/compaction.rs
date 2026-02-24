@@ -32,11 +32,7 @@ fn create_store_with_compaction() -> Arc<FasterKv<u64, u64, NullDisk>> {
     let compaction_config = CompactionConfig::new()
         .with_target_utilization(0.5)
         .with_min_compact_bytes(0);
-    Arc::new(FasterKv::with_compaction_config(
-        config,
-        device,
-        compaction_config,
-    ))
+    Arc::new(FasterKv::with_compaction_config(config, device, compaction_config).unwrap())
 }
 
 // ============ CompactionConfig Tests ============

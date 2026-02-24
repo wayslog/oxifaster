@@ -55,9 +55,8 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         page_size_bits: 16,
         mutable_fraction: 0.9,
     };
-    let store = Arc::new(FasterKv::<Bincode<UserId>, Bincode<UserInfo>, _>::new(
-        config, device,
-    ));
+    let store =
+        Arc::new(FasterKv::<Bincode<UserId>, Bincode<UserInfo>, _>::new(config, device).unwrap());
 
     let mut session = store.start_session().unwrap();
 

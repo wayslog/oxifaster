@@ -50,10 +50,10 @@ fn main() -> std::io::Result<()> {
     };
 
     // Create a valid checkpoint.
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(
-        config.clone(),
-        FileSystemDisk::single_file(&data_path)?,
-    ));
+    let store = Arc::new(
+        FasterKv::<u64, u64, _>::new(config.clone(), FileSystemDisk::single_file(&data_path)?)
+            .unwrap(),
+    );
     {
         let mut session = expect_ok("start_session", store.start_session());
         for i in 0u64..128 {

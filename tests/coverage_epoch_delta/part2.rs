@@ -723,7 +723,7 @@ fn cov_light_epoch_protect_and_drain_multithread() {
     for _ in 0..4 {
         let ep = epoch.clone();
         let handle = std::thread::spawn(move || {
-            let tid = get_thread_id();
+            let tid = get_thread_id().unwrap();
             for _ in 0..100 {
                 let e = ep.protect_and_drain(tid);
                 assert!(e > 0);

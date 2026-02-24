@@ -43,6 +43,25 @@ impl CompactionConfig {
         Self::default()
     }
 
+    /// Validate that all configuration values are within acceptable ranges.
+    ///
+    /// Returns `Err(Status::InvalidArgument)` if any field is invalid:
+    /// - `min_compact_bytes` must be less than or equal to `max_compact_bytes`
+    /// - `target_utilization` must not be NaN
+    /// - `num_threads` must be at least 1
+    pub fn validate(&self) -> Result<(), Status> {
+        if self.min_compact_bytes > self.max_compact_bytes {
+            return Err(Status::InvalidArgument);
+        }
+        if self.target_utilization.is_nan() {
+            return Err(Status::InvalidArgument);
+        }
+        if self.num_threads < 1 {
+            return Err(Status::InvalidArgument);
+        }
+        Ok(())
+    }
+
     /// Set the target utilization ratio
     pub fn with_target_utilization(mut self, ratio: f64) -> Self {
         self.target_utilization = ratio.clamp(0.0, 1.0);
@@ -503,5 +522,41 @@ mod tests {
         let result = CompactionResult::failure(Status::Aborted);
         assert_eq!(result.status, Status::Aborted);
         assert!(result.new_begin_address.is_invalid());
+    }
+
+    // ============ CompactionConfig Validation Tests ============
+
+    #[test]
+    fn test_compaction_config_validate_ok() {
+        let config = CompactionConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_compaction_config_validate_min_greater_than_max() {
+        let config = CompactionConfig {
+            min_compact_bytes: 1 << 30,
+            max_compact_bytes: 1 << 20,
+            ..CompactionConfig::default()
+        };
+        assert_eq!(config.validate(), Err(Status::InvalidArgument));
+    }
+
+    #[test]
+    fn test_compaction_config_validate_nan_utilization() {
+        let config = CompactionConfig {
+            target_utilization: f64::NAN,
+            ..CompactionConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_compaction_config_validate_zero_threads() {
+        let config = CompactionConfig {
+            num_threads: 0,
+            ..CompactionConfig::default()
+        };
+        assert_eq!(config.validate(), Err(Status::InvalidArgument));
     }
 }

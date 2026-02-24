@@ -11,7 +11,7 @@ use crate::status::Status;
 #[test]
 fn test_mem_hash_index_initialize() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
 
     let result = index.initialize(&config);
     assert_eq!(result, Status::Ok);
@@ -21,7 +21,7 @@ fn test_mem_hash_index_initialize() {
 #[test]
 fn test_find_entry_not_found() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     let hash = KeyHash::new(12345);
@@ -33,7 +33,7 @@ fn test_find_entry_not_found() {
 #[test]
 fn test_find_or_create_entry() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     let hash = KeyHash::new(12345);
@@ -58,7 +58,7 @@ fn test_find_or_create_entry() {
 #[test]
 fn test_try_update_entry() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     let hash = KeyHash::new(54321);
@@ -90,7 +90,7 @@ fn test_try_update_entry() {
 #[test]
 fn test_garbage_collect() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     // Create and populate some entries
@@ -114,7 +114,7 @@ fn test_garbage_collect() {
 #[test]
 fn test_dump_distribution() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1024);
+    let config = MemHashIndexConfig::new(1024).unwrap();
     index.initialize(&config);
 
     let stats = index.dump_distribution();
@@ -127,7 +127,7 @@ fn test_dump_distribution() {
 #[test]
 fn test_checkpoint_empty_index() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -144,7 +144,7 @@ fn test_checkpoint_empty_index() {
 fn test_checkpoint_and_recover() {
     // Create and populate an index
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
 
     // Add some entries
@@ -194,7 +194,7 @@ fn test_checkpoint_header_matches_overflow_snapshot_under_concurrent_allocations
     // Use a large table to make the main-bucket serialization take long enough
     // for concurrent overflow allocations to overlap deterministically.
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1 << 15);
+    let config = MemHashIndexConfig::new(1 << 15).unwrap();
     index.initialize(&config);
 
     let index = Arc::new(index);
@@ -270,7 +270,7 @@ fn test_checkpoint_header_matches_overflow_snapshot_under_concurrent_allocations
 fn test_recover_without_preloaded_metadata() {
     // Create and populate an index
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(128);
+    let config = MemHashIndexConfig::new(128).unwrap();
     index.initialize(&config);
 
     let hash = KeyHash::new(99999);
@@ -297,7 +297,7 @@ fn test_recover_without_preloaded_metadata() {
 #[test]
 fn test_verify_recovery() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(128);
+    let config = MemHashIndexConfig::new(128).unwrap();
     index.initialize(&config);
 
     let hash = KeyHash::new(77777);
@@ -321,7 +321,7 @@ fn test_verify_recovery() {
 #[test]
 fn test_checkpoint_preserves_stats() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(512);
+    let config = MemHashIndexConfig::new(512).unwrap();
     index.initialize(&config);
 
     // Add entries
@@ -365,7 +365,7 @@ fn test_grow_config() {
 #[test]
 fn test_grow_empty_index() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
     index.set_grow_config(GrowConfig::new().with_growth_factor(2));
 
@@ -385,7 +385,7 @@ fn test_grow_with_entries() {
     use std::sync::RwLock;
 
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
     index.set_grow_config(GrowConfig::new().with_growth_factor(2));
 
@@ -444,7 +444,7 @@ fn test_should_grow() {
         .with_auto_grow(true);
 
     let mut index = MemHashIndex::with_grow_config(grow_config);
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
 
     // Initially should not grow (no entries)
@@ -466,7 +466,7 @@ fn test_should_grow() {
 #[test]
 fn test_grow_in_progress_prevention() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(256);
+    let config = MemHashIndexConfig::new(256).unwrap();
     index.initialize(&config);
 
     // Start grow
@@ -492,7 +492,7 @@ fn test_grow_in_progress_prevention() {
 #[test]
 fn test_overflow_buckets_insert_and_find() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1); // All hashes map to a single bucket.
+    let config = MemHashIndexConfig::new(1).unwrap(); // All hashes map to a single bucket.
     index.initialize(&config);
 
     let num = 32u64;
@@ -521,7 +521,7 @@ fn test_overflow_buckets_insert_and_find() {
 #[test]
 fn test_overflow_link_summary_updates_on_reused_overflow_slot() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1); // Force all keys into one bucket chain.
+    let config = MemHashIndexConfig::new(1).unwrap(); // Force all keys into one bucket chain.
     index.initialize(&config);
 
     let target_low4 = 5u16;
@@ -611,7 +611,7 @@ fn test_overflow_link_summary_updates_on_reused_overflow_slot() {
 #[test]
 fn test_overflow_buckets_checkpoint_and_recover() {
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1);
+    let config = MemHashIndexConfig::new(1).unwrap();
     index.initialize(&config);
 
     let num = 20u64;
@@ -646,7 +646,7 @@ fn test_grow_with_overflow_entries_preserves_all_keys() {
     use std::sync::RwLock;
 
     let mut index = MemHashIndex::new();
-    let config = MemHashIndexConfig::new(1);
+    let config = MemHashIndexConfig::new(1).unwrap();
     index.initialize(&config);
     index.set_grow_config(GrowConfig::new().with_growth_factor(2));
 

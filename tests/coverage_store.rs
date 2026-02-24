@@ -26,7 +26,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         page_size_bits: 14,
         mutable_fraction: 0.9,
     };
-    Arc::new(FasterKv::new(config, NullDisk::new()))
+    Arc::new(FasterKv::new(config, NullDisk::new()).unwrap())
 }
 
 fn create_large_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
@@ -36,7 +36,7 @@ fn create_large_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         page_size_bits: 16,
         mutable_fraction: 0.9,
     };
-    Arc::new(FasterKv::new(config, NullDisk::new()))
+    Arc::new(FasterKv::new(config, NullDisk::new()).unwrap())
 }
 
 fn create_store_with_compaction() -> Arc<FasterKv<u64, u64, NullDisk>> {
@@ -49,11 +49,7 @@ fn create_store_with_compaction() -> Arc<FasterKv<u64, u64, NullDisk>> {
     let compaction_config = CompactionConfig::new()
         .with_target_utilization(0.5)
         .with_min_compact_bytes(0);
-    Arc::new(FasterKv::with_compaction_config(
-        config,
-        NullDisk::new(),
-        compaction_config,
-    ))
+    Arc::new(FasterKv::with_compaction_config(config, NullDisk::new(), compaction_config).unwrap())
 }
 
 // ============ 1. FasterKv - Store creation and configuration ============

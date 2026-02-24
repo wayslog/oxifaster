@@ -95,7 +95,7 @@ fn main() -> std::io::Result<()> {
     let device = FileSystemDisk::single_file("oxifaster.db")?;
     
     // Create store
-    let store = Arc::new(FasterKv::new(config, device));
+    let store = Arc::new(FasterKv::new(config, device)?);
     
     // Start session
     let mut session = store.start_session().expect("failed to start session");
@@ -467,12 +467,11 @@ let f2_store = F2Kv::new(config, hot_device, cold_device);
 Collect performance statistics:
 
 ```rust
-use oxifaster::stats::{StatsCollector, StatsConfig};
-
-let stats = store.stats();
-println!("Read hits: {}", stats.read_hits);
-println!("Read misses: {}", stats.read_misses);
-println!("Cache hit rate: {:.2}%", stats.cache_hit_rate() * 100.0);
+store.enable_stats();
+let snapshot = store.stats_snapshot();
+println!("Reads: {}", snapshot.reads);
+println!("Read hits: {}", snapshot.read_hits);
+println!("Hit rate: {:.2}%", snapshot.hit_rate * 100.0);
 ```
 
 ---

@@ -172,9 +172,35 @@ impl SyncStorageDevice for SegmentedFile {
         Ok(())
     }
 
-    fn truncate_sync(&self, _size: u64) -> io::Result<()> {
-        // For segmented files, truncation is complex
-        // For now, just return Ok
+    fn truncate_sync(&self, size: u64) -> io::Result<()> {
+        let mut segments = lock(&self.segments, "Failed to lock segments")?;
+
+        if size == 0 {
+            segments.clear();
+            return Ok(());
+        }
+
+        let last_segment_idx = size / self.segment_size;
+        let remainder = size % self.segment_size;
+
+        // Truncate the boundary segment if it exists and remainder > 0
+        let boundary_idx = last_segment_idx as usize;
+        if boundary_idx < segments.len() {
+            if remainder > 0 {
+                if let Some(ref file) = segments[boundary_idx] {
+                    file.truncate_sync(remainder)?;
+                }
+            }
+        }
+
+        // Remove all segments beyond the boundary
+        let keep_count = if remainder > 0 {
+            boundary_idx + 1
+        } else {
+            boundary_idx
+        };
+        segments.truncate(keep_count);
+
         Ok(())
     }
 

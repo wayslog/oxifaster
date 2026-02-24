@@ -259,6 +259,11 @@ fn worker_loop<D: StorageDevice>(shared: Arc<FlushShared<D>>, rx: Receiver<Flush
                                 ),
                             ));
                         }
+                        // Ensure durability: flush device buffers to stable storage
+                        // before marking the page as flushed. Without this, a crash
+                        // could lose data that safe_read_only_address already considers
+                        // persisted.
+                        shared.device().flush().await?;
                         Ok(())
                     }
                     .await;

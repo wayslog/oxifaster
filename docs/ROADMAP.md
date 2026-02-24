@@ -2,7 +2,7 @@
 
 **Project**: oxifaster - Rust port of Microsoft FASTER
 **Date Created**: 2026-01-20
-**Status**: Phase 1 Complete, Phases 2-4 Documented
+**Status**: Core phases implemented; roadmap kept for historical traceability
 
 ---
 
@@ -48,7 +48,7 @@ This document provides a complete roadmap for bringing oxifaster from its curren
 |-------|------|----------|--------|--------|
 | **Phase 2** | Complete Workstream B (CPR) | Important | 2-3 days | Documented |
 | **Phase 3** | Complete Workstream D (FasterLog) | Optional | 0.5-1 day | Documented |
-| **Phase 4** | Background Flush Worker | Enhancement | 2-3 days | Documented |
+| **Phase 4** | Background Flush Worker | Enhancement | 2-3 days | Implemented |
 
 **Total Remaining Effort**: 5-7 days (all non-blocking for v1.0)
 
@@ -56,7 +56,7 @@ This document provides a complete roadmap for bringing oxifaster from its curren
 
 ## 📖 Phase 2: Complete Workstream B (CPR Integration)
 
-**Document**: `docs/TODO_phase2_cpr_completion.md`
+**Document**: `docs/COMPLETION_REPORT.md` (historical completion details)
 **Priority**: Important (but not blocking deployment)
 **Estimated Effort**: 12-19 hours (~2-3 days)
 
@@ -106,7 +106,7 @@ All infrastructure already in place:
 
 ## 📖 Phase 3: Complete Workstream D (FasterLog Enhancements)
 
-**Document**: `docs/TODO_phase3_fasterlog_enhancements.md`
+**Document**: `docs/COMPLETION_REPORT.md` (historical completion details)
 **Priority**: Optional
 **Estimated Effort**: 6-9 hours (~1 day)
 
@@ -148,7 +148,7 @@ FasterLog is 90% complete:
 
 ---
 
-## 📖 Phase 4: Implement Background Flush Worker
+## 📖 Phase 4: Implement Background Flush Worker (Completed)
 
 **Document**: `docs/TODO_phase4_background_flush.md`
 **Priority**: Enhancement
@@ -192,21 +192,16 @@ FasterLog is 90% complete:
 - Configuration API
 - **Goal**: Easy to use
 
-### Success Criteria
--  Worker runs automatically
--  Memory pressure handled
--  Metrics available
--  Clean shutdown
--  All tests pass
--  Well integrated
+### Implementation Notes
+- Automatic background worker is integrated in `PersistentMemoryMalloc`.
+- `FasterKv` exposes `enable_auto_flush`, `disable_auto_flush`, and metric accessors.
+- Auto-flush metrics are exported via `StatsSnapshot` and Prometheus renderer.
+- Worker shutdown is coordinated with allocator `Drop`.
+- Targeted tests cover trigger, failure, disable, and API visibility paths.
 
-### Current State
-Manual flushing works perfectly:
--  `flush_until()` fully functional
--  `flush_device()` available
--  Checkpoint calls flush
-
-**What's Needed**: Automation and intelligence
+### Remaining Optional Enhancements
+- More advanced memory-pressure heuristics (OS-level pressure signals).
+- Additional operational controls (e.g., runtime config reload policies).
 
 ---
 
@@ -221,7 +216,6 @@ Manual flushing works perfectly:
 
 ### Can-Wait for v1.1+
 - Phase 3 (FasterLog enhancements)
-- Phase 4 (Background flush worker)
 
 ---
 
@@ -278,7 +272,7 @@ The system is **production-ready** as-is:
   - Recommendation: Add tests in Phase 2
 
 **Low Risk Issues**:
--  No automatic background flushing
+-  Automatic background flushing available
   - Mitigation: Manual flush works perfectly
   - Impact: Slightly more memory usage
 
@@ -361,9 +355,8 @@ cargo test --all-features
 ##  Documentation References
 
 ### Implementation Guides
-- `docs/TODO_phase2_cpr_completion.md` - CPR tasks
-- `docs/TODO_phase3_fasterlog_enhancements.md` - FasterLog tasks
-- `docs/TODO_phase4_background_flush.md` - Background flush
+- `docs/COMPLETION_REPORT.md` - Completed Phases 1-3 (CPR, durability, FasterLog)
+- `docs/TODO_phase4_background_flush.md` - Remaining optional background flush work
 
 ### Analysis Documents
 - `docs/workstreams_review.md` - Detailed gap analysis

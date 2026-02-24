@@ -31,7 +31,7 @@ fn test_pending_read_and_complete_pending_readback() {
         mutable_fraction: 0.9,
     };
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
     let mut session = store.start_session().unwrap();
 
     session.upsert(1u64, 100u64);
@@ -62,7 +62,7 @@ fn test_complete_pending_with_custom_timeout() {
         mutable_fraction: 0.9,
     };
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
     let mut session = store.start_session().unwrap();
 
     session.upsert(42u64, 999u64);
@@ -95,7 +95,7 @@ fn test_complete_pending_no_wait_returns_immediately() {
         mutable_fraction: 0.9,
     };
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
     let mut session = store.start_session().unwrap();
 
     session.upsert(1u64, 100u64);
@@ -168,7 +168,7 @@ fn test_pending_read_traverses_disk_hash_chain_on_collision() {
         mutable_fraction: 0.9,
     };
 
-    let store = Arc::new(FasterKv::<CollidingKey, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<CollidingKey, u64, _>::new(config, device).unwrap());
     let mut session = store.start_session().unwrap();
 
     let key1 = CollidingKey(1);

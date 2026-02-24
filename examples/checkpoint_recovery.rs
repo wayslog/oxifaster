@@ -49,7 +49,7 @@ fn main() -> std::io::Result<()> {
     };
 
     let device = FileSystemDisk::single_file(&data_path)?;
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config.clone(), device).unwrap());
 
     // Write data + exercise the basic API surface.
     let mut session = expect_ok("start_session", store.start_session());
@@ -65,10 +65,9 @@ fn main() -> std::io::Result<()> {
     assert_eq!(expect_ok("read(2)", session.read(&2)), Some(21));
 
     // Create a checkpoint.
+    // Statistics are disabled by default, so this example validates correctness via data recovery
+    // rather than metric counters.
     let token = store.checkpoint(&checkpoint_dir)?;
-    let snapshot = store.stats_snapshot();
-    assert!(snapshot.checkpoints_started >= 1);
-    assert!(snapshot.checkpoints_completed >= 1);
 
     // Recover and validate.
     let recovered_device = FileSystemDisk::single_file(&data_path)?;
@@ -78,8 +77,6 @@ fn main() -> std::io::Result<()> {
         config,
         recovered_device,
     )?);
-    assert!(recovered.stats_snapshot().recoveries_started >= 1);
-
     // Continue a recovered session.
     let recovered_sessions = recovered.get_recovered_sessions();
     assert!(

@@ -30,7 +30,7 @@ fn create_store_with_cache() -> Arc<FasterKv<u64, u64, NullDisk>> {
     let config = create_store_config();
     let device = NullDisk::new();
     let cache_config = create_cache_config();
-    Arc::new(FasterKv::with_read_cache(config, device, cache_config))
+    Arc::new(FasterKv::with_read_cache(config, device, cache_config).unwrap())
 }
 
 // ============ ReadCacheConfig Tests ============
@@ -399,7 +399,7 @@ fn test_fasterkv_clear_read_cache() {
 fn test_fasterkv_without_read_cache() {
     let config = create_store_config();
     let device = NullDisk::new();
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
 
     // Verify no cache
     assert!(store.read_cache_stats().is_none());
@@ -497,12 +497,11 @@ fn test_concurrent_cache_insert_and_read() {
 // ============ Edge Cases ============
 
 #[test]
+#[should_panic(expected = "ReadCacheConfig validation failed")]
 fn test_cache_with_zero_size() {
     let config = ReadCacheConfig::new(0);
-    let cache = ReadCache::<u64, u64>::new(config);
-
-    // Should handle gracefully
-    assert_eq!(cache.config().mem_size, 0);
+    // Zero-size cache is now rejected by config validation
+    let _cache = ReadCache::<u64, u64>::new(config);
 }
 
 #[test]

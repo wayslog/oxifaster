@@ -145,9 +145,8 @@ impl RecordInfo {
     /// here is sufficient to publish all prior record writes.
     #[inline]
     pub fn publish_valid(&self) {
-        let mut control = self.control.load(Ordering::Relaxed);
-        control &= !Self::INVALID_BIT;
-        self.control.store(control, Ordering::Release);
+        self.control
+            .fetch_and(!Self::INVALID_BIT, Ordering::Release);
     }
 
     /// Check if this is a tombstone (delete marker).

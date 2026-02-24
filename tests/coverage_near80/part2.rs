@@ -521,7 +521,7 @@ fn cov_faster_kv_with_read_cache_operations() {
         config,
         NullDisk::new(),
         cache_config,
-    ));
+    ).unwrap());
 
     assert!(store.has_read_cache());
     assert!(store.read_cache_stats().is_some());

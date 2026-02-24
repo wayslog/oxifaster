@@ -18,7 +18,7 @@ fn create_test_config() -> FasterKvConfig {
 fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
     let config = create_test_config();
     let device = NullDisk::new();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 #[test]

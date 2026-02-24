@@ -2,6 +2,9 @@
 //!
 //! This module provides serialization and deserialization for checkpoint
 //! metadata structures, enabling persistence to disk.
+//!
+//! Integrity verification is handled by sidecar `.crc` files (see `sidecar` module)
+//! rather than embedding checksums in the serialized structs.
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
@@ -212,7 +215,6 @@ impl SerializableLogMetadata {
                 .iter()
                 .map(SerializableSessionState::from_state)
                 .collect(),
-            // Incremental checkpoint fields
             delta_tail_address: meta.delta_tail_address,
             prev_snapshot_token: meta.prev_snapshot_token.map(|t| t.to_string()),
             is_incremental: meta.is_incremental,
@@ -254,7 +256,6 @@ impl SerializableLogMetadata {
             flushed_until_address: Address::from_control(self.flushed_until_address),
             use_object_log: self.use_object_log,
             session_states: session_states?,
-            // Incremental checkpoint fields
             delta_tail_address: self.delta_tail_address,
             prev_snapshot_token,
             is_incremental: self.is_incremental,
@@ -309,14 +310,16 @@ impl super::IndexMetadata {
         serializable.to_metadata()
     }
 
-    /// Write to file (JSON format)
+    /// Write to file (JSON format) and write a sidecar `.crc` checksum file
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
         let serializable = SerializableIndexMetadata::from_metadata(self);
-        write_json_pretty_to_file(&serializable, path)
+        write_json_pretty_to_file(&serializable, path)?;
+        super::sidecar::write_file_checksum(path)
     }
 
-    /// Read from file (JSON format)
+    /// Read from file (JSON format) and verify sidecar `.crc` checksum if present
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
+        super::sidecar::verify_file_checksum(path)?;
         let serializable: SerializableIndexMetadata = read_json_from_file(path)?;
         serializable.to_metadata()
     }
@@ -351,14 +354,16 @@ impl super::LogMetadata {
         serializable.to_metadata()
     }
 
-    /// Write to file (JSON format)
+    /// Write to file (JSON format) and write a sidecar `.crc` checksum file
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
         let serializable = SerializableLogMetadata::from_metadata(self);
-        write_json_pretty_to_file(&serializable, path)
+        write_json_pretty_to_file(&serializable, path)?;
+        super::sidecar::write_file_checksum(path)
     }
 
-    /// Read from file (JSON format)
+    /// Read from file (JSON format) and verify sidecar `.crc` checksum if present
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
+        super::sidecar::verify_file_checksum(path)?;
         let serializable: SerializableLogMetadata = read_json_from_file(path)?;
         serializable.to_metadata()
     }
@@ -458,13 +463,15 @@ impl DeltaLogMetadata {
         serde_json::from_slice(data).map_err(invalid_data)
     }
 
-    /// Write to file (JSON format)
+    /// Write to file (JSON format) and write a sidecar `.crc` checksum file
     pub fn write_to_file(&self, path: &Path) -> io::Result<()> {
-        write_json_pretty_to_file(self, path)
+        write_json_pretty_to_file(self, path)?;
+        super::sidecar::write_file_checksum(path)
     }
 
-    /// Read from file (JSON format)
+    /// Read from file (JSON format) and verify sidecar `.crc` checksum if present
     pub fn read_from_file(path: &Path) -> io::Result<Self> {
+        super::sidecar::verify_file_checksum(path)?;
         read_json_from_file(path)
     }
 

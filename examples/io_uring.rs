@@ -35,7 +35,7 @@ fn main() {
     device.initialize().expect("device initialization failed");
 
     // 3. Create the store and perform basic operations.
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device).unwrap());
     let mut session = store.start_session().unwrap();
 
     let upsert_status = session.upsert(1, 100);

@@ -93,35 +93,39 @@ Operational changes enabled by this model:
 - Disk readback supports both fixed and variable-length records; non-POD types must opt into a codec (no “Pending forever” failure mode).
 - A bytes-view read API exists: `Session::read_view(&EpochGuard, &K) -> RecordView`, returning borrowed encoded bytes.
 
-### 2) CPR Is Not Integrated into the Operational Fast Path
+### 2) CPR Integration Status
 
-The checkpoint state machine exists, but the “FASTER-style cooperative protocol” is not wired into `Session::refresh()` / operation entry points.
+The checkpoint state machine and cooperative protocol are implemented:
 
-Symptoms in current code structure:
+- `Session::refresh()` and all operation entry points call `cpr_refresh()`, which observes `system_state`, updates `ThreadContext.version`, swaps execution contexts during `InProgress`, and acks checkpoint phases.
+- The driver thread runs the state machine loop and waits for `barrier_complete()` before advancing phases.
+- Dropped sessions are removed from the participant set via `mark_thread_inactive()`.
 
-- `ThreadContext.version` exists but is not updated in normal operations.
-- Checkpoint phases such as `PrepIndexChkpt`, `WaitPending`, and the “threads help advance state machine” behavior are stubbed/no-op in the store checkpoint driver.
+Remaining limitations:
 
-Production implications:
+- The checkpoint driver is a blocking single-thread loop (`thread::yield_now()` spin-wait). If participant threads are idle (not calling operations), the barrier stalls until those sessions are dropped.
+- Incremental checkpoints under concurrent updates need dedicated crash-consistency verification.
 
-- Checkpoint artifacts can be inconsistent under concurrent operations.
-- Incremental checkpoints are especially sensitive: the “prefix” guarantee needs clear boundaries and tests.
+### 3) Hybrid Log Durability & On-Disk Semantics
 
-### 3) Hybrid Log Durability & On-Disk Semantics Are Not Fully Implemented
+Durability semantics are now enforced:
 
-Although `flush_until` exists, critical pieces are still incomplete:
+- `flush_until()` writes pages and calls `StorageDevice::flush()` before advancing `safe_read_only_address`.
+- The background flush worker also calls `StorageDevice::flush()` after writing each page, ensuring pages are not marked as flushed until durable on stable storage.
+- Page transitions (mutable -> read-only -> on-disk) trigger background flush via `FlushManager`.
 
-- Page transitions (mutable -> read-only -> on-disk) do not automatically trigger real background flush and eviction.
-- `flush_until` writes pages but does not clearly define and enforce “durable” vs “buffered” semantics (`StorageDevice::flush()` is not part of the allocator flush path).
+Remaining limitation:
 
-Production implications:
+- Automatic page eviction from memory after flush is not implemented; pages stay resident until explicitly shifted via `shift_head_address`.
 
-- “Cold data on disk” is not a reliable invariant.
-- Crash-consistent durability claims cannot be made without explicit fsync/flush semantics.
+### 4) FasterLog Durability
 
-### 4) FasterLog Is Not Yet a Persistent Log
+The `FasterLog` implementation provides durable commit semantics:
 
-The current `FasterLog` implementation is primarily an in-memory ring with metadata pointers. It needs real `StorageDevice` integration for durable commit and recovery.
+- `commit()` enqueues a background flush and returns immediately (non-blocking).
+- `commit_wait()` commits and blocks until data is durable on stable storage.
+- `wait_for_commit(address)` blocks until a previously enqueued commit reaches the device.
+- Recovery: loads metadata, rebuilds tail/commit pointers, supports scanning committed entries after restart.
 
 ## Code Quality & Engineering Gaps
 
@@ -138,8 +142,8 @@ The current `FasterLog` implementation is primarily an in-memory ring with metad
 
 ### Config Coherence
 
-- Configuration fields must reflect actual behavior:
-  - `FasterKvConfig.mutable_fraction` is currently not reflected in `HybridLogConfig` (the allocator uses a fixed `memory_pages / 4` mutable region).
+- Configuration fields must reflect actual behavior.
+  - `FasterKvConfig.mutable_fraction` is now correctly propagated to `HybridLogConfig` via `with_mutable_fraction()`.
 
 ### Observability
 

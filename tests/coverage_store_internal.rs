@@ -37,7 +37,7 @@ fn create_small_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         page_size_bits: 12,       // 4 KB pages
         mutable_fraction: 0.5,
     };
-    Arc::new(FasterKv::new(config, NullDisk::new()))
+    Arc::new(FasterKv::new(config, NullDisk::new()).unwrap())
 }
 
 fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
@@ -47,7 +47,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         page_size_bits: 14,       // 16 KB pages
         mutable_fraction: 0.9,
     };
-    Arc::new(FasterKv::new(config, NullDisk::new()))
+    Arc::new(FasterKv::new(config, NullDisk::new()).unwrap())
 }
 
 fn create_store_with_compaction(
@@ -63,11 +63,7 @@ fn create_store_with_compaction(
     let compaction_config = CompactionConfig::new()
         .with_target_utilization(target_util)
         .with_min_compact_bytes(min_bytes);
-    Arc::new(FasterKv::with_compaction_config(
-        config,
-        NullDisk::new(),
-        compaction_config,
-    ))
+    Arc::new(FasterKv::with_compaction_config(config, NullDisk::new(), compaction_config).unwrap())
 }
 
 fn create_filesystem_store(dir: &std::path::Path) -> Arc<FasterKv<u64, u64, FileSystemDisk>> {
@@ -78,7 +74,7 @@ fn create_filesystem_store(dir: &std::path::Path) -> Arc<FasterKv<u64, u64, File
         mutable_fraction: 0.9,
     };
     let device = FileSystemDisk::single_file(dir.join("store.dat")).unwrap();
-    Arc::new(FasterKv::new(config, device))
+    Arc::new(FasterKv::new(config, device).unwrap())
 }
 
 // ============ 1. Compaction Tests (compaction.rs) ============

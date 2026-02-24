@@ -28,10 +28,9 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(
-        FasterKvConfig::default(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<u64, u64, _>::new(FasterKvConfig::default(), NullDisk::new()).unwrap());
+    store.enable_stats();
     let mut session = expect_ok("start_session", store.start_session());
     session.upsert(1, 10);
     session.upsert(2, 20);
@@ -56,9 +55,17 @@ fn main() -> std::io::Result<()> {
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async move {
-        let server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), render)
-            .await
-            .expect("failed to bind metrics server");
+        let server = match MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), render).await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "Skipping /metrics HTTP probe in restricted environment: {}",
+                    err
+                );
+                return;
+            }
+            Err(err) => panic!("failed to bind metrics server: {err}"),
+        };
         let addr = server.local_addr();
 
         let mut stream = tokio::net::TcpStream::connect(addr)

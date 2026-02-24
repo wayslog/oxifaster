@@ -50,6 +50,7 @@ tempfile = "3"
 rand = "0.8"
 tokio-test = "0.4"
 rayon = "1.10"
+loom = "0.7"
 
 [[bench]]
 name = "ycsb"

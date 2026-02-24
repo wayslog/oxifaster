@@ -913,6 +913,11 @@ where
         self.ctx.total_pending_ios() == 0 && self.ctx.total_retry_requests() == 0
     }
 
+    /// Get the timeout budget used for pending I/O wait loops.
+    pub(crate) fn wait_pending_timeout(&self) -> Duration {
+        self.store.wait_pending_timeout()
+    }
+
     /// Get a reference to the thread context
     pub fn context(&self) -> &ThreadContext {
         &self.ctx

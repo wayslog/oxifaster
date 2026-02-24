@@ -123,24 +123,30 @@ impl AlignedBuffer {
 
     /// Get a slice view of the buffer
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: ptr is valid for `size` bytes, properly aligned, and initialized.
+        // The lifetime of the slice is tied to &self, preventing use-after-free.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
     }
 
     /// Get a mutable slice view of the buffer
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: ptr is valid for `size` bytes, properly aligned, and initialized.
+        // &mut self ensures exclusive access, satisfying aliasing requirements.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
     }
 }
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
+        // SAFETY: ptr was allocated via aligned_alloc with matching alignment and size.
         unsafe {
             aligned_free(self.ptr, self.alignment, self.size);
         }
     }
 }
 
-// Safety: AlignedBuffer owns its memory and doesn't share references
+// SAFETY: AlignedBuffer owns its memory exclusively (no shared references).
+// The pointer is not aliased and all access goes through &self or &mut self.
 unsafe impl Send for AlignedBuffer {}
 unsafe impl Sync for AlignedBuffer {}
 

@@ -102,10 +102,8 @@ fn fuzz_concurrent_smoke_sessions() {
     let threads = 4usize;
     let key_space_per_thread = p.key_space;
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(
-        small_store_config(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), NullDisk::new()).unwrap());
 
     let mut handles = Vec::new();
     for tid in 0..threads {
@@ -146,10 +144,8 @@ fn fuzz_concurrent_stress_sessions() {
     let threads = 8usize;
     let key_space_per_thread = p.key_space;
 
-    let store = Arc::new(FasterKv::<u64, u64, _>::new(
-        small_store_config(),
-        NullDisk::new(),
-    ));
+    let store =
+        Arc::new(FasterKv::<u64, u64, _>::new(small_store_config(), NullDisk::new()).unwrap());
 
     let mut handles = Vec::new();
     for tid in 0..threads {

@@ -139,10 +139,18 @@ impl<'a> RecordView<'a> {
     }
 }
 
+/// # Safety
+/// Caller must ensure ptr points to valid RecordInfo-sized memory with proper alignment.
 pub(crate) unsafe fn record_info_at<'a>(ptr: *const u8) -> &'a RecordInfo {
+    // SAFETY: Caller guarantees ptr is valid and aligned for RecordInfo.
     unsafe { &*(ptr as *const RecordInfo) }
 }
 
+/// # Safety
+/// Caller must ensure:
+/// - ptr points to a valid record in memory
+/// - limit accurately reflects the available bytes from ptr
+/// - The memory remains valid for lifetime 'a
 pub(crate) unsafe fn record_view_from_memory<'a, K, V>(
     address: Address,
     ptr: *const u8,
