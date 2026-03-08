@@ -4,7 +4,7 @@
 //! metadata structures, enabling persistence to disk.
 
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
@@ -17,6 +17,9 @@ fn invalid_data(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io:
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
+/// Magic bytes for checksummed metadata files
+const CHECKSUM_MAGIC: &[u8; 4] = b"OXCK";
+
 fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let file_name = path
@@ -25,9 +28,14 @@ fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result
         .to_string_lossy();
     let tmp_path = parent.join(format!(".{file_name}.tmp"));
 
+    let json_bytes = serde_json::to_vec_pretty(value).map_err(invalid_data)?;
+    let crc = crc32fast::hash(&json_bytes);
+
     let file = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut writer, value).map_err(invalid_data)?;
+    writer.write_all(CHECKSUM_MAGIC)?;
+    writer.write_all(&crc.to_le_bytes())?;
+    writer.write_all(&json_bytes)?;
     writer.flush()?;
     writer.get_ref().sync_all()?;
 
@@ -42,9 +50,32 @@ fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result
 }
 
 fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    serde_json::from_reader(reader).map_err(invalid_data)
+    let data = fs::read(path)?;
+
+    if data.len() >= 8 && &data[0..4] == CHECKSUM_MAGIC {
+        let expected_crc = u32::from_le_bytes(
+            data[4..8]
+                .try_into()
+                .map_err(|_| invalid_data("invalid CRC bytes"))?,
+        );
+        let json = &data[8..];
+        let actual_crc = crc32fast::hash(json);
+
+        if expected_crc != actual_crc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Checksum mismatch in {}: expected {expected_crc:#x}, got {actual_crc:#x}",
+                    path.display()
+                ),
+            ));
+        }
+
+        serde_json::from_slice(json).map_err(invalid_data)
+    } else {
+        // Backward compatibility: old format without checksum header
+        serde_json::from_slice(&data).map_err(invalid_data)
+    }
 }
 
 /// Serializable version of IndexMetadata
