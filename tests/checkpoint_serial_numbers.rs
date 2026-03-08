@@ -58,3 +58,41 @@ fn test_serial_number_preserved_through_checkpoint() {
     // (we don't recover here, just verify checkpoint completed)
     assert!(serial_before > 0);
 }
+
+#[test]
+fn test_session_recovery_serial_continuity() {
+    let config = create_test_config();
+    let device = NullDisk::new();
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+
+    let mut session = store.start_session().unwrap();
+
+    for i in 0..50u64 {
+        session.upsert(i, i * 10);
+    }
+
+    let state = session.to_session_state();
+    let serial_after_50 = state.serial_num;
+    assert!(
+        serial_after_50 >= 50,
+        "should have serial >= 50 after 50 upserts"
+    );
+
+    // Simulate recovery: continue from state
+    session.continue_from_state(&state);
+
+    // Write more
+    for i in 50..60u64 {
+        session.upsert(i, i * 10);
+    }
+
+    let state2 = session.to_session_state();
+    assert!(
+        state2.serial_num > serial_after_50,
+        "serial should continue increasing after recovery: {} > {}",
+        state2.serial_num,
+        serial_after_50
+    );
+
+    session.end();
+}
