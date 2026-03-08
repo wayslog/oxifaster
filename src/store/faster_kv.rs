@@ -169,6 +169,8 @@ where
     /// Last snapshot checkpoint state for incremental checkpoints
     /// Used to track the base snapshot for incremental checkpoints
     last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
+    /// Mutual exclusion between checkpoint (write) and compaction (read).
+    checkpoint_compaction_lock: RwLock<()>,
     /// Type markers
     _marker: PhantomData<(K, V)>,
 }
@@ -329,6 +331,7 @@ where
             default_log_checkpoint_backend: AtomicU32::new(LogCheckpointBackend::Snapshot as u32),
             default_checkpoint_durability: AtomicU32::new(CheckpointDurability::FasterLike as u32),
             last_snapshot_checkpoint: RwLock::new(None),
+            checkpoint_compaction_lock: RwLock::new(()),
             _marker: PhantomData,
         }
     }

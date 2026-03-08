@@ -123,3 +123,38 @@ fn test_foldover_checkpoint_basic() {
         .expect("foldover checkpoint should succeed");
     assert!(!token.is_nil());
 }
+
+/// Test that checkpoint and compaction can both complete when triggered concurrently.
+#[test]
+fn test_checkpoint_compaction_not_concurrent() {
+    let config = create_test_config();
+    let device = NullDisk::new();
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+
+    {
+        let mut session = store.start_session().unwrap();
+        for i in 0..2000u64 {
+            let status = session.upsert(i, i * 10);
+            assert_eq!(status, Status::Ok);
+            if i.is_multiple_of(100) {
+                session.refresh();
+            }
+        }
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let s1 = store.clone();
+    let s2 = store.clone();
+    let cp_dir = temp_dir.path().to_path_buf();
+
+    let h1 = std::thread::spawn(move || {
+        let _ = s1.checkpoint(&cp_dir);
+    });
+    let h2 = std::thread::spawn(move || {
+        let begin = s2.log_begin_address();
+        s2.compact(begin);
+    });
+
+    h1.join().unwrap();
+    h2.join().unwrap();
+}

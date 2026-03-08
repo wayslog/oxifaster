@@ -26,6 +26,9 @@ where
 {
     /// Simple compaction: shift log begin address and garbage collect index
     pub fn compact(&self, until_address: Address) -> Status {
+        // Acquire read lock to exclude concurrent checkpoint.
+        let _checkpoint_guard = self.checkpoint_compaction_lock.read();
+
         // `compact` reclaims space by advancing `begin_address`, not `head_address`.
         // `head_address` represents the on-disk boundary; advancing it affects the `Pending`
         // read-back behavior (see `flush_and_shift_head`).
@@ -92,6 +95,9 @@ where
     /// # Returns
     /// CompactionResult with status and statistics
     pub fn log_compact_until(&self, target_address: Option<Address>) -> CompactionResult {
+        // Acquire read lock to exclude concurrent checkpoint.
+        let _checkpoint_guard = self.checkpoint_compaction_lock.read();
+
         // Try to start compaction
         if let Err(status) = self.compactor.try_start() {
             return CompactionResult::failure(status);

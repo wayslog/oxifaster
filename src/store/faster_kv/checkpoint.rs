@@ -330,6 +330,9 @@ where
         action: Action,
         backend_override: Option<LogCheckpointBackend>,
     ) -> io::Result<()> {
+        // Acquire write lock to exclude concurrent compaction.
+        let _compaction_guard = self.checkpoint_compaction_lock.write();
+
         let is_incremental = action == Action::CheckpointIncremental;
 
         let driver_thread_id = try_get_thread_id().ok_or_else(|| {
@@ -1081,6 +1084,7 @@ where
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
             last_snapshot_checkpoint: RwLock::new(None),
+            checkpoint_compaction_lock: RwLock::new(()),
             _marker: std::marker::PhantomData,
         })
     }
@@ -1254,6 +1258,7 @@ where
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
             last_snapshot_checkpoint: RwLock::new(None),
+            checkpoint_compaction_lock: RwLock::new(()),
             _marker: std::marker::PhantomData,
         })
     }
@@ -1322,6 +1327,7 @@ where
                 super::cpr::CheckpointDurability::FasterLike as u32,
             ),
             last_snapshot_checkpoint: RwLock::new(None),
+            checkpoint_compaction_lock: RwLock::new(()),
             _marker: std::marker::PhantomData,
         })
     }
