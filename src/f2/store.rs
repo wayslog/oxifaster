@@ -106,6 +106,7 @@ where
             hot_device,
             StoreType::Hot,
             None,
+            config.hot_store.mutable_fraction,
         )?;
 
         // Set max log size for hot store
@@ -121,6 +122,7 @@ where
             cold_device,
             StoreType::Cold,
             config.cold_store.cold_index.clone(),
+            config.cold_store.mutable_fraction,
         )?;
 
         // Set max log size for cold store

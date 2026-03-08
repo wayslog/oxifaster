@@ -866,3 +866,34 @@ fn test_f2_multi_session_independent_epoch() {
     }
     f2.stop_session();
 }
+
+#[test]
+fn test_mutable_fraction_wired_to_hlog() {
+    use crate::f2::config::HotStoreConfig;
+
+    // Use a custom mutable_fraction for hot store (0.5); cold store defaults to 0.0
+    let config = F2Config::default().with_hot_store(
+        HotStoreConfig::new()
+            .with_mutable_fraction(0.5)
+            .with_log_mem_size(16 * 1024 * 1024), // 16 MB
+    );
+
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+    // Verify hot store: mutable_pages should be ~50% of memory_pages
+    let hot_hlog_config = f2.hot_store.hlog().config();
+    let expected_hot_mutable = (hot_hlog_config.memory_pages as f64 * 0.5).round() as u32;
+    assert_eq!(
+        hot_hlog_config.mutable_pages, expected_hot_mutable,
+        "hot store mutable_pages should reflect mutable_fraction=0.5"
+    );
+
+    // Verify cold store: mutable_pages should be 0 (fraction=0.0)
+    let cold_hlog_config = f2.cold_store.hlog().config();
+    assert_eq!(
+        cold_hlog_config.mutable_pages, 0,
+        "cold store mutable_pages should be 0 for mutable_fraction=0.0"
+    );
+}

@@ -233,6 +233,11 @@ pub struct PersistentMemoryMalloc<D: StorageDevice> {
 }
 
 impl<D: StorageDevice> PersistentMemoryMalloc<D> {
+    /// Returns the configuration used to create this allocator.
+    pub(crate) fn config(&self) -> &HybridLogConfig {
+        &self.config
+    }
+
     /// Create a new hybrid log allocator
     pub fn new(config: HybridLogConfig, device: Arc<D>) -> Self {
         let buffer_size = config.memory_pages;
