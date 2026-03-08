@@ -51,7 +51,9 @@ fn test_serial_number_preserved_through_checkpoint() {
 
     // Checkpoint
     let temp_dir = tempfile::tempdir().unwrap();
-    let token = store.checkpoint(temp_dir.path()).expect("checkpoint should succeed");
+    let token = store
+        .checkpoint(temp_dir.path())
+        .expect("checkpoint should succeed");
     assert!(!token.is_nil());
 
     // Serial should still be the same value (it was captured at checkpoint)

@@ -540,9 +540,7 @@ where
                         );
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            format!(
-                                "WaitPending timeout after 30s: stalled threads: {stalled:?}"
-                            ),
+                            format!("WaitPending timeout after 30s: stalled threads: {stalled:?}"),
                         ));
                     }
                 }
