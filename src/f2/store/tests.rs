@@ -812,3 +812,57 @@ fn test_f2_synchronous_checkpoint_flow_resets_phase() {
     let session = f2.start_session();
     assert!(session.is_ok());
 }
+
+#[test]
+fn test_f2_multi_session_independent_epoch() {
+    use std::sync::Arc;
+
+    let config = F2Config::default();
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 =
+        Arc::new(F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap());
+
+    let f2_a = Arc::clone(&f2);
+    let f2_b = Arc::clone(&f2);
+
+    // Use a barrier so both threads start their sessions concurrently
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier_a = Arc::clone(&barrier);
+    let barrier_b = Arc::clone(&barrier);
+
+    let handle_a = std::thread::spawn(move || {
+        let _session = f2_a.start_session().unwrap();
+        barrier_a.wait();
+
+        // Thread A writes keys 0..50
+        for i in 0u64..50 {
+            f2_a.upsert(TestKey(i), TestValue(i * 10)).unwrap();
+        }
+
+        f2_a.stop_session();
+    });
+
+    let handle_b = std::thread::spawn(move || {
+        let _session = f2_b.start_session().unwrap();
+        barrier_b.wait();
+
+        // Thread B writes keys 50..100
+        for i in 50u64..100 {
+            f2_b.upsert(TestKey(i), TestValue(i * 10)).unwrap();
+        }
+
+        f2_b.stop_session();
+    });
+
+    handle_a.join().unwrap();
+    handle_b.join().unwrap();
+
+    // Verify all writes from both threads are visible
+    let _session = f2.start_session().unwrap();
+    for i in 0u64..100 {
+        let val = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(val, Some(TestValue(i * 10)), "key {i} should be readable");
+    }
+    f2.stop_session();
+}

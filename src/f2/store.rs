@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::compaction::{CompactionConfig, Compactor};
 use crate::device::StorageDevice;
+use crate::epoch::get_thread_id;
 use crate::f2::config::{F2CompactionConfig, F2Config};
 use crate::f2::state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
 use crate::status::Status;
@@ -179,10 +180,10 @@ where
 
         let guid = Uuid::new_v4();
 
-        // Protect epoch on both stores
-        // Use thread_id 0 for simplicity; in production, use actual thread IDs
-        self.hot_store.epoch.protect(0);
-        self.cold_store.epoch.protect(0);
+        // Protect epoch on both stores using per-thread ID
+        let tid = get_thread_id();
+        self.hot_store.epoch.protect(tid);
+        self.cold_store.epoch.protect(tid);
 
         self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
 
@@ -201,9 +202,10 @@ where
             return Err(Status::Aborted);
         }
 
-        // Protect epoch on both stores
-        self.hot_store.epoch.protect(0);
-        self.cold_store.epoch.protect(0);
+        // Protect epoch on both stores using per-thread ID
+        let tid = get_thread_id();
+        self.hot_store.epoch.protect(tid);
+        self.cold_store.epoch.protect(tid);
 
         self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
 
@@ -217,9 +219,10 @@ where
             std::hint::spin_loop();
         }
 
-        // Release epoch on both stores
-        self.hot_store.epoch.unprotect(0);
-        self.cold_store.epoch.unprotect(0);
+        // Release epoch on both stores using per-thread ID
+        let tid = get_thread_id();
+        self.hot_store.epoch.unprotect(tid);
+        self.cold_store.epoch.unprotect(tid);
 
         self.num_active_sessions.fetch_sub(1, Ordering::AcqRel);
     }
@@ -229,6 +232,11 @@ where
         if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
             self.heavy_enter();
         }
+
+        // Update thread's locally-published epoch and drain pending actions
+        let tid = get_thread_id();
+        self.hot_store.epoch.reentrant_protect_and_drain(tid);
+        self.cold_store.epoch.reentrant_protect_and_drain(tid);
 
         // Bump epoch on both stores
         self.hot_store.epoch.bump_current_epoch();
@@ -255,7 +263,7 @@ where
     /// Wait for pending compactions to complete
     pub fn complete_pending_compactions(&self) {
         while self.compaction_scheduled.load(Ordering::Acquire) {
-            if self.hot_store.epoch.is_protected(0) {
+            if self.hot_store.epoch.is_protected(get_thread_id()) {
                 self.complete_pending(false);
             }
             std::hint::spin_loop();
