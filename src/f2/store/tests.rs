@@ -8,6 +8,7 @@ use crate::f2::HotToColdMigrationStrategy;
 use crate::index::ColdIndexConfig;
 use crate::index::KeyHash;
 use crate::status::Status;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -954,4 +955,63 @@ fn test_f2_conditional_upsert_aborts_on_stale_address() {
     assert_eq!(val, Some(TestValue(150)));
 
     f2.stop_session();
+}
+
+#[test]
+fn test_f2_rmw_concurrent_correctness() {
+    use crate::f2::config::HotStoreConfig;
+
+    // Use mutable_fraction=0.0 so ALL RMW operations go through the slow
+    // (read-modify-conditional_upsert) path, exercising the retry loop.
+    let config = F2Config::default().with_hot_store(
+        HotStoreConfig::new()
+            .with_mutable_fraction(0.0)
+            .with_log_mem_size(64 * 1024 * 1024),
+    );
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 =
+        Arc::new(F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap());
+
+    // Start a session to insert the initial value.
+    let _session = f2.start_session().unwrap();
+    f2.upsert(TestKey(1), TestValue(0)).unwrap();
+    f2.stop_session();
+
+    let num_threads = 4;
+    let increments_per_thread = 100;
+    let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+    let mut handles = vec![];
+
+    for _ in 0..num_threads {
+        let f2_clone = Arc::clone(&f2);
+        let barrier_clone = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let _session = f2_clone.start_session().unwrap();
+            barrier_clone.wait();
+            for _ in 0..increments_per_thread {
+                f2_clone
+                    .rmw(TestKey(1), |v: &mut TestValue| {
+                        v.0 += 1;
+                    })
+                    .unwrap();
+            }
+            f2_clone.stop_session();
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Verify: the final value should be exactly num_threads * increments_per_thread.
+    let _session = f2.start_session().unwrap();
+    let final_value = f2.read(&TestKey(1)).unwrap();
+    f2.stop_session();
+
+    assert_eq!(
+        final_value,
+        Some(TestValue((num_threads * increments_per_thread) as u64)),
+        "concurrent RMW should not lose updates"
+    );
 }

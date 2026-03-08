@@ -54,16 +54,19 @@ where
     }
 
     /// Read-Modify-Write:
-    /// - If the hot record is mutable and matches, update in-place.
-    /// - Otherwise, read hot/cold (or use `Default`), apply the update, and upsert into hot.
-    pub fn rmw<F>(&self, key: K, modify: F) -> Result<(), Status>
+    /// - If the hot record is mutable and matches, update in-place (fast path).
+    /// - Otherwise, read hot/cold (or use `Default`), apply the update, and
+    ///   conditionally insert into hot with a bounded retry loop to handle
+    ///   concurrent modifications (avoids TOCTOU lost updates).
+    pub fn rmw<F>(&self, key: K, mut modify: F) -> Result<(), Status>
     where
-        F: FnOnce(&mut V),
+        F: FnMut(&mut V),
         V: Default,
     {
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
         self.track_key_access(hash.hash());
 
+        // Fast path: in-place update in the mutable region.
         if let Some(record_base) = self.try_get_mutable_record_ptr(&self.hot_store, &key, hash)? {
             // SAFETY: `record_base` points to a record in the mutable region and is epoch-protected.
             let value_ptr = unsafe { record_base.add(Record::<K, V>::value_offset()) as *mut V };
@@ -73,6 +76,31 @@ where
             return Ok(());
         }
 
+        // Slow path: read-modify-conditional_insert with bounded retry.
+        // If another thread modifies the same key between our read and CAS,
+        // the conditional upsert will abort and we retry with fresh data.
+        const MAX_RMW_RETRIES: usize = 256;
+        for _ in 0..MAX_RMW_RETRIES {
+            // Snapshot the current hash-index address for the key.
+            let expected_address = self.get_hot_entry_address(&key);
+
+            // Read the current value (from hot or cold store).
+            let mut value: V = (self.read(&key)?).unwrap_or_default();
+
+            // Apply the modification.
+            modify(&mut value);
+
+            // Attempt conditional insert -- succeeds only if the index entry
+            // still points to `expected_address`.
+            match self.conditional_upsert_into_hot(key, value, expected_address) {
+                Ok(()) => return Ok(()),
+                Err(Status::Aborted) => continue, // CAS failed, retry
+                Err(e) => return Err(e),           // other error, propagate
+            }
+        }
+
+        // Fallback after exhausting retries: regular upsert to avoid livelock.
+        // This may lose a concurrent update but guarantees progress.
         let mut value: V = (self.read(&key)?).unwrap_or_default();
         modify(&mut value);
         self.upsert(key, value)
@@ -338,6 +366,14 @@ where
         key: &K,
         hash: KeyHash,
     ) -> Result<Option<*mut u8>, Status> {
+        // If mutable_pages is 0, all records are read-only by definition.
+        // We must check this explicitly because read_only_address starts at 0
+        // and only advances when pages fill up, so freshly written records
+        // on the current page would incorrectly appear mutable.
+        if store.hlog().config().mutable_pages == 0 {
+            return Ok(None);
+        }
+
         let find_result = store.hash_index.find_entry(hash);
         if !find_result.found() {
             return Ok(None);
