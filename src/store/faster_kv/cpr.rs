@@ -157,6 +157,14 @@ impl ActiveCheckpoint {
     pub(crate) fn barrier_complete(&self) -> bool {
         self.acked == self.participants
     }
+
+    /// Returns thread IDs of participants that have not yet acked.
+    pub(crate) fn pending_threads(&self) -> Vec<usize> {
+        let not_acked = self.participants & !self.acked;
+        (0..MAX_THREADS)
+            .filter(|&i| (not_acked & (1u128 << i)) != 0)
+            .collect()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -186,5 +194,54 @@ impl CprCoordinator {
         let guard = self.inner.lock();
         let active = guard.as_ref()?;
         Some(f(active))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Action, Phase};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn make_active(participants: u128, driver: usize) -> ActiveCheckpoint {
+        ActiveCheckpoint::new(ActiveCheckpointStart {
+            token: Uuid::new_v4(),
+            dir: PathBuf::from("/tmp/test"),
+            action: Action::CheckpointFull,
+            backend: LogCheckpointBackend::Snapshot,
+            durability: CheckpointDurability::FasterLike,
+            driver_thread_id: driver,
+            participants,
+            version: 1,
+        })
+    }
+
+    #[test]
+    fn test_pending_threads_all_pending() {
+        let active = make_active(0b1011, 0);
+        let pending = active.pending_threads();
+        assert_eq!(pending, vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn test_pending_threads_some_acked() {
+        let mut active = make_active(0b1011, 0);
+        active.set_phase(Phase::WaitPending, 1);
+        active.ack(0);
+        active.ack(3);
+        let pending = active.pending_threads();
+        assert_eq!(pending, vec![1]);
+    }
+
+    #[test]
+    fn test_pending_threads_all_acked() {
+        let mut active = make_active(0b1011, 0);
+        active.set_phase(Phase::WaitPending, 1);
+        active.ack(0);
+        active.ack(1);
+        active.ack(3);
+        let pending = active.pending_threads();
+        assert!(pending.is_empty());
     }
 }
