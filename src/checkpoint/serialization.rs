@@ -118,6 +118,9 @@ pub struct SerializableSessionState {
     pub guid: String,
     /// Monotonic serial number
     pub serial_num: u64,
+    /// Checkpoint version this state was captured at
+    #[serde(default)]
+    pub checkpoint_version: u32,
 }
 
 impl SerializableSessionState {
@@ -126,6 +129,7 @@ impl SerializableSessionState {
         Self {
             guid: state.guid.to_string(),
             serial_num: state.serial_num,
+            checkpoint_version: state.checkpoint_version,
         }
     }
 
@@ -134,7 +138,11 @@ impl SerializableSessionState {
         let guid = self.guid.parse().map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UUID: {e}"))
         })?;
-        Ok(super::SessionState::new(guid, self.serial_num))
+        Ok(super::SessionState {
+            guid,
+            serial_num: self.serial_num,
+            checkpoint_version: self.checkpoint_version,
+        })
     }
 }
 

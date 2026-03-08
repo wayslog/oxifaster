@@ -488,6 +488,9 @@ where
                             active.begin_address = begin_address;
                             active.final_address = final_address;
                             active.session_states = session_states;
+                            for ss in &mut active.session_states {
+                                ss.checkpoint_version = current_state.version;
+                            }
                         });
 
                         let _ = self.system_state.try_advance();
@@ -1118,29 +1121,13 @@ where
     /// This ensures that the recovered session states have reasonable serial numbers
     /// that are consistent with the checkpoint boundary.
     fn validate_session_serials(log_meta: &LogMetadata) -> io::Result<()> {
+        let mut seen_guids = std::collections::HashSet::new();
+
         for session_state in &log_meta.session_states {
-            // Skip validation for new sessions (serial number 0)
             if session_state.serial_num == 0 {
                 continue;
             }
 
-            // In a real implementation, you could verify:
-            // - Serial numbers are monotonic within a session
-            // - Operations beyond the checkpoint boundary have higher serials
-            // - No operations are "lost" in the serial sequence
-            //
-            // For now, we just log the validation for visibility
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                tracing::debug!(
-                    session_id = %session_state.guid,
-                    serial = session_state.serial_num,
-                    version = log_meta.version,
-                    "validating session serial number"
-                );
-            }
-
-            // Check for obviously invalid serial numbers
-            // (this is a basic sanity check - more sophisticated checks could be added)
             if session_state.serial_num == u64::MAX {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1149,6 +1136,25 @@ where
                         session_state.serial_num, session_state.guid
                     ),
                 ));
+            }
+
+            if !seen_guids.insert(session_state.guid) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Duplicate session GUID {} in checkpoint",
+                        session_state.guid
+                    ),
+                ));
+            }
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    session_id = %session_state.guid,
+                    serial = session_state.serial_num,
+                    version = log_meta.version,
+                    "validated session serial number"
+                );
             }
         }
 

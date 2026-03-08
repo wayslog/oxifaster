@@ -99,12 +99,27 @@ pub struct SessionState {
     pub guid: Uuid,
     /// Monotonic serial number for this session
     pub serial_num: u64,
+    /// Checkpoint version this state was captured at
+    pub checkpoint_version: u32,
 }
 
 impl SessionState {
     /// Create a new session state
     pub fn new(guid: Uuid, serial_num: u64) -> Self {
-        Self { guid, serial_num }
+        Self {
+            guid,
+            serial_num,
+            checkpoint_version: 0,
+        }
+    }
+
+    /// Create with explicit checkpoint version
+    pub fn with_version(guid: Uuid, serial_num: u64, version: u32) -> Self {
+        Self {
+            guid,
+            serial_num,
+            checkpoint_version: version,
+        }
     }
 }
 
