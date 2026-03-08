@@ -416,6 +416,8 @@ where
 
         loop {
             let current_state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
+            // Update heartbeat so participant threads know driver is alive
+            let _ = self.cpr.with_active(|active| active.update_heartbeat());
             self.cpr_refresh(&mut driver_ctx);
 
             if current_state.phase == Phase::Rest {

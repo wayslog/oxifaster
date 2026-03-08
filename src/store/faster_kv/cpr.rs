@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -84,6 +85,9 @@ pub(crate) struct ActiveCheckpoint {
     pub(crate) session_states: Vec<SessionState>,
 
     pub(crate) snapshot_written: bool,
+
+    /// Driver heartbeat counter (incremented each driver loop iteration).
+    pub(crate) driver_heartbeat: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -117,6 +121,7 @@ impl ActiveCheckpoint {
             log_metadata: None,
             session_states: Vec::new(),
             snapshot_written: false,
+            driver_heartbeat: AtomicU64::new(0),
         }
     }
 
@@ -164,6 +169,43 @@ impl ActiveCheckpoint {
         (0..MAX_THREADS)
             .filter(|&i| (not_acked & (1u128 << i)) != 0)
             .collect()
+    }
+
+    /// Update the driver heartbeat (called by driver thread each loop iteration).
+    pub(crate) fn update_heartbeat(&self) {
+        self.driver_heartbeat.fetch_add(1, Ordering::Release);
+    }
+
+    /// Get current heartbeat value.
+    pub(crate) fn heartbeat_value(&self) -> u64 {
+        self.driver_heartbeat.load(Ordering::Acquire)
+    }
+
+    /// Get driver thread ID.
+    pub(crate) fn current_driver_thread_id(&self) -> usize {
+        self.driver_thread_id
+    }
+
+    /// Try to take over as driver if the current driver appears stalled.
+    /// `last_observed_heartbeat` is the heartbeat value the caller last observed.
+    /// Takeover succeeds only if the heartbeat hasn't changed since then.
+    pub(crate) fn try_takeover(
+        &mut self,
+        new_driver_id: usize,
+        last_observed_heartbeat: u64,
+    ) -> bool {
+        let current = self.driver_heartbeat.load(Ordering::Acquire);
+        if current != last_observed_heartbeat {
+            return false;
+        }
+        let old_driver = self.driver_thread_id;
+        self.driver_thread_id = new_driver_id;
+        tracing::warn!(
+            old_driver,
+            new_driver = new_driver_id,
+            "Checkpoint driver takeover"
+        );
+        true
     }
 }
 
@@ -243,5 +285,35 @@ mod tests {
         active.ack(3);
         let pending = active.pending_threads();
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn test_driver_heartbeat_increments() {
+        let active = make_active(0b11, 0);
+        assert_eq!(active.heartbeat_value(), 0);
+        active.update_heartbeat();
+        assert_eq!(active.heartbeat_value(), 1);
+        active.update_heartbeat();
+        assert_eq!(active.heartbeat_value(), 2);
+    }
+
+    #[test]
+    fn test_driver_takeover_stale_heartbeat() {
+        let mut active = make_active(0b111, 0);
+        assert_eq!(active.current_driver_thread_id(), 0);
+
+        // Heartbeat is 0 and we pass 0 -> stale, takeover succeeds
+        assert!(active.try_takeover(1, 0));
+        assert_eq!(active.current_driver_thread_id(), 1);
+    }
+
+    #[test]
+    fn test_driver_takeover_fresh_heartbeat_fails() {
+        let mut active = make_active(0b111, 0);
+        active.update_heartbeat(); // heartbeat is now 1
+
+        // Caller observed 0, but heartbeat is 1 -> fresh, takeover fails
+        assert!(!active.try_takeover(1, 0));
+        assert_eq!(active.current_driver_thread_id(), 0);
     }
 }
