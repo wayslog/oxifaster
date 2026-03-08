@@ -249,6 +249,89 @@ where
         Err(Status::Aborted)
     }
 
+    /// Return the current hash-index address for `key` in the hot store.
+    ///
+    /// If the key has no entry (or the entry is unused), returns `Address::INVALID`.
+    /// This is used by RMW to snapshot the expected address before a conditional upsert.
+    pub(crate) fn get_hot_entry_address(&self, key: &K) -> Address {
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
+        let find_result = self.hot_store.hash_index.find_entry(hash);
+        if find_result.found() {
+            find_result.entry.address().readcache_address()
+        } else {
+            Address::INVALID
+        }
+    }
+
+    /// Conditionally insert into hot store only if the hash index entry still points
+    /// to `expected_address`. Returns `Err(Status::Aborted)` if the entry was modified
+    /// concurrently (CAS failure or address mismatch).
+    ///
+    /// This is the F2 equivalent of C++ FASTER's `ConditionalInsert`.
+    pub fn conditional_upsert_into_hot(
+        &self,
+        key: K,
+        value: V,
+        expected_address: Address,
+    ) -> Result<(), Status> {
+        debug_assert!(!std::mem::needs_drop::<K>());
+        debug_assert!(!std::mem::needs_drop::<V>());
+
+        let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
+        let store = &self.hot_store;
+
+        // Step 1: Check current index entry against expected_address.
+        let result = store.hash_index.find_or_create_entry(hash);
+
+        let current_address = result.entry.address().readcache_address();
+
+        if current_address != expected_address {
+            return Err(Status::Aborted);
+        }
+
+        // Step 2: Allocate and write the record.
+        let record_size = Record::<K, V>::size();
+        let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
+
+        let record_ptr = unsafe { store.hlog_mut().get_mut(address) };
+        let Some(ptr) = record_ptr else {
+            return Err(Status::OutOfMemory);
+        };
+
+        let record = ptr.as_ptr() as *mut Record<K, V>;
+        unsafe {
+            Record::<K, V>::write_key(ptr.as_ptr(), key);
+            Record::<K, V>::write_value(ptr.as_ptr(), value);
+        }
+
+        // Step 3: Build header with previous_address pointing to the expected (old) entry.
+        unsafe {
+            let header = RecordInfo::new(
+                expected_address,
+                self.checkpoint.version() as u16,
+                false,
+                false,
+                false,
+            );
+            ptr::write(&mut (*record).header, header);
+        }
+
+        // Step 4: Single CAS attempt -- if it fails, another thread changed the entry.
+        let status = store.hash_index.try_update_entry(
+            result.atomic_entry,
+            result.entry,
+            address,
+            hash,
+            false,
+        );
+
+        if status == Status::Ok {
+            Ok(())
+        } else {
+            Err(Status::Aborted)
+        }
+    }
+
     fn try_get_mutable_record_ptr(
         &self,
         store: &InternalStore<D>,

@@ -897,3 +897,61 @@ fn test_mutable_fraction_wired_to_hlog() {
         "cold store mutable_pages should be 0 for mutable_fraction=0.0"
     );
 }
+
+#[test]
+fn test_f2_conditional_upsert_succeeds_with_matching_address() {
+    let config = F2Config::default();
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    // Insert initial value
+    f2.upsert(TestKey(42), TestValue(100)).unwrap();
+
+    // Snapshot the current address
+    let expected_addr = f2.get_hot_entry_address(&TestKey(42));
+    assert!(expected_addr.is_valid(), "address should be valid after upsert");
+
+    // Conditional upsert with matching address should succeed
+    let result = f2.conditional_upsert_into_hot(TestKey(42), TestValue(200), expected_addr);
+    assert!(result.is_ok(), "conditional upsert should succeed with matching address");
+
+    // Verify the new value is readable
+    let val = f2.read(&TestKey(42)).unwrap();
+    assert_eq!(val, Some(TestValue(200)));
+
+    f2.stop_session();
+}
+
+#[test]
+fn test_f2_conditional_upsert_aborts_on_stale_address() {
+    let config = F2Config::default();
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    // Insert initial value and snapshot the address
+    f2.upsert(TestKey(42), TestValue(100)).unwrap();
+    let stale_addr = f2.get_hot_entry_address(&TestKey(42));
+
+    // Update the key again -- this changes the hash-index entry address
+    f2.upsert(TestKey(42), TestValue(150)).unwrap();
+
+    // The address should have changed
+    let current_addr = f2.get_hot_entry_address(&TestKey(42));
+    assert_ne!(stale_addr, current_addr, "address should change after second upsert");
+
+    // Conditional upsert with stale address should abort
+    let result = f2.conditional_upsert_into_hot(TestKey(42), TestValue(200), stale_addr);
+    assert_eq!(result, Err(Status::Aborted), "should abort on stale address");
+
+    // Value should remain at 150 (the second upsert)
+    let val = f2.read(&TestKey(42)).unwrap();
+    assert_eq!(val, Some(TestValue(150)));
+
+    f2.stop_session();
+}
