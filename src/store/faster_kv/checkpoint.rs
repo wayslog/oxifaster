@@ -699,12 +699,23 @@ where
                 });
             }
             LogCheckpointBackend::FoldOver => {
-                // Fold-over uses the main log device: ensure the prefix is flushed to the device.
-                // NOTE: flush_until() now calls device.flush() for durability (Workstream C).
+                // Fold-over: ensure data pages are flushed and durable BEFORE writing metadata.
+                // Step 1: Flush data pages to device
                 unsafe {
                     (*self.hlog.get()).flush_until(final_address)?;
                 }
 
+                // Step 2: Explicit device barrier for FsyncOnCheckpoint mode
+                // (flush_until calls device.flush() internally since Workstream C,
+                //  but we add an explicit call for FsyncOnCheckpoint where metadata
+                //  correctness depends on data being durable first)
+                if durability == CheckpointDurability::FsyncOnCheckpoint {
+                    unsafe {
+                        (*self.hlog.get()).flush_device()?;
+                    }
+                }
+
+                // Step 3: Write metadata (only after data is durable)
                 let meta = write_log_meta(false)?;
                 fsync_checkpoint_artifacts(false)?;
 

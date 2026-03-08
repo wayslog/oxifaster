@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use oxifaster::device::NullDisk;
 use oxifaster::status::Status;
-use oxifaster::store::{FasterKv, FasterKvConfig};
+use oxifaster::store::{FasterKv, FasterKvConfig, LogCheckpointBackend};
 
 fn create_test_config() -> FasterKvConfig {
     FasterKvConfig {
@@ -93,4 +93,33 @@ fn test_checkpoint_concurrent_writers_complete() {
     for h in handles {
         h.join().unwrap();
     }
+}
+
+/// FoldOver checkpoint completes and produces a valid token.
+#[test]
+fn test_foldover_checkpoint_basic() {
+    let config = create_test_config();
+    let device = NullDisk::new();
+    let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Insert some data
+    {
+        let mut session = store.start_session().unwrap();
+        for i in 0..500u64 {
+            let status = session.upsert(i, i * 10);
+            assert_eq!(status, Status::Ok);
+            if i.is_multiple_of(100) {
+                session.refresh();
+            }
+        }
+    }
+
+    // Use FoldOver backend
+    store.set_log_checkpoint_backend(LogCheckpointBackend::FoldOver);
+
+    let token = store
+        .checkpoint(temp_dir.path())
+        .expect("foldover checkpoint should succeed");
+    assert!(!token.is_nil());
 }
