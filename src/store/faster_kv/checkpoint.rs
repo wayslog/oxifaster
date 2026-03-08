@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
@@ -409,6 +409,7 @@ where
         cleanup.clear_cpr = true;
 
         let mut driver_ctx = ThreadContext::new(driver_thread_id);
+        let mut wait_pending_deadline: Option<Instant> = None;
 
         loop {
             let current_state = self.system_state.load(std::sync::atomic::Ordering::Acquire);
@@ -506,8 +507,10 @@ where
                 }
 
                 Phase::WaitPending => {
-                    // WAIT_PENDING semantics: wait only for the previous execution context to drain
-                    // (pending I/Os + retry_requests).
+                    // Initialize deadline on first entry to WaitPending
+                    let deadline = wait_pending_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+
                     let _ = self.cpr.with_active_mut(|active| {
                         active.set_phase(current_state.phase, current_state.version);
                     });
@@ -517,6 +520,22 @@ where
                         .unwrap_or(false);
                     if barrier_complete {
                         let _ = self.system_state.try_advance();
+                        wait_pending_deadline = None;
+                    } else if Instant::now() > *deadline {
+                        let stalled = self
+                            .cpr
+                            .with_active(|active| active.pending_threads())
+                            .unwrap_or_default();
+                        tracing::warn!(
+                            ?stalled,
+                            "WaitPending timeout: threads have not drained pending IOs"
+                        );
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "WaitPending timeout after 30s: stalled threads: {stalled:?}"
+                            ),
+                        ));
                     }
                 }
 
