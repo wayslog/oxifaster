@@ -958,6 +958,54 @@ fn test_f2_conditional_upsert_aborts_on_stale_address() {
 }
 
 #[test]
+fn test_f2_checkpoint_roundtrip() {
+    let config = F2Config::default();
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let mut f2 =
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config.clone(), hot_device, cold_device).unwrap();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Write 100 key-value pairs
+    let _session = f2.start_session().unwrap();
+    for i in 0u64..100 {
+        f2.upsert(TestKey(i), TestValue(i * 100)).unwrap();
+    }
+    f2.stop_session();
+
+    // Checkpoint: initiate and then save to disk
+    let token = f2.checkpoint(false).unwrap();
+    f2.save_checkpoint(temp_dir.path(), token).unwrap();
+
+    // Drop the original store
+    drop(f2);
+
+    // Create a new F2Kv instance and recover
+    let hot_device2 = NullDisk::new();
+    let cold_device2 = NullDisk::new();
+    let mut f2_recovered =
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device2, cold_device2).unwrap();
+
+    let version = f2_recovered.recover(temp_dir.path(), token).unwrap();
+    // checkpoint() calls initialize() which bumps version from 0 to 1
+    assert_eq!(version, 1, "first checkpoint version should be 1");
+
+    // Verify all 100 key-value pairs are readable
+    let _session = f2_recovered.start_session().unwrap();
+    for i in 0u64..100 {
+        let result = f2_recovered.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 100)),
+            "key {i} should have value {} after recovery",
+            i * 100
+        );
+    }
+    f2_recovered.stop_session();
+}
+
+#[test]
 fn test_f2_rmw_concurrent_correctness() {
     use crate::f2::config::HotStoreConfig;
 
@@ -1014,4 +1062,52 @@ fn test_f2_rmw_concurrent_correctness() {
         Some(TestValue((num_threads * increments_per_thread) as u64)),
         "concurrent RMW should not lose updates"
     );
+}
+
+#[test]
+fn test_f2_concurrent_crud() {
+    let config = F2Config::default();
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 = Arc::new(
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
+    );
+
+    let num_threads = 4;
+    let keys_per_thread = 250;
+    let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+    let mut handles = vec![];
+
+    for t in 0..num_threads {
+        let f2_clone = Arc::clone(&f2);
+        let barrier_clone = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            f2_clone.start_session().unwrap();
+            barrier_clone.wait();
+            let base = t * keys_per_thread;
+            for i in 0..keys_per_thread {
+                let key = TestKey((base + i) as u64);
+                let value = TestValue((base + i) as u64 * 10);
+                f2_clone.upsert(key, value).unwrap();
+            }
+            f2_clone.stop_session();
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Verify all writes from a single thread
+    f2.start_session().unwrap();
+    for t in 0..num_threads {
+        let base = t * keys_per_thread;
+        for i in 0..keys_per_thread {
+            let key = TestKey((base + i) as u64);
+            let expected = TestValue((base + i) as u64 * 10);
+            let v = f2.read(&key).unwrap();
+            assert_eq!(v, Some(expected), "Key {} missing", base + i);
+        }
+    }
+    f2.stop_session();
 }
