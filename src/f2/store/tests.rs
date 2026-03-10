@@ -1126,3 +1126,52 @@ fn test_f2_concurrent_crud() {
     }
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_disk_read_after_flush() {
+    use crate::device::FileSystemDisk;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let hot_device = FileSystemDisk::single_file(temp_dir.path().join("hot.dat")).unwrap();
+    let cold_device = FileSystemDisk::single_file(temp_dir.path().join("cold.dat")).unwrap();
+
+    let config = F2Config::default();
+    let f2 =
+        F2Kv::<TestKey, TestValue, FileSystemDisk>::new(config, hot_device, cold_device).unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    // 写入一批记录
+    let num_records = 200u64;
+    for i in 0..num_records {
+        f2.upsert(TestKey(i), TestValue(i * 100)).unwrap();
+    }
+
+    // 将已写入的页面刷盘，然后将 head_address 前移，使记录落入磁盘区域
+    let tail = f2.hot_store.tail_address();
+    f2.hot_store.hlog().flush_until(tail).unwrap();
+    f2.hot_store.hlog().shift_head_address(tail);
+
+    // 确认 head_address 已前移，确保后续读取走磁盘路径
+    assert!(
+        f2.hot_store.hlog().get_head_address() > f2.hot_store.hlog().get_begin_address(),
+        "head_address 应大于 begin_address 以确保记录在磁盘上"
+    );
+
+    // 此时内存中没有记录可读，必须走磁盘读取路径
+    for i in 0..num_records {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 100)),
+            "key {} 应当通过磁盘读取返回正确值",
+            i
+        );
+    }
+
+    // 验证不存在的 key 返回 None
+    let result = f2.read(&TestKey(num_records + 1)).unwrap();
+    assert!(result.is_none(), "不存在的 key 应当返回 None");
+
+    f2.stop_session();
+}

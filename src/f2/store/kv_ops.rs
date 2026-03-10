@@ -16,7 +16,7 @@ impl<K, V, D> F2Kv<K, V, D>
 where
     K: Pod + Eq + Clone + Send + Sync + 'static,
     V: Pod + Clone + Send + Sync + 'static,
-    D: crate::device::StorageDevice + 'static,
+    D: crate::device::SyncStorageDevice + 'static,
 {
     /// Read: hot first, then cold.
     pub fn read(&self, key: &K) -> Result<Option<V>, Status> {
@@ -123,11 +123,45 @@ where
             return Ok(None);
         }
 
-        // Only the in-memory read path is implemented: `PersistentMemoryMalloc` does not currently
-        // expose a synchronous disk-read API.
         while address.is_valid() {
             let record_ptr = unsafe { store.hlog().get(address) };
             let Some(ptr) = record_ptr else {
+                // Record is not in memory -- attempt synchronous disk read if
+                // the address falls in the on-disk region.
+                if address >= store.hlog().get_begin_address()
+                    && address < store.hlog().get_head_address()
+                {
+                    let record_size = Record::<K, V>::size();
+                    let mut buf = vec![0u8; record_size];
+                    let n = store
+                        .device
+                        .read_sync(address.control(), &mut buf)
+                        .map_err(|_| Status::IoError)?;
+                    if n < record_size {
+                        return Err(Status::IoError); // 短读 -- 记录不完整或已损坏
+                    }
+
+                    // Safety: read_unaligned 不要求对齐，避免 Vec<u8> 对齐不足的 UB。
+                    // RecordInfo 内部是一个 u64 control word。
+                    let control = unsafe { ptr::read_unaligned(buf.as_ptr() as *const u64) };
+                    let header = RecordInfo::from_control(control);
+
+                    let disk_key = unsafe { Record::<K, V>::read_key(buf.as_ptr()) };
+                    if disk_key == *key {
+                        if header.is_tombstone() {
+                            return Ok(None);
+                        }
+                        let value = unsafe { Record::<K, V>::read_value(buf.as_ptr()) };
+                        if is_hot {
+                            self.track_key_access(hash.hash());
+                        }
+                        return Ok(Some(value));
+                    }
+
+                    // key 不匹配 -- 沿链表继续查找
+                    address = header.previous_address();
+                    continue;
+                }
                 break;
             };
 
