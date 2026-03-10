@@ -57,8 +57,7 @@ impl<D: StorageDevice> InternalStore<D> {
 
         let mut log_config = HybridLogConfig::new(log_mem_size, page_size_bits as u32);
         let fraction = mutable_fraction.clamp(0.0, 1.0);
-        log_config.mutable_pages =
-            (log_config.memory_pages as f64 * fraction).round() as u32;
+        log_config.mutable_pages = (log_config.memory_pages as f64 * fraction).round() as u32;
         let hlog = PersistentMemoryMalloc::new(log_config, device.clone());
 
         Ok(Self {

@@ -821,8 +821,9 @@ fn test_f2_multi_session_independent_epoch() {
     let config = F2Config::default();
     let hot_device = NullDisk::new();
     let cold_device = NullDisk::new();
-    let f2 =
-        Arc::new(F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap());
+    let f2 = Arc::new(
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
+    );
 
     let f2_a = Arc::clone(&f2);
     let f2_b = Arc::clone(&f2);
@@ -913,11 +914,17 @@ fn test_f2_conditional_upsert_succeeds_with_matching_address() {
 
     // Snapshot the current address
     let expected_addr = f2.get_hot_entry_address(&TestKey(42));
-    assert!(expected_addr.is_valid(), "address should be valid after upsert");
+    assert!(
+        expected_addr.is_valid(),
+        "address should be valid after upsert"
+    );
 
     // Conditional upsert with matching address should succeed
     let result = f2.conditional_upsert_into_hot(TestKey(42), TestValue(200), expected_addr);
-    assert!(result.is_ok(), "conditional upsert should succeed with matching address");
+    assert!(
+        result.is_ok(),
+        "conditional upsert should succeed with matching address"
+    );
 
     // Verify the new value is readable
     let val = f2.read(&TestKey(42)).unwrap();
@@ -944,11 +951,18 @@ fn test_f2_conditional_upsert_aborts_on_stale_address() {
 
     // The address should have changed
     let current_addr = f2.get_hot_entry_address(&TestKey(42));
-    assert_ne!(stale_addr, current_addr, "address should change after second upsert");
+    assert_ne!(
+        stale_addr, current_addr,
+        "address should change after second upsert"
+    );
 
     // Conditional upsert with stale address should abort
     let result = f2.conditional_upsert_into_hot(TestKey(42), TestValue(200), stale_addr);
-    assert_eq!(result, Err(Status::Aborted), "should abort on stale address");
+    assert_eq!(
+        result,
+        Err(Status::Aborted),
+        "should abort on stale address"
+    );
 
     // Value should remain at 150 (the second upsert)
     let val = f2.read(&TestKey(42)).unwrap();
@@ -1018,8 +1032,9 @@ fn test_f2_rmw_concurrent_correctness() {
     );
     let hot_device = NullDisk::new();
     let cold_device = NullDisk::new();
-    let f2 =
-        Arc::new(F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap());
+    let f2 = Arc::new(
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
+    );
 
     // Start a session to insert the initial value.
     let _session = f2.start_session().unwrap();

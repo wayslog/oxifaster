@@ -95,7 +95,7 @@ where
             match self.conditional_upsert_into_hot(key, value, expected_address) {
                 Ok(()) => return Ok(()),
                 Err(Status::Aborted) => continue, // CAS failed, retry
-                Err(e) => return Err(e),           // other error, propagate
+                Err(e) => return Err(e),          // other error, propagate
             }
         }
 
