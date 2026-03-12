@@ -1445,3 +1445,92 @@ fn test_f2_read_cache_backfill_on_cold_hit() {
 
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_large_dataset_with_filesystem() {
+    use crate::device::FileSystemDisk;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let hot_device = FileSystemDisk::single_file(temp_dir.path().join("hot.dat")).unwrap();
+    let cold_device = FileSystemDisk::single_file(temp_dir.path().join("cold.dat")).unwrap();
+
+    let mut config = F2Config::default();
+    // Use smaller memory to force pages to disk sooner
+    config.hot_store.log_mem_size = 4 * 1024 * 1024; // 4 MB
+    config.cold_store.log_mem_size = 4 * 1024 * 1024;
+    config.hot_store.index_size = 1 << 16; // 64K buckets
+    config.cold_store.index_size = 1 << 16;
+    config.hot_store.mutable_fraction = 0.5;
+    config.cold_store.mutable_fraction = 0.5;
+    config.compaction.hot_store_enabled = false;
+    config.compaction.cold_store_enabled = false;
+    config.hot_store.read_cache = None; // Disable read cache for this test
+
+    let f2 =
+        F2Kv::<TestKey, TestValue, FileSystemDisk>::new(config, hot_device, cold_device).unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    let num_keys = 10_000u64;
+
+    // 1. Write all keys
+    for i in 0..num_keys {
+        f2.upsert(TestKey(i), TestValue(i * 7)).unwrap();
+    }
+
+    // 2. Verify all keys readable (in-memory)
+    for i in 0..num_keys {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 7)),
+            "key {} after initial write",
+            i
+        );
+    }
+
+    // 3. Hot-to-cold compaction (while data is still in memory)
+    let hot_tail = f2.hot_store.tail_address();
+    let result = f2.compact_hot_log(hot_tail);
+    assert!(result.is_ok(), "hot compaction should succeed");
+
+    // 4. Read from cold store
+    for i in (0..num_keys).step_by(100) {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 7)),
+            "key {} after hot-cold migration",
+            i
+        );
+    }
+
+    // 5. Flush cold store to disk and shift head address to test disk reads
+    let cold_tail = f2.cold_store.tail_address();
+    f2.cold_store.hlog().flush_until(cold_tail).unwrap();
+    f2.cold_store.hlog().shift_head_address(cold_tail);
+
+    // 6. Read from disk - tests synchronous disk read path on cold store
+    for i in (0..num_keys).step_by(100) {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(result, Some(TestValue(i * 7)), "key {} after disk flush", i);
+    }
+
+    // 7. Update some keys
+    for i in (0..num_keys).step_by(10) {
+        f2.upsert(TestKey(i), TestValue(i * 11)).unwrap();
+    }
+
+    // 8. Verify final state: updated keys should reflect new values,
+    //    original keys should retain initial values.
+    for i in 0..num_keys {
+        let result = f2.read(&TestKey(i)).unwrap();
+        if i % 10 == 0 {
+            assert_eq!(result, Some(TestValue(i * 11)), "updated key {}", i);
+        } else {
+            assert_eq!(result, Some(TestValue(i * 7)), "original key {}", i);
+        }
+    }
+
+    f2.stop_session();
+}
