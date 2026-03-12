@@ -25,8 +25,9 @@ use std::thread;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
+use crate::cache::ReadCache;
 use crate::compaction::{CompactionConfig, Compactor};
-use crate::device::StorageDevice;
+use crate::device::SyncStorageDevice;
 use crate::epoch::get_thread_id;
 use crate::f2::config::{F2CompactionConfig, F2Config};
 use crate::f2::state::{F2CheckpointPhase, F2CheckpointState, StoreCheckpointStatus};
@@ -44,7 +45,7 @@ pub struct F2Kv<K, V, D>
 where
     K: Pod + Eq + Send + Sync,
     V: Pod + Send + Sync,
-    D: StorageDevice,
+    D: SyncStorageDevice,
 {
     /// Configuration
     config: F2Config,
@@ -68,6 +69,8 @@ where
     num_active_sessions: AtomicU64,
     /// Checkpoint directory for background checkpoint operations
     checkpoint_dir: Option<std::path::PathBuf>,
+    /// Optional read cache for hot store disk reads
+    read_cache: Option<ReadCache<K, V>>,
     /// Key access statistics (used only for the access-frequency migration strategy).
     key_access: KeyAccessTracker,
     /// Phantom data for type parameters
@@ -78,7 +81,7 @@ impl<K, V, D> F2Kv<K, V, D>
 where
     K: Pod + Eq + Clone + Send + Sync + 'static,
     V: Pod + Clone + Send + Sync + 'static,
-    D: StorageDevice + 'static,
+    D: SyncStorageDevice + 'static,
 {
     /// Default page size bits
     const DEFAULT_PAGE_SIZE_BITS: u8 = 22;
@@ -139,6 +142,12 @@ where
             .with_max_compact_bytes(config.compaction.max_compact_size)
             .with_num_threads(config.compaction.num_threads);
 
+        let read_cache = config
+            .hot_store
+            .read_cache
+            .as_ref()
+            .map(|rc_config| ReadCache::<K, V>::new(rc_config.clone()));
+
         Ok(Self {
             config,
             hot_store,
@@ -151,6 +160,7 @@ where
             cold_compactor: Compactor::with_config(cold_compaction_config),
             num_active_sessions: AtomicU64::new(0),
             checkpoint_dir: None,
+            read_cache,
             key_access: KeyAccessTracker::new(),
             _marker: std::marker::PhantomData,
         })
@@ -159,6 +169,11 @@ where
     /// Get the configuration
     pub fn config(&self) -> &F2Config {
         &self.config
+    }
+
+    /// Check whether a read cache is present
+    pub fn has_read_cache(&self) -> bool {
+        self.read_cache.is_some()
     }
 
     /// Set the checkpoint directory for background checkpoint operations
@@ -710,7 +725,7 @@ impl<K, V, D> Drop for F2Kv<K, V, D>
 where
     K: Pod + Eq + Clone + Send + Sync + 'static,
     V: Pod + Clone + Send + Sync + 'static,
-    D: StorageDevice + 'static,
+    D: SyncStorageDevice + 'static,
 {
     fn drop(&mut self) {
         // Wait for operations to complete

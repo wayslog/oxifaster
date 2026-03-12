@@ -1175,3 +1175,20 @@ fn test_f2_disk_read_after_flush() {
 
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_read_cache_created_when_configured() {
+    let config = F2Config::default(); // default has read_cache = Some(default)
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+        .unwrap();
+    assert!(f2.has_read_cache());
+}
+
+#[test]
+fn test_f2_no_read_cache_when_not_configured() {
+    let mut config = F2Config::default();
+    config.hot_store.read_cache = None;
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+        .unwrap();
+    assert!(!f2.has_read_cache());
+}
