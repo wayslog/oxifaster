@@ -1192,3 +1192,102 @@ fn test_f2_no_read_cache_when_not_configured() {
         .unwrap();
     assert!(!f2.has_read_cache());
 }
+
+#[test]
+fn test_f2_heavy_enter_advances_checkpoint_phase() {
+    use crate::f2::state::{F2CheckpointPhase, StoreCheckpointStatus};
+
+    let mut config = F2Config::default();
+    config.hot_store.read_cache = None;
+    let mut f2 =
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+            .unwrap();
+
+    // Start a session so num_active_sessions >= 1
+    let _session = f2.start_session().unwrap();
+
+    // Start checkpoint -- initializes with 1 pending thread
+    let _token = f2.checkpoint(false).unwrap();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::HotStoreCheckpoint
+    );
+
+    // heavy_enter as the only thread should advance to ColdStoreCheckpoint
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::ColdStoreCheckpoint
+    );
+    assert_eq!(
+        f2.checkpoint.cold_store_status.load(Ordering::Acquire),
+        StoreCheckpointStatus::Requested
+    );
+
+    // heavy_enter again should advance to Rest (last pending callback)
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::Rest
+    );
+
+    f2.stop_session();
+}
+
+#[test]
+fn test_f2_heavy_enter_multi_thread_countdown() {
+    use crate::f2::state::F2CheckpointPhase;
+
+    let mut config = F2Config::default();
+    config.hot_store.read_cache = None;
+    let mut f2 =
+        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+            .unwrap();
+
+    // Simulate 3 active sessions
+    let _s1 = f2.start_session().unwrap();
+    let _s2 = f2.start_session().unwrap();
+    let _s3 = f2.start_session().unwrap();
+
+    let _token = f2.checkpoint(false).unwrap();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::HotStoreCheckpoint
+    );
+
+    // First two threads: phase should NOT advance
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::HotStoreCheckpoint
+    );
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::HotStoreCheckpoint
+    );
+
+    // Third thread: phase advances to ColdStoreCheckpoint
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::ColdStoreCheckpoint
+    );
+
+    // Drain cold store pending: 3 threads again
+    f2.heavy_enter();
+    f2.heavy_enter();
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::ColdStoreCheckpoint
+    );
+    f2.heavy_enter(); // last
+    assert_eq!(
+        f2.checkpoint.phase.load(Ordering::Acquire),
+        F2CheckpointPhase::Rest
+    );
+
+    f2.stop_session();
+    f2.stop_session();
+    f2.stop_session();
+}

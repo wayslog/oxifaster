@@ -533,16 +533,41 @@ where
         self.compaction_scheduled.load(Ordering::Acquire)
     }
 
-    /// Handle heavy enter for checkpoint phases
+    /// Handle heavy enter for checkpoint phases.
+    ///
+    /// Called by each thread during `refresh()` to acknowledge the current
+    /// checkpoint phase. The last thread to acknowledge advances the phase
+    /// to the next stage.
     fn heavy_enter(&self) {
         let phase = self.checkpoint.phase.load(Ordering::Acquire);
 
-        if phase == F2CheckpointPhase::ColdStoreCheckpoint {
-            let status = self.checkpoint.cold_store_status.load(Ordering::Acquire);
-            if !status.is_done() {
-                // All done - can move to REST
-                // Note: Full implementation would issue callbacks here
+        match phase {
+            F2CheckpointPhase::HotStoreCheckpoint => {
+                // Thread acknowledges hot store checkpoint.
+                // fetch_sub returns the *previous* value, so "previous == 1" means
+                // this thread decremented it to 0 (i.e., it's the last thread).
+                let prev = self.checkpoint.decrement_pending_hot_store();
+                if prev == 1 {
+                    // Last thread: advance to ColdStoreCheckpoint
+                    self.checkpoint
+                        .cold_store_status
+                        .store(StoreCheckpointStatus::Requested, Ordering::Release);
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::ColdStoreCheckpoint, Ordering::Release);
+                }
             }
+            F2CheckpointPhase::ColdStoreCheckpoint => {
+                // Thread acknowledges cold store checkpoint completion.
+                let prev = self.checkpoint.decrement_pending_callback();
+                if prev == 1 {
+                    // Last thread: advance to Rest
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                }
+            }
+            _ => {}
         }
     }
 
