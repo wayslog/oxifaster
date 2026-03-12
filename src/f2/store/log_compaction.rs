@@ -19,7 +19,7 @@ impl<K, V, D> F2Kv<K, V, D>
 where
     K: Pod + Eq + Clone + Send + Sync + 'static,
     V: Pod + Clone + Send + Sync + 'static,
-    D: crate::device::StorageDevice + 'static,
+    D: crate::device::SyncStorageDevice + 'static,
 {
     /// Compact the hot log
     ///

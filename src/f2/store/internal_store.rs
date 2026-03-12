@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::address::Address;
 use crate::allocator::{HybridLogConfig, PersistentMemoryMalloc};
-use crate::device::StorageDevice;
+use crate::device::SyncStorageDevice;
 use crate::epoch::LightEpoch;
 
 use super::store_index::StoreIndex;
@@ -13,7 +13,7 @@ use super::types::StoreType;
 /// Internal store wrapper for hot or cold store
 pub(super) struct InternalStore<D>
 where
-    D: StorageDevice,
+    D: SyncStorageDevice,
 {
     /// Epoch protection
     pub(super) epoch: Arc<LightEpoch>,
@@ -31,10 +31,10 @@ where
 
 // SAFETY: InternalStore uses UnsafeCell for hlog but access is protected by epoch
 // All mutable access goes through hlog_mut() which requires caller to ensure safety
-unsafe impl<D: StorageDevice + Send> Send for InternalStore<D> {}
-unsafe impl<D: StorageDevice + Send + Sync> Sync for InternalStore<D> {}
+unsafe impl<D: SyncStorageDevice + Send> Send for InternalStore<D> {}
+unsafe impl<D: SyncStorageDevice + Send + Sync> Sync for InternalStore<D> {}
 
-impl<D: StorageDevice> InternalStore<D> {
+impl<D: SyncStorageDevice> InternalStore<D> {
     /// Create a new internal store
     pub(super) fn new(
         table_size: u64,
