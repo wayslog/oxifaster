@@ -1291,3 +1291,90 @@ fn test_f2_heavy_enter_multi_thread_countdown() {
     f2.stop_session();
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_cold_compaction_removes_tombstones() {
+    let mut config = F2Config::default();
+    config.hot_store.read_cache = None;
+    // Disable auto-compaction to control it manually
+    config.compaction.hot_store_enabled = false;
+    config.compaction.cold_store_enabled = false;
+
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+        .unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    // 1. Write records to hot store
+    for i in 0..50u64 {
+        f2.upsert(TestKey(i), TestValue(i * 10)).unwrap();
+    }
+
+    // 2. Delete some records (creates tombstones in hot store)
+    for i in 0..10u64 {
+        f2.delete(&TestKey(i)).unwrap();
+    }
+
+    // 3. Compact hot to cold (migrate all records including tombstones)
+    let hot_tail = f2.hot_store.tail_address();
+    let result = f2.compact_hot_log(hot_tail);
+    assert!(result.is_ok(), "hot compaction should succeed");
+
+    // 4. Verify cold store has records
+    let cold_tail = f2.cold_store.tail_address();
+    let cold_begin = f2.cold_store.begin_address();
+    assert!(
+        cold_tail > cold_begin,
+        "cold store should have records after hot migration"
+    );
+
+    // 5. Verify deleted keys return None (tombstones in cold)
+    for i in 0..10u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert!(result.is_none(), "deleted key {} should return None", i);
+    }
+
+    // 6. Verify live keys are readable from cold
+    for i in 10..50u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 10)),
+            "key {} should have correct value from cold store",
+            i
+        );
+    }
+
+    // 7. Compact the cold store -- should remove tombstones and copy live records
+    let cold_until = f2.cold_store.tail_address();
+    let result = f2.compact_cold_log(cold_until);
+    assert!(result.is_ok(), "cold compaction should succeed");
+    let stats = result.unwrap().stats;
+    assert!(
+        stats.records_scanned > 0,
+        "cold compaction should have scanned records"
+    );
+
+    // 8. After cold compaction, live keys should still be readable
+    for i in 10..50u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 10)),
+            "key {} should survive cold compaction",
+            i
+        );
+    }
+
+    // 9. Deleted keys should still return None
+    for i in 0..10u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert!(
+            result.is_none(),
+            "deleted key {} should still return None after cold compaction",
+            i
+        );
+    }
+
+    f2.stop_session();
+}

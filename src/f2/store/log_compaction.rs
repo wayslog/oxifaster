@@ -87,6 +87,15 @@ where
                 &mut new_begin_address,
                 &mut stats,
             )?;
+        } else if store_type == StoreType::Cold && shift_begin_address {
+            self.compact_cold_log_with_scan(
+                store,
+                compactor,
+                begin_addr,
+                until_address,
+                &mut new_begin_address,
+                &mut stats,
+            )?;
         } else if shift_begin_address {
             if let Err(_e) = store.hlog().flush_until(until_address) {
                 compactor.complete();
@@ -239,6 +248,171 @@ where
         }
 
         Ok(())
+    }
+
+    /// Record-level cold store compaction.
+    ///
+    /// Scans cold log records in [begin_addr, until_address). Live records whose
+    /// index entry still points at the scanned address are copied to the cold log
+    /// tail (with the index updated). Tombstones and dead entries are dropped.
+    fn compact_cold_log_with_scan(
+        &self,
+        store: &InternalStore<D>,
+        compactor: &crate::compaction::Compactor,
+        begin_addr: Address,
+        until_address: Address,
+        new_begin_address: &mut Address,
+        stats: &mut CompactionStats,
+    ) -> Result<(), Status> {
+        debug_assert!(!std::mem::needs_drop::<K>());
+        debug_assert!(!std::mem::needs_drop::<V>());
+
+        // Flush so the scanned range is persisted and readable.
+        if let Err(_e) = store.hlog().flush_until(until_address) {
+            compactor.complete();
+            return Err(Status::Corruption);
+        }
+
+        let record_size = Record::<K, V>::size() as u64;
+        let mut current_address = begin_addr;
+
+        while current_address < until_address {
+            let record_ptr = unsafe { store.hlog().get(current_address) };
+
+            if let Some(ptr) = record_ptr {
+                // SAFETY: Protected by epoch; `current_address` points to a record.
+                let record: &Record<K, V> = unsafe { &*(ptr.as_ptr() as *const _) };
+                let record_key = unsafe { Record::<K, V>::read_key(ptr.as_ptr()) };
+                let hash = KeyHash::new(hash64(bytemuck::bytes_of(&record_key)));
+                let is_tombstone = record.header.is_tombstone();
+
+                stats.records_scanned += 1;
+                stats.bytes_scanned += record_size;
+
+                if is_tombstone {
+                    stats.tombstones_found += 1;
+                }
+
+                let index_result = store.hash_index.find_entry(hash);
+                if index_result.found() {
+                    let index_address = index_result.entry.address().readcache_address();
+                    if compactor.should_compact_record(current_address, index_address, is_tombstone)
+                    {
+                        if is_tombstone {
+                            // Tombstones in cold store: can be dropped entirely.
+                            // Clear the index entry so the key is fully removed.
+                            if let Some(atomic_entry) = index_result.atomic_entry {
+                                let _ = store.hash_index.try_update_entry(
+                                    Some(atomic_entry),
+                                    index_result.entry,
+                                    Address::INVALID,
+                                    hash,
+                                    false,
+                                );
+                            }
+                            stats.records_compacted += 1;
+                            stats.bytes_compacted += record_size;
+                        } else {
+                            // Live record: copy to cold log tail with updated index.
+                            let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
+                            if self
+                                .copy_record_in_cold_store(
+                                    store,
+                                    &index_result,
+                                    record_key,
+                                    value,
+                                    hash,
+                                    current_address,
+                                )
+                                .is_ok()
+                            {
+                                stats.records_compacted += 1;
+                                stats.bytes_compacted += record_size;
+                            } else {
+                                stats.records_skipped += 1;
+                                if *new_begin_address == until_address {
+                                    *new_begin_address = current_address;
+                                }
+                            }
+                        }
+                    } else {
+                        // Not the latest record for this key -- reclaimable.
+                        stats.records_skipped += 1;
+                    }
+                } else {
+                    // Not in index: reclaimable.
+                    stats.records_skipped += 1;
+                }
+
+                current_address = Address::from_control(current_address.control() + record_size);
+            } else {
+                // Unwritten space within the page; jump to next page boundary.
+                let page_size = store.hlog().page_size() as u64;
+                let next_page = (current_address.control() / page_size + 1) * page_size;
+                current_address = Address::from_control(next_page);
+            }
+        }
+
+        unsafe { store.hlog_mut().shift_begin_address(*new_begin_address) };
+        store.hash_index.garbage_collect(*new_begin_address);
+
+        stats.bytes_reclaimed = new_begin_address
+            .control()
+            .saturating_sub(begin_addr.control());
+
+        Ok(())
+    }
+
+    /// Copy a live record within the cold store (to the log tail).
+    fn copy_record_in_cold_store(
+        &self,
+        store: &InternalStore<D>,
+        index_result: &crate::index::FindResult,
+        record_key: K,
+        value: V,
+        hash: KeyHash,
+        old_address: Address,
+    ) -> Result<(), Status> {
+        debug_assert!(!std::mem::needs_drop::<K>());
+        debug_assert!(!std::mem::needs_drop::<V>());
+
+        let record_size = Record::<K, V>::size();
+        let new_address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
+        let record_ptr =
+            unsafe { store.hlog_mut().get_mut(new_address) }.ok_or(Status::OutOfMemory)?;
+
+        unsafe {
+            let new_record = record_ptr.as_ptr() as *mut Record<K, V>;
+            let header = RecordInfo::new(
+                old_address,
+                self.checkpoint.version() as u16,
+                false,
+                false,
+                false,
+            );
+            ptr::write(&mut (*new_record).header, header);
+
+            Record::<K, V>::write_key(record_ptr.as_ptr(), record_key);
+            Record::<K, V>::write_value(record_ptr.as_ptr(), value);
+        }
+
+        let Some(atomic_entry) = index_result.atomic_entry else {
+            return Err(Status::Aborted);
+        };
+
+        let update_status = store.hash_index.try_update_entry(
+            Some(atomic_entry),
+            index_result.entry,
+            new_address,
+            hash,
+            false,
+        );
+
+        if update_status == Status::Ok {
+            Ok(())
+        } else {
+            Err(Status::Aborted)
+        }
     }
 
     fn migrate_record_to_cold(
