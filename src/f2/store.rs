@@ -17,12 +17,13 @@ mod tests;
 
 use self::internal_store::InternalStore;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::cache::ReadCache;
@@ -71,6 +72,8 @@ where
     checkpoint_dir: Option<std::path::PathBuf>,
     /// Optional read cache for hot store disk reads
     read_cache: Option<ReadCache<K, V>>,
+    /// Read cache address index: maps key_hash -> read cache address
+    rc_address_map: RwLock<HashMap<u64, crate::address::Address>>,
     /// Key access statistics (used only for the access-frequency migration strategy).
     key_access: KeyAccessTracker,
     /// Phantom data for type parameters
@@ -161,6 +164,7 @@ where
             num_active_sessions: AtomicU64::new(0),
             checkpoint_dir: None,
             read_cache,
+            rc_address_map: RwLock::new(HashMap::new()),
             key_access: KeyAccessTracker::new(),
             _marker: std::marker::PhantomData,
         })

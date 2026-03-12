@@ -1378,3 +1378,70 @@ fn test_f2_cold_compaction_removes_tombstones() {
 
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_read_cache_backfill_on_cold_hit() {
+    // Default config includes read_cache = Some(ReadCacheConfig::default())
+    let mut config = F2Config::default();
+    config.compaction.hot_store_enabled = false;
+    config.compaction.cold_store_enabled = false;
+
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
+        .unwrap();
+
+    let _session = f2.start_session().unwrap();
+    assert!(f2.has_read_cache());
+
+    // 1. Write records to hot store
+    for i in 0..20u64 {
+        f2.upsert(TestKey(i), TestValue(i * 100)).unwrap();
+    }
+
+    // 2. Compact hot to cold
+    let hot_tail = f2.hot_store.tail_address();
+    f2.compact_hot_log(hot_tail).unwrap();
+
+    // 3. First read: should hit cold store and backfill read cache
+    for i in 0..20u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(result, Some(TestValue(i * 100)));
+    }
+
+    // 4. Verify rc_address_map is populated (backfill happened)
+    {
+        let map = f2.rc_address_map.read();
+        assert!(
+            !map.is_empty(),
+            "read cache address map should be populated after cold reads"
+        );
+    }
+
+    // 5. Second read: should hit read cache
+    for i in 0..20u64 {
+        let result = f2.read(&TestKey(i)).unwrap();
+        assert_eq!(
+            result,
+            Some(TestValue(i * 100)),
+            "cached read for key {} should return correct value",
+            i
+        );
+    }
+
+    // 6. Upsert should invalidate the cache entry
+    f2.upsert(TestKey(5), TestValue(999)).unwrap();
+    {
+        let hash =
+            crate::index::KeyHash::new(crate::codec::hash64(bytemuck::bytes_of(&TestKey(5))));
+        let map = f2.rc_address_map.read();
+        assert!(
+            !map.contains_key(&hash.hash()),
+            "upsert should invalidate read cache entry"
+        );
+    }
+
+    // 7. Read after upsert should return the new value
+    let result = f2.read(&TestKey(5)).unwrap();
+    assert_eq!(result, Some(TestValue(999)));
+
+    f2.stop_session();
+}

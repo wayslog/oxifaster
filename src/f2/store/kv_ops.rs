@@ -18,15 +18,33 @@ where
     V: Pod + Clone + Send + Sync + 'static,
     D: crate::device::SyncStorageDevice + 'static,
 {
-    /// Read: hot first, then cold.
+    /// Read: check read cache, then hot store, then cold store.
+    /// On cold hit, backfill into read cache for future reads.
     pub fn read(&self, key: &K) -> Result<Option<V>, Status> {
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
 
+        // 1. Check read cache (if enabled)
+        if let Some(ref rc) = self.read_cache {
+            if let Some(&cache_addr) = self.rc_address_map.read().get(&hash.hash()) {
+                if let Some((value, _info)) = rc.read(cache_addr, key) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+
+        // 2. Check hot store
         if let Some(value) = self.internal_read(&self.hot_store, true, key, hash)? {
             return Ok(Some(value));
         }
 
+        // 3. Check cold store
         if let Some(value) = self.internal_read(&self.cold_store, false, key, hash)? {
+            // 4. Backfill into read cache on cold hit
+            if let Some(ref rc) = self.read_cache {
+                if let Ok(cache_addr) = rc.try_insert(key, &value, Address::INVALID, true) {
+                    self.rc_address_map.write().insert(hash.hash(), cache_addr);
+                }
+            }
             return Ok(Some(value));
         }
 
@@ -44,12 +62,16 @@ where
 
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
         self.track_key_access(hash.hash());
+        // Invalidate stale read cache entry on write
+        self.invalidate_read_cache(hash.hash());
         self.upsert_into_store(&self.hot_store, hash, key, value)
     }
 
     /// Delete: writes a hot-store tombstone to override a cold-store value.
     pub fn delete(&self, key: &K) -> Result<(), Status> {
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(key)));
+        // Invalidate stale read cache entry on delete
+        self.invalidate_read_cache(hash.hash());
         self.tombstone_into_store(&self.hot_store, hash, *key)
     }
 
@@ -192,6 +214,13 @@ where
             HotToColdMigrationStrategy::AccessFrequency { .. }
         ) {
             self.key_access.record(key_hash);
+        }
+    }
+
+    /// Remove a key's read cache address mapping (on write/delete invalidation).
+    fn invalidate_read_cache(&self, key_hash: u64) {
+        if self.read_cache.is_some() {
+            self.rc_address_map.write().remove(&key_hash);
         }
     }
 
