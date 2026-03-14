@@ -125,7 +125,7 @@ impl ActiveCheckpoint {
             log_metadata: None,
             session_states: Vec::new(),
             snapshot_written: false,
-            driver_heartbeat: AtomicU64::new(0),
+            driver_heartbeat: AtomicU64::new(1), // Start at 1, not 0
             aborted: AtomicBool::new(false),
         }
     }
@@ -312,11 +312,12 @@ mod tests {
     #[test]
     fn test_driver_heartbeat_increments() {
         let active = make_active(0b11, 0);
-        assert_eq!(active.heartbeat_value(), 0);
-        active.update_heartbeat();
+        // Initial value is now 1 (not 0) to prevent false takeover detection
         assert_eq!(active.heartbeat_value(), 1);
         active.update_heartbeat();
         assert_eq!(active.heartbeat_value(), 2);
+        active.update_heartbeat();
+        assert_eq!(active.heartbeat_value(), 3);
     }
 
     #[test]
@@ -324,18 +325,19 @@ mod tests {
         let active = make_active(0b111, 0);
         assert_eq!(active.current_driver_thread_id(), 0);
 
-        // Heartbeat is 0 and we pass 0 -> stale, takeover succeeds
-        assert!(active.try_takeover(1, 0));
+        // Initial heartbeat is 1 and we pass 1 as last observed -> stale, takeover succeeds
+        assert!(active.try_takeover(1, 1));
         assert_eq!(active.current_driver_thread_id(), 1);
     }
 
     #[test]
     fn test_driver_takeover_fresh_heartbeat_fails() {
         let active = make_active(0b111, 0);
-        active.update_heartbeat(); // heartbeat is now 1
+        // Initial heartbeat is 1, update to 2
+        active.update_heartbeat();
 
-        // Caller observed 0, but heartbeat is 1 -> fresh, takeover fails
-        assert!(!active.try_takeover(1, 0));
+        // Caller observed 1, but heartbeat is now 2 -> driver is active, takeover fails
+        assert!(!active.try_takeover(1, 1));
         assert_eq!(active.current_driver_thread_id(), 0);
     }
 
