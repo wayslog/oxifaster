@@ -97,7 +97,8 @@ where
                 &mut stats,
             )?;
         } else if shift_begin_address {
-            if let Err(_e) = store.hlog().flush_until(until_address) {
+            if let Err(e) = store.hlog().flush_until(until_address) {
+                tracing::warn!("flush failed during compaction: {e:?}");
                 compactor.complete();
                 return Err(Status::Corruption);
             }
@@ -128,7 +129,8 @@ where
 
         // Advancing begin_address makes old pages eligible for reuse. Flush first so that the
         // reclaimed range is durably persisted; flushing also updates safe_read_only_address.
-        if let Err(_e) = store.hlog().flush_until(until_address) {
+        if let Err(e) = store.hlog().flush_until(until_address) {
+            tracing::warn!("flush failed during compaction: {e:?}");
             compactor.complete();
             return Err(Status::Corruption);
         }
@@ -266,7 +268,8 @@ where
         debug_assert!(!std::mem::needs_drop::<V>());
 
         // Flush so the scanned range is persisted and readable.
-        if let Err(_e) = store.hlog().flush_until(until_address) {
+        if let Err(e) = store.hlog().flush_until(until_address) {
+            tracing::warn!("flush failed during compaction: {e:?}");
             compactor.complete();
             return Err(Status::Corruption);
         }

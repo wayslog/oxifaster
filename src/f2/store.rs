@@ -462,8 +462,14 @@ where
             let hot_dir = cp_dir.join("hot");
             let cold_dir = cp_dir.join("cold");
 
-            std::fs::create_dir_all(&hot_dir).map_err(|_| Status::Corruption)?;
-            std::fs::create_dir_all(&cold_dir).map_err(|_| Status::Corruption)?;
+            std::fs::create_dir_all(&hot_dir).map_err(|e| {
+                tracing::warn!("save_checkpoint failed: {e:?}");
+                Status::Corruption
+            })?;
+            std::fs::create_dir_all(&cold_dir).map_err(|e| {
+                tracing::warn!("save_checkpoint failed: {e:?}");
+                Status::Corruption
+            })?;
 
             // Get the checkpoint version
             let checkpoint_version = self.checkpoint.version();
@@ -473,28 +479,40 @@ where
                 .hot_store
                 .hash_index
                 .checkpoint(&hot_dir, token)
-                .map_err(|_| Status::Corruption)?;
+                .map_err(|e| {
+                    tracing::warn!("save_checkpoint failed: {e:?}");
+                    Status::Corruption
+                })?;
 
             // Checkpoint hot store hybrid log (writes both metadata and snapshot)
             let _hot_log_meta = self
                 .hot_store
                 .hlog()
                 .checkpoint(&hot_dir, token, checkpoint_version)
-                .map_err(|_| Status::Corruption)?;
+                .map_err(|e| {
+                    tracing::warn!("save_checkpoint failed: {e:?}");
+                    Status::Corruption
+                })?;
 
             // Checkpoint cold store index
             let _cold_index_meta = self
                 .cold_store
                 .hash_index
                 .checkpoint(&cold_dir, token)
-                .map_err(|_| Status::Corruption)?;
+                .map_err(|e| {
+                    tracing::warn!("save_checkpoint failed: {e:?}");
+                    Status::Corruption
+                })?;
 
             // Checkpoint cold store hybrid log (writes both metadata and snapshot)
             let _cold_log_meta = self
                 .cold_store
                 .hlog()
                 .checkpoint(&cold_dir, token, checkpoint_version)
-                .map_err(|_| Status::Corruption)?;
+                .map_err(|e| {
+                    tracing::warn!("save_checkpoint failed: {e:?}");
+                    Status::Corruption
+                })?;
 
             Ok(())
         })();
@@ -641,7 +659,7 @@ where
                 .hot_store_status
                 .store(StoreCheckpointStatus::Active, Ordering::Release);
 
-            let success = self.checkpoint_store(&self.hot_store, "hot");
+            let success = self.checkpoint_store(&self.hot_store, "hot").is_ok();
 
             if success {
                 self.checkpoint
@@ -671,7 +689,7 @@ where
                 .cold_store_status
                 .store(StoreCheckpointStatus::Active, Ordering::Release);
 
-            let success = self.checkpoint_store(&self.cold_store, "cold");
+            let success = self.checkpoint_store(&self.cold_store, "cold").is_ok();
 
             if success {
                 self.checkpoint
@@ -704,24 +722,30 @@ where
 
     /// Checkpoint a single store (hot or cold).
     ///
-    /// Returns true if checkpoint succeeded, false otherwise.
-    fn checkpoint_store(&self, store: &InternalStore<D>, subdir: &str) -> bool {
-        let Some(cp_dir) = self.checkpoint_dir.as_ref() else {
-            return false;
-        };
+    /// Returns `Ok(())` if checkpoint succeeded, `Err(Status)` otherwise.
+    fn checkpoint_store(&self, store: &InternalStore<D>, subdir: &str) -> Result<(), Status> {
+        let cp_dir = self.checkpoint_dir.as_ref().ok_or(Status::InvalidArgument)?;
 
         let token = self.checkpoint.token();
         let version = self.checkpoint.version();
         let store_dir = cp_dir.join(token.to_string()).join(subdir);
 
-        if std::fs::create_dir_all(&store_dir).is_err() {
-            return false;
-        }
+        std::fs::create_dir_all(&store_dir).map_err(|e| {
+            tracing::warn!("checkpoint dir creation failed: {e:?}");
+            Status::Corruption
+        })?;
 
-        let index_ok = store.hash_index.checkpoint(&store_dir, token).is_ok();
-        let log_ok = store.hlog().checkpoint(&store_dir, token, version).is_ok();
+        store.hash_index.checkpoint(&store_dir, token).map_err(|e| {
+            tracing::warn!("index checkpoint failed: {e:?}");
+            Status::Corruption
+        })?;
 
-        index_ok && log_ok
+        store.hlog().checkpoint(&store_dir, token, version).map_err(|e| {
+            tracing::warn!("log checkpoint failed: {e:?}");
+            Status::Corruption
+        })?;
+
+        Ok(())
     }
 
     /// Stop the background worker thread

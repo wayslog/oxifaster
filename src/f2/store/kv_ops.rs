@@ -162,7 +162,10 @@ where
                     let n = store
                         .device
                         .read_sync(address.control(), &mut buf)
-                        .map_err(|_| Status::IoError)?;
+                        .map_err(|e| {
+                            tracing::debug!("disk read failed at address {:?}: {e:?}", address);
+                            Status::IoError
+                        })?;
                     if n < record_size {
                         return Err(Status::IoError); // 短读 -- 记录不完整或已损坏
                     }
