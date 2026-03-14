@@ -342,6 +342,16 @@ where
             return Err(Status::Aborted);
         }
 
+        let result = self.recover_inner(checkpoint_dir, token);
+
+        self.checkpoint
+            .phase
+            .store(F2CheckpointPhase::Rest, Ordering::Release);
+
+        result
+    }
+
+    fn recover_inner(&mut self, checkpoint_dir: &Path, token: Uuid) -> Result<u32, Status> {
         // Create checkpoint directory paths
         let cp_dir = checkpoint_dir.join(token.to_string());
         let hot_dir = cp_dir.join("hot");
@@ -349,9 +359,6 @@ where
 
         // Verify that the checkpoint directory exists
         if !cp_dir.exists() {
-            self.checkpoint
-                .phase
-                .store(F2CheckpointPhase::Rest, Ordering::Release);
             return Err(Status::NotFound);
         }
 
@@ -361,9 +368,6 @@ where
 
         if !hot_exists && !cold_exists {
             // Neither store checkpoint exists - this is not a valid checkpoint
-            self.checkpoint
-                .phase
-                .store(F2CheckpointPhase::Rest, Ordering::Release);
             return Err(Status::NotFound);
         }
 
@@ -373,18 +377,12 @@ where
         if hot_exists {
             // Recover hot store hash index
             if let Err(_e) = self.hot_store.hash_index.recover(&hot_dir, None) {
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::Rest, Ordering::Release);
                 return Err(Status::Corruption);
             }
 
             // Recover hot store hybrid log
             unsafe {
                 if let Err(_e) = self.hot_store.hlog_mut().recover(&hot_dir, None) {
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
                     return Err(Status::Corruption);
                 }
             }
@@ -394,9 +392,6 @@ where
                 Ok(log_meta) => version = log_meta.version,
                 Err(_e) => {
                     tracing::warn!("hot store log.meta read failed during recovery");
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
                     return Err(Status::Corruption);
                 }
             }
@@ -406,18 +401,12 @@ where
         if cold_exists {
             // Recover cold store hash index
             if let Err(_e) = self.cold_store.hash_index.recover(&cold_dir, None) {
-                self.checkpoint
-                    .phase
-                    .store(F2CheckpointPhase::Rest, Ordering::Release);
                 return Err(Status::Corruption);
             }
 
             // Recover cold store hybrid log
             unsafe {
                 if let Err(_e) = self.cold_store.hlog_mut().recover(&cold_dir, None) {
-                    self.checkpoint
-                        .phase
-                        .store(F2CheckpointPhase::Rest, Ordering::Release);
                     return Err(Status::Corruption);
                 }
             }
@@ -429,9 +418,6 @@ where
                     Ok(log_meta) => version = log_meta.version,
                     Err(_e) => {
                         tracing::warn!("cold store log.meta read failed during recovery");
-                        self.checkpoint
-                            .phase
-                            .store(F2CheckpointPhase::Rest, Ordering::Release);
                         return Err(Status::Corruption);
                     }
                 }
@@ -441,11 +427,6 @@ where
         // Update checkpoint state with recovered version so subsequent checkpoints
         // continue from the correct version number
         self.checkpoint.set_version(version);
-
-        // Move back to REST phase
-        self.checkpoint
-            .phase
-            .store(F2CheckpointPhase::Rest, Ordering::Release);
 
         Ok(version)
     }
