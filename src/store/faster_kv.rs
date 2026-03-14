@@ -173,7 +173,16 @@ where
     /// Last snapshot checkpoint state for incremental checkpoints
     /// Used to track the base snapshot for incremental checkpoints
     last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
-    /// Mutual exclusion between checkpoint (write) and compaction (read).
+    /// Mutual exclusion between checkpoint (write lock) and compaction (read lock).
+    ///
+    /// # Design Notes
+    /// - Checkpoint acquires write lock; compaction acquires read lock
+    /// - Write lock is held for the entire checkpoint duration (including WaitPending timeout)
+    /// - This is intentional: checkpoint requires a consistent view of the log
+    /// - Compaction can wait up to `wait_pending_timeout_secs` in worst case
+    /// - Multiple compactions can run concurrently (all hold read locks)
+    /// - Future optimization: split into checkpoint_init_lock + checkpoint_data_lock
+    ///   to allow compaction during WaitFlush phase
     checkpoint_compaction_lock: RwLock<()>,
     /// WaitPending phase timeout in seconds
     wait_pending_timeout_secs: u64,
