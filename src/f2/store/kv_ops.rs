@@ -236,22 +236,19 @@ where
         }
     }
 
-    pub(super) fn upsert_into_store(
+    fn write_record_into_store(
         &self,
         store: &InternalStore<D>,
         hash: KeyHash,
         key: K,
-        value: V,
+        value: Option<V>,
     ) -> Result<(), Status> {
         debug_assert!(!std::mem::needs_drop::<K>());
         debug_assert!(!std::mem::needs_drop::<V>());
 
-        // To avoid dropping writes under high contention due to CAS failures, retry a bounded number of times.
         const MAX_RETRIES: usize = 32;
+        let is_tombstone = value.is_none();
 
-        // Avoid allocating log space repeatedly across CAS retries:
-        // allocate and initialize the record (key/value) once, then only update
-        // `header.previous_address` and retry updating the index.
         let record_size = Record::<K, V>::size();
         let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
 
@@ -263,7 +260,9 @@ where
         let record = ptr.as_ptr() as *mut Record<K, V>;
         unsafe {
             Record::<K, V>::write_key(ptr.as_ptr(), key);
-            Record::<K, V>::write_value(ptr.as_ptr(), value);
+            if let Some(v) = value {
+                Record::<K, V>::write_value(ptr.as_ptr(), v);
+            }
         }
 
         for _ in 0..MAX_RETRIES {
@@ -275,7 +274,7 @@ where
                     old_address,
                     self.checkpoint.version() as u16,
                     false,
-                    false,
+                    is_tombstone,
                     false,
                 );
                 ptr::write(&mut (*record).header, header);
@@ -288,7 +287,6 @@ where
                 hash,
                 false,
             );
-
             if status == Status::Ok {
                 return Ok(());
             }
@@ -297,59 +295,23 @@ where
         Err(Status::Aborted)
     }
 
+    pub(super) fn upsert_into_store(
+        &self,
+        store: &InternalStore<D>,
+        hash: KeyHash,
+        key: K,
+        value: V,
+    ) -> Result<(), Status> {
+        self.write_record_into_store(store, hash, key, Some(value))
+    }
+
     pub(super) fn tombstone_into_store(
         &self,
         store: &InternalStore<D>,
         hash: KeyHash,
         key: K,
     ) -> Result<(), Status> {
-        debug_assert!(!std::mem::needs_drop::<K>());
-        debug_assert!(!std::mem::needs_drop::<V>());
-
-        const MAX_RETRIES: usize = 32;
-
-        // Same rationale as upsert: avoid creating holes in the log due to CAS retries.
-        let record_size = Record::<K, V>::size();
-        let address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
-
-        let record_ptr = unsafe { store.hlog_mut().get_mut(address) };
-        let Some(ptr) = record_ptr else {
-            return Err(Status::OutOfMemory);
-        };
-
-        let record = ptr.as_ptr() as *mut Record<K, V>;
-        unsafe {
-            Record::<K, V>::write_key(ptr.as_ptr(), key);
-        }
-
-        for _ in 0..MAX_RETRIES {
-            let result = store.hash_index.find_or_create_entry(hash);
-            let old_address = result.entry.address().readcache_address();
-
-            unsafe {
-                let header = RecordInfo::new(
-                    old_address,
-                    self.checkpoint.version() as u16,
-                    false,
-                    true,
-                    false,
-                );
-                ptr::write(&mut (*record).header, header);
-            }
-
-            let status = store.hash_index.try_update_entry(
-                result.atomic_entry,
-                result.entry,
-                address,
-                hash,
-                false,
-            );
-            if status == Status::Ok {
-                return Ok(());
-            }
-        }
-
-        Err(Status::Aborted)
+        self.write_record_into_store(store, hash, key, None)
     }
 
     /// Return the current hash-index address for `key` in the hot store.
