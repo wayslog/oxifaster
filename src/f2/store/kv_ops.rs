@@ -46,8 +46,13 @@ where
             // A subsequent write to the same key will re-invalidate the entry.
             // 4. Backfill into read cache on cold hit
             if let Some(ref rc) = self.read_cache {
-                if let Ok(cache_addr) = rc.try_insert(key, &value, Address::INVALID, true) {
-                    self.rc_address_map.write().insert(hash.hash(), cache_addr);
+                match rc.try_insert(key, &value, Address::INVALID, true) {
+                    Ok(cache_addr) => {
+                        self.rc_address_map.write().insert(hash.hash(), cache_addr);
+                    }
+                    Err(_) => {
+                        tracing::debug!("read cache backfill failed for key_hash={}", hash.hash());
+                    }
                 }
             }
             return Ok(Some(value));
