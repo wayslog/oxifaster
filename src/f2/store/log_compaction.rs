@@ -301,17 +301,27 @@ where
                         if is_tombstone {
                             // Tombstones in cold store: can be dropped entirely.
                             // Clear the index entry so the key is fully removed.
-                            if let Some(atomic_entry) = index_result.atomic_entry {
-                                let _ = store.hash_index.try_update_entry(
+                            let cas_ok = if let Some(atomic_entry) = index_result.atomic_entry {
+                                store.hash_index.try_update_entry(
                                     Some(atomic_entry),
                                     index_result.entry,
                                     Address::INVALID,
                                     hash,
                                     false,
-                                );
+                                ) == Status::Ok
+                            } else {
+                                false
+                            };
+
+                            if cas_ok {
+                                stats.records_compacted += 1;
+                                stats.bytes_compacted += record_size;
+                            } else {
+                                stats.records_skipped += 1;
+                                if *new_begin_address == until_address {
+                                    *new_begin_address = current_address;
+                                }
                             }
-                            stats.records_compacted += 1;
-                            stats.bytes_compacted += record_size;
                         } else {
                             // Live record: copy to cold log tail with updated index.
                             let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
