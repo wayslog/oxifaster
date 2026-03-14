@@ -1522,6 +1522,66 @@ fn test_f2_rmw_retry_exhaustion_returns_error() {
 }
 
 #[test]
+fn test_f2_concurrent_compaction_with_reads_and_writes() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let f2 = Arc::new(make_f2());
+
+    let num_writers = 4usize;
+    let ops_per_writer = 200usize;
+
+    // Pre-populate some data
+    {
+        let _s = f2.start_session().unwrap();
+        for i in 0..100u64 {
+            f2.upsert(TestKey(i), TestValue(i)).unwrap();
+        }
+        f2.stop_session();
+    }
+
+    let f2_clone = Arc::clone(&f2);
+    let writer_handles: Vec<_> = (0..num_writers)
+        .map(|tid| {
+            let f2 = Arc::clone(&f2_clone);
+            thread::spawn(move || {
+                let _s = f2.start_session().unwrap();
+                for i in 0..ops_per_writer {
+                    let key = TestKey((tid * ops_per_writer + i) as u64);
+                    f2.upsert(key, TestValue(i as u64)).unwrap();
+                    let _ = f2.read(&TestKey((i % 100) as u64));
+                }
+                f2.stop_session();
+            })
+        })
+        .collect();
+
+    // Run compaction concurrently
+    {
+        let _s = f2.start_session().unwrap();
+        if let Some(until) = f2.should_compact_hot_log() {
+            let _ = f2.compact_hot_log(until);
+        }
+        f2.stop_session();
+    }
+
+    for h in writer_handles {
+        h.join().unwrap();
+    }
+
+    // Verify data integrity
+    {
+        let _s = f2.start_session().unwrap();
+        for tid in 0..num_writers {
+            let key = TestKey((tid * ops_per_writer + ops_per_writer - 1) as u64);
+            let v = f2.read(&key).unwrap();
+            assert!(v.is_some(), "Key {key:?} should be readable after concurrent compaction");
+        }
+        f2.stop_session();
+    }
+}
+
+#[test]
 fn test_f2_rmw_invalidates_read_cache() {
     use crate::cache::ReadCacheConfig;
 
