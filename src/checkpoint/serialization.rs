@@ -52,6 +52,18 @@ fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result
 fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
     let data = fs::read(path)?;
 
+    // Check for truncated V1 checksum header
+    if data.len() >= 4 && data.len() < 8 && &data[0..4] == CHECKSUM_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Truncated checksum header in {}: expected at least 8 bytes, got {}",
+                path.display(),
+                data.len()
+            ),
+        ));
+    }
+
     if data.len() >= 8 && &data[0..4] == CHECKSUM_MAGIC {
         let expected_crc = u32::from_le_bytes(
             data[4..8]
@@ -879,5 +891,23 @@ mod tests {
         assert_eq!(restored.prev_snapshot_token, Some(prev_token));
         assert!(restored.is_incremental_checkpoint());
         assert_eq!(restored.base_snapshot_token(), Some(prev_token));
+    }
+
+    #[test]
+    fn test_truncated_checksum_v1_header_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("truncated.meta");
+
+        // Write a file that starts with OXCK but is only 6 bytes (< 8 required)
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(b"OXCK");
+        truncated.extend_from_slice(&[0u8, 0u8]); // Only 2 more bytes, not 4 for CRC
+        std::fs::write(&file_path, &truncated).unwrap();
+
+        let result = IndexMetadata::read_from_file(&file_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Truncated"));
     }
 }
