@@ -390,10 +390,15 @@ where
             }
 
             // Get version from hot store log metadata
-            if let Ok(log_meta) =
-                crate::checkpoint::LogMetadata::read_from_file(&hot_dir.join("log.meta"))
-            {
-                version = log_meta.version;
+            match crate::checkpoint::LogMetadata::read_from_file(&hot_dir.join("log.meta")) {
+                Ok(log_meta) => version = log_meta.version,
+                Err(_e) => {
+                    tracing::warn!("hot store log.meta read failed during recovery");
+                    self.checkpoint
+                        .phase
+                        .store(F2CheckpointPhase::Rest, Ordering::Release);
+                    return Err(Status::Corruption);
+                }
             }
         }
 
@@ -420,10 +425,15 @@ where
             // Get version from cold store log metadata if not already set from hot store
             // This handles the case where only cold store checkpoint exists
             if version == 0 {
-                if let Ok(log_meta) =
-                    crate::checkpoint::LogMetadata::read_from_file(&cold_dir.join("log.meta"))
-                {
-                    version = log_meta.version;
+                match crate::checkpoint::LogMetadata::read_from_file(&cold_dir.join("log.meta")) {
+                    Ok(log_meta) => version = log_meta.version,
+                    Err(_e) => {
+                        tracing::warn!("cold store log.meta read failed during recovery");
+                        self.checkpoint
+                            .phase
+                            .store(F2CheckpointPhase::Rest, Ordering::Release);
+                        return Err(Status::Corruption);
+                    }
                 }
             }
         }
