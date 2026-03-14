@@ -118,6 +118,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         bytes_compacted: 20000,
         bytes_reclaimed: 30000,
         duration_ms: 50,
+        bytes_leaked: 0,
     };
     println!("  扫描记录数: {}", stats.records_scanned);
     println!("  压缩记录数: {}", stats.records_compacted);

@@ -164,6 +164,9 @@ pub struct CompactionStats {
     pub bytes_reclaimed: u64,
     /// Duration in milliseconds
     pub duration_ms: u64,
+    /// Bytes allocated but orphaned due to CAS failures.
+    /// This is inherent to the FASTER log-structured architecture.
+    pub bytes_leaked: u64,
 }
 
 impl CompactionStats {
@@ -353,6 +356,7 @@ mod tests {
             bytes_compacted: 6000,
             bytes_reclaimed: 4000,
             duration_ms: 100,
+            bytes_leaked: 0,
         };
 
         assert_eq!(stats.live_ratio(), 0.6);

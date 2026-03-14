@@ -191,6 +191,7 @@ where
                                 stats.bytes_compacted += record_size_u64;
                             } else {
                                 stats.records_skipped += 1;
+                                stats.bytes_leaked += record_size_u64;
                                 if *new_begin_address == until_address {
                                     *new_begin_address = current_address;
                                 }
@@ -212,6 +213,7 @@ where
                                 stats.bytes_compacted += Record::<K, V>::size() as u64;
                             } else {
                                 stats.records_skipped += 1;
+                                stats.bytes_leaked += Record::<K, V>::size() as u64;
                                 if *new_begin_address == until_address {
                                     *new_begin_address = current_address;
                                 }
@@ -340,6 +342,7 @@ where
                                 stats.bytes_compacted += record_size;
                             } else {
                                 stats.records_skipped += 1;
+                                stats.bytes_leaked += record_size;
                                 if *new_begin_address == until_address {
                                     *new_begin_address = current_address;
                                 }

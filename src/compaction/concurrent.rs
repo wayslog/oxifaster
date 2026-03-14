@@ -520,6 +520,7 @@ impl ConcurrentCompactor {
                 bytes_compacted: 0,
                 bytes_reclaimed: size,
                 duration_ms: 0,
+                bytes_leaked: 0,
             }
         })
     }
@@ -709,6 +710,7 @@ mod tests {
                 bytes_compacted: chunk.size() / 2,
                 bytes_reclaimed: chunk.size() / 2,
                 duration_ms: 0,
+                bytes_leaked: 0,
             }
         });
 

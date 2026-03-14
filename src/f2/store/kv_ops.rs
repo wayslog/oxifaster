@@ -419,6 +419,9 @@ where
             self.invalidate_read_cache(hash.hash());
             Ok(())
         } else {
+            // CAS failed: the allocated record at `address` is now an orphaned (leaked) allocation.
+            // The log-structured architecture does not support reclaiming individual records;
+            // this space will be recovered only when compaction advances the begin address past it.
             Err(Status::Aborted)
         }
     }

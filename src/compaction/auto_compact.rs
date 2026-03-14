@@ -583,6 +583,7 @@ mod tests {
                     bytes_compacted: 5000,
                     bytes_reclaimed: 5000,
                     duration_ms: 10,
+                    bytes_leaked: 0,
                 },
             )
         }
