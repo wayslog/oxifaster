@@ -20,21 +20,26 @@ struct TestKey(u64);
 #[derive(Copy, Clone, Debug, PartialEq, Default, Pod, Zeroable)]
 struct TestValue(u64);
 
-#[test]
-fn test_create_f2() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device);
-    assert!(f2.is_ok());
+fn make_f2() -> F2Kv<TestKey, TestValue, NullDisk> {
+    F2Kv::new(F2Config::default(), NullDisk::new(), NullDisk::new()).unwrap()
+}
+
+fn make_f2_with_config(config: F2Config) -> F2Kv<TestKey, TestValue, NullDisk> {
+    F2Kv::new(config, NullDisk::new(), NullDisk::new()).unwrap()
 }
 
 #[test]
+fn test_create_f2() {
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(
+        F2Config::default(),
+        NullDisk::new(),
+        NullDisk::new(),
+    );
+    assert!(f2.is_ok());
+}
+#[test]
 fn test_session_lifecycle() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Start session
     let session = f2.start_session();
@@ -46,11 +51,7 @@ fn test_session_lifecycle() {
 
 #[test]
 fn test_checkpoint() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     // Start checkpoint
     let token = f2.checkpoint(false);
@@ -76,10 +77,7 @@ fn test_operation_stages() {
 
 #[test]
 fn test_f2_size() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Initial size should be 0
     assert_eq!(f2.size(), 0);
@@ -89,10 +87,7 @@ fn test_f2_size() {
 
 #[test]
 fn test_f2_stats() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let hot_stats = f2.hot_store_stats();
     let cold_stats = f2.cold_store_stats();
@@ -103,10 +98,7 @@ fn test_f2_stats() {
 
 #[test]
 fn test_f2_read_write() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Start session
     let _session = f2.start_session().unwrap();
@@ -138,10 +130,7 @@ fn test_f2_read_write() {
 
 #[test]
 fn test_f2_rmw_updates_value() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -154,10 +143,7 @@ fn test_f2_rmw_updates_value() {
 
 #[test]
 fn test_f2_hot_compaction_migrates_live_records_to_cold() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -188,9 +174,7 @@ fn test_f2_hot_compaction_access_frequency_keeps_hot() {
                 decay_shift: 0,
             });
 
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<u64, u64, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = F2Kv::<u64, u64, NullDisk>::new(config, NullDisk::new(), NullDisk::new()).unwrap();
 
     let _session = f2.start_session().unwrap();
 
@@ -222,10 +206,7 @@ fn test_f2_hot_compaction_access_frequency_keeps_hot() {
 
 #[test]
 fn test_f2_compaction_check() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Should not need compaction with empty stores
     assert!(f2.should_compact_hot_log().is_none());
@@ -372,10 +353,7 @@ fn test_store_index_garbage_collect() {
 
 #[test]
 fn test_f2_checkpoint_state() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Checkpoint phase should be Rest initially
     assert_eq!(
@@ -386,10 +364,7 @@ fn test_f2_checkpoint_state() {
 
 #[test]
 fn test_f2_checkpoint_version() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Version should start at 0
     assert_eq!(f2.checkpoint.version(), 0);
@@ -397,10 +372,7 @@ fn test_f2_checkpoint_version() {
 
 #[test]
 fn test_f2_refresh() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Start session
     let _session = f2.start_session().unwrap();
@@ -414,10 +386,7 @@ fn test_f2_refresh() {
 
 #[test]
 fn test_f2_complete_pending() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Start session
     let _session = f2.start_session().unwrap();
@@ -431,10 +400,7 @@ fn test_f2_complete_pending() {
 
 #[test]
 fn test_f2_multiple_upserts() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -449,10 +415,7 @@ fn test_f2_multiple_upserts() {
 
 #[test]
 fn test_f2_delete_nonexistent() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -465,10 +428,7 @@ fn test_f2_delete_nonexistent() {
 
 #[test]
 fn test_f2_config() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let config_ref = f2.config();
     assert!(config_ref.hot_store.log_mem_size > 0);
@@ -477,11 +437,7 @@ fn test_f2_config() {
 
 #[test]
 fn test_f2_checkpoint_dir() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     // Initially no checkpoint dir
     assert!(f2.checkpoint_dir().is_none());
@@ -500,10 +456,7 @@ fn test_f2_checkpoint_dir() {
 
 #[test]
 fn test_f2_compaction_config() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let compaction_config = f2.compaction_config();
     assert!(compaction_config.trigger_percentage > 0.0);
@@ -511,10 +464,7 @@ fn test_f2_compaction_config() {
 
 #[test]
 fn test_f2_num_active_sessions() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Initially no active sessions
     assert_eq!(f2.num_active_sessions(), 0);
@@ -530,10 +480,7 @@ fn test_f2_num_active_sessions() {
 
 #[test]
 fn test_f2_is_compaction_scheduled() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Initially compaction is not scheduled
     assert!(!f2.is_compaction_scheduled());
@@ -541,10 +488,7 @@ fn test_f2_is_compaction_scheduled() {
 
 #[test]
 fn test_f2_continue_session() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let session_id = uuid::Uuid::new_v4();
     let result = f2.continue_session(session_id);
@@ -556,10 +500,7 @@ fn test_f2_continue_session() {
 
 #[test]
 fn test_f2_complete_pending_compactions() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     // Should not hang or panic on empty store
     f2.complete_pending_compactions();
@@ -567,10 +508,7 @@ fn test_f2_complete_pending_compactions() {
 
 #[test]
 fn test_f2_rmw() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -614,9 +552,7 @@ fn test_f2_cold_store_can_use_cold_index_when_configured() {
         ColdIndexConfig::new(1024, 1024 * 1024, 0.5).with_root_path(temp_dir.path()),
     );
 
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<u64, u64, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = F2Kv::<u64, u64, NullDisk>::new(config, NullDisk::new(), NullDisk::new()).unwrap();
 
     assert!(f2.cold_store.hash_index.is_cold());
     assert!(!f2.cold_store.hash_index.is_memory());
@@ -655,10 +591,7 @@ fn test_store_stats_clone() {
 
 #[test]
 fn test_f2_save_checkpoint() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let temp_dir = tempfile::tempdir().unwrap();
     let token = uuid::Uuid::new_v4();
@@ -669,11 +602,7 @@ fn test_f2_save_checkpoint() {
 
 #[test]
 fn test_f2_recover_not_found() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     let temp_dir = tempfile::tempdir().unwrap();
     let token = uuid::Uuid::new_v4();
@@ -685,11 +614,7 @@ fn test_f2_recover_not_found() {
 
 #[test]
 fn test_f2_checkpoint_during_checkpoint() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     // Start first checkpoint
     let token1 = f2.checkpoint(false);
@@ -705,11 +630,7 @@ fn test_f2_checkpoint_during_checkpoint() {
 
 #[test]
 fn test_f2_start_session_during_checkpoint() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     // Start checkpoint (changes phase from Rest)
     let _token = f2.checkpoint(false);
@@ -723,11 +644,7 @@ fn test_f2_start_session_during_checkpoint() {
 
 #[test]
 fn test_f2_continue_session_during_checkpoint() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     // Start checkpoint
     let _token = f2.checkpoint(false);
@@ -775,11 +692,7 @@ fn test_store_index_garbage_collect_cold() {
 
 #[test]
 fn test_f2_synchronous_checkpoint_flow_resets_phase() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     let temp_dir = tempfile::tempdir().unwrap();
 
@@ -818,12 +731,7 @@ fn test_f2_synchronous_checkpoint_flow_resets_phase() {
 fn test_f2_multi_session_independent_epoch() {
     use std::sync::Arc;
 
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = Arc::new(
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
-    );
+    let f2 = Arc::new(make_f2());
 
     let f2_a = Arc::clone(&f2);
     let f2_b = Arc::clone(&f2);
@@ -880,9 +788,7 @@ fn test_mutable_fraction_wired_to_hlog() {
             .with_log_mem_size(16 * 1024 * 1024), // 16 MB
     );
 
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2_with_config(config);
 
     // Verify hot store: mutable_pages should be ~50% of memory_pages
     let hot_hlog_config = f2.hot_store.hlog().config();
@@ -902,10 +808,7 @@ fn test_mutable_fraction_wired_to_hlog() {
 
 #[test]
 fn test_f2_conditional_upsert_succeeds_with_matching_address() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -935,10 +838,7 @@ fn test_f2_conditional_upsert_succeeds_with_matching_address() {
 
 #[test]
 fn test_f2_conditional_upsert_aborts_on_stale_address() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2();
 
     let _session = f2.start_session().unwrap();
 
@@ -973,11 +873,7 @@ fn test_f2_conditional_upsert_aborts_on_stale_address() {
 
 #[test]
 fn test_f2_checkpoint_roundtrip() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config.clone(), hot_device, cold_device).unwrap();
+    let mut f2 = make_f2();
 
     let temp_dir = tempfile::tempdir().unwrap();
 
@@ -996,10 +892,7 @@ fn test_f2_checkpoint_roundtrip() {
     drop(f2);
 
     // Create a new F2Kv instance and recover
-    let hot_device2 = NullDisk::new();
-    let cold_device2 = NullDisk::new();
-    let mut f2_recovered =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device2, cold_device2).unwrap();
+    let mut f2_recovered = make_f2();
 
     let version = f2_recovered.recover(temp_dir.path(), token).unwrap();
     // checkpoint() calls initialize() which bumps version from 0 to 1
@@ -1030,11 +923,7 @@ fn test_f2_rmw_concurrent_correctness() {
             .with_mutable_fraction(0.0)
             .with_log_mem_size(64 * 1024 * 1024),
     );
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = Arc::new(
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
-    );
+    let f2 = Arc::new(make_f2_with_config(config));
 
     // Start a session to insert the initial value.
     let _session = f2.start_session().unwrap();
@@ -1081,12 +970,7 @@ fn test_f2_rmw_concurrent_correctness() {
 
 #[test]
 fn test_f2_concurrent_crud() {
-    let config = F2Config::default();
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = Arc::new(
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap(),
-    );
+    let f2 = Arc::new(make_f2());
 
     let num_threads = 4;
     let keys_per_thread = 250;
@@ -1178,9 +1062,7 @@ fn test_f2_disk_read_after_flush() {
 
 #[test]
 fn test_f2_read_cache_created_when_configured() {
-    let config = F2Config::default(); // default has read_cache = Some(default)
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-        .unwrap();
+    let f2 = make_f2();
     assert!(f2.has_read_cache());
 }
 
@@ -1188,8 +1070,7 @@ fn test_f2_read_cache_created_when_configured() {
 fn test_f2_no_read_cache_when_not_configured() {
     let mut config = F2Config::default();
     config.hot_store.read_cache = None;
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-        .unwrap();
+    let f2 = make_f2_with_config(config);
     assert!(!f2.has_read_cache());
 }
 
@@ -1199,9 +1080,7 @@ fn test_f2_heavy_enter_advances_checkpoint_phase() {
 
     let mut config = F2Config::default();
     config.hot_store.read_cache = None;
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-            .unwrap();
+    let mut f2 = make_f2_with_config(config);
 
     // Start a session so num_active_sessions >= 1
     let _session = f2.start_session().unwrap();
@@ -1240,9 +1119,7 @@ fn test_f2_heavy_enter_multi_thread_countdown() {
 
     let mut config = F2Config::default();
     config.hot_store.read_cache = None;
-    let mut f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-            .unwrap();
+    let mut f2 = make_f2_with_config(config);
 
     // Simulate 3 active sessions
     let _s1 = f2.start_session().unwrap();
@@ -1300,8 +1177,7 @@ fn test_f2_cold_compaction_removes_tombstones() {
     config.compaction.hot_store_enabled = false;
     config.compaction.cold_store_enabled = false;
 
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-        .unwrap();
+    let f2 = make_f2_with_config(config);
 
     let _session = f2.start_session().unwrap();
 
@@ -1386,8 +1262,7 @@ fn test_f2_read_cache_backfill_on_cold_hit() {
     config.compaction.hot_store_enabled = false;
     config.compaction.cold_store_enabled = false;
 
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-        .unwrap();
+    let f2 = make_f2_with_config(config);
 
     let _session = f2.start_session().unwrap();
     assert!(f2.has_read_cache());
@@ -1550,9 +1425,7 @@ fn test_f2_cold_compaction_tombstone_cas_failure_safe() {
     config.compaction.hot_store_enabled = false;
     config.compaction.cold_store_enabled = false;
 
-    let f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-            .unwrap();
+    let f2 = make_f2_with_config(config);
     let _session = f2.start_session().unwrap();
 
     // Write some keys and then delete them to create tombstones.
@@ -1614,9 +1487,7 @@ fn test_f2_rmw_retry_exhaustion_returns_error() {
     config.compaction.hot_store_enabled = false;
     config.compaction.cold_store_enabled = false;
 
-    let f2 =
-        F2Kv::<TestKey, TestValue, NullDisk>::new(config, NullDisk::new(), NullDisk::new())
-            .unwrap();
+    let f2 = make_f2_with_config(config);
     let _session = f2.start_session().unwrap();
 
     let key = TestKey(42);
@@ -1657,9 +1528,7 @@ fn test_f2_rmw_invalidates_read_cache() {
     let mut config = F2Config::default();
     config.hot_store.read_cache = Some(ReadCacheConfig::default());
     config.hot_store.mutable_fraction = 0.0;
-    let hot_device = NullDisk::new();
-    let cold_device = NullDisk::new();
-    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+    let f2 = make_f2_with_config(config);
 
     let _session = f2.start_session().unwrap();
 
