@@ -39,6 +39,11 @@ where
 
         // 3. Check cold store
         if let Some(value) = self.internal_read(&self.cold_store, false, key, hash)? {
+            // Known limitation: there is a TOCTOU race between the cold read and
+            // this backfill. If a concurrent upsert/delete invalidates the cache
+            // entry between steps 3 and 4, this backfill re-inserts a stale value.
+            // The read cache provides eventual consistency, not strong consistency.
+            // A subsequent write to the same key will re-invalidate the entry.
             // 4. Backfill into read cache on cold hit
             if let Some(ref rc) = self.read_cache {
                 if let Ok(cache_addr) = rc.try_insert(key, &value, Address::INVALID, true) {
