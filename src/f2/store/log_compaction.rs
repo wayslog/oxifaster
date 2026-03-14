@@ -110,11 +110,7 @@ where
 
         compactor.complete();
 
-        let new_begin = if store_type == StoreType::Hot {
-            new_begin_address
-        } else {
-            until_address
-        };
+        let new_begin = new_begin_address;
         Ok(CompactionResult::success(new_begin, stats))
     }
 
