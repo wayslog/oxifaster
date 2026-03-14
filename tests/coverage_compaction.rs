@@ -24,6 +24,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 20, // 1 MB
         page_size_bits: 12,       // 4 KB pages
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let device = NullDisk::new();
     Arc::new(FasterKv::new(config, device))
@@ -35,6 +36,7 @@ fn create_store_with_small_pages() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 16, // 64 KB
         page_size_bits: 10,       // 1 KB pages
         mutable_fraction: 0.5,
+        ..Default::default()
     };
     let device = NullDisk::new();
     Arc::new(FasterKv::new(config, device))

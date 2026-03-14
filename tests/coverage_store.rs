@@ -25,6 +25,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     Arc::new(FasterKv::new(config, NullDisk::new()))
 }
@@ -35,6 +36,7 @@ fn create_large_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 24,
         page_size_bits: 16,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     Arc::new(FasterKv::new(config, NullDisk::new()))
 }
@@ -45,6 +47,7 @@ fn create_store_with_compaction() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let compaction_config = CompactionConfig::new()
         .with_target_utilization(0.5)

@@ -516,8 +516,9 @@ where
 
                 Phase::WaitPending => {
                     // Initialize deadline on first entry to WaitPending
+                    let timeout_secs = self.wait_pending_timeout_secs();
                     let deadline = wait_pending_deadline
-                        .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                        .get_or_insert_with(|| Instant::now() + Duration::from_secs(timeout_secs));
 
                     let _ = self.cpr.with_active_mut(|active| {
                         active.set_phase(current_state.phase, current_state.version);
@@ -543,7 +544,10 @@ where
                         );
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            format!("WaitPending timeout after 30s: stalled threads: {stalled:?}"),
+                            format!(
+                                "WaitPending timeout after {}s: stalled threads: {stalled:?}",
+                                timeout_secs
+                            ),
                         ));
                     }
                 }
@@ -1091,6 +1095,7 @@ where
             ),
             last_snapshot_checkpoint: RwLock::new(None),
             checkpoint_compaction_lock: RwLock::new(()),
+            wait_pending_timeout_secs: config.wait_pending_timeout_secs,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1268,6 +1273,7 @@ where
             ),
             last_snapshot_checkpoint: RwLock::new(None),
             checkpoint_compaction_lock: RwLock::new(()),
+            wait_pending_timeout_secs: config.wait_pending_timeout_secs,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1337,6 +1343,7 @@ where
             ),
             last_snapshot_checkpoint: RwLock::new(None),
             checkpoint_compaction_lock: RwLock::new(()),
+            wait_pending_timeout_secs: config.wait_pending_timeout_secs,
             _marker: std::marker::PhantomData,
         })
     }

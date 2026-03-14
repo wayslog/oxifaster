@@ -23,6 +23,7 @@ fn run_fasterkv_with_varlen_utf8<D: StorageDevice>(device_name: &str, device: D)
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let store = Arc::new(FasterKv::<Utf8, Utf8, _>::new(config, device));
 

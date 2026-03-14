@@ -24,6 +24,7 @@ fn create_test_store() -> Arc<FasterKv<u64, u64, NullDisk>> {
         log_memory_size: 1 << 20, // 1 MB
         page_size_bits: 12,       // 4 KB pages
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     Arc::new(FasterKv::new(config, NullDisk::new()))
 }

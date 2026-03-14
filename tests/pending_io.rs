@@ -29,6 +29,7 @@ fn test_pending_read_and_complete_pending_readback() {
         log_memory_size: 1 << 20, // 1 MiB
         page_size_bits: 14,       // 16 KiB
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
@@ -60,6 +61,7 @@ fn test_complete_pending_with_custom_timeout() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
@@ -93,6 +95,7 @@ fn test_complete_pending_no_wait_returns_immediately() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     let store = Arc::new(FasterKv::<u64, u64, _>::new(config, device));
@@ -166,6 +169,7 @@ fn test_pending_read_traverses_disk_hash_chain_on_collision() {
         log_memory_size: 1 << 20, // 1 MiB
         page_size_bits: 14,       // 16 KiB
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     let store = Arc::new(FasterKv::<CollidingKey, u64, _>::new(config, device));

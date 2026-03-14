@@ -49,6 +49,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let store = Arc::new(FasterKv::<u64, u64, _>::new(store_config, device));
 

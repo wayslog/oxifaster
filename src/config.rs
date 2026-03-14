@@ -91,6 +91,9 @@ impl OxifasterConfig {
                 ["store", "mutable_fraction"] => {
                     self.store_mut().mutable_fraction = Some(parse_value(&key, &value)?);
                 }
+                ["store", "wait_pending_timeout_secs"] => {
+                    self.store_mut().wait_pending_timeout_secs = Some(parse_value(&key, &value)?);
+                }
                 ["compaction", "target_utilization"] => {
                     self.compaction_mut().target_utilization = Some(parse_value(&key, &value)?);
                 }
@@ -229,6 +232,8 @@ pub struct StoreConfig {
     pub page_size_bits: Option<u32>,
     /// Mutable fraction of log memory.
     pub mutable_fraction: Option<f64>,
+    /// WaitPending phase timeout in seconds.
+    pub wait_pending_timeout_secs: Option<u64>,
 }
 
 impl StoreConfig {
@@ -244,6 +249,9 @@ impl StoreConfig {
         }
         if let Some(value) = self.mutable_fraction {
             config.mutable_fraction = value;
+        }
+        if let Some(value) = self.wait_pending_timeout_secs {
+            config.wait_pending_timeout_secs = value;
         }
     }
 }
@@ -639,6 +647,7 @@ mod tests {
             log_memory_size: Some(1 << 20),
             page_size_bits: Some(14),
             mutable_fraction: Some(0.8),
+            wait_pending_timeout_secs: Some(60),
         };
 
         let mut kv_config = FasterKvConfig::default();
@@ -648,6 +657,7 @@ mod tests {
         assert_eq!(kv_config.log_memory_size, 1 << 20);
         assert_eq!(kv_config.page_size_bits, 14);
         assert_eq!(kv_config.mutable_fraction, 0.8);
+        assert_eq!(kv_config.wait_pending_timeout_secs, 60);
     }
 
     #[test]

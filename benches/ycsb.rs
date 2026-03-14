@@ -28,6 +28,7 @@ fn create_store(table_size: u64, memory_size: u64) -> Arc<FasterKv<u64, u64, Nul
         log_memory_size: memory_size,
         page_size_bits: 22,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let device = NullDisk::new();
     Arc::new(FasterKv::new(config, device))
@@ -43,6 +44,7 @@ fn create_raw_bytes_store(
         log_memory_size: memory_size,
         page_size_bits: 22,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let device = NullDisk::new();
     Arc::new(FasterKv::new(config, device))
@@ -59,6 +61,7 @@ fn create_disk_store(
         log_memory_size: memory_size,
         page_size_bits: 20, // 1MB pages for disk
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let device = FileSystemDisk::single_file(path.join("data.db")).unwrap();
     Arc::new(FasterKv::new(config, device))

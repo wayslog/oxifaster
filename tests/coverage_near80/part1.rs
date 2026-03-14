@@ -369,6 +369,7 @@ fn cov_faster_kv_head_address() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 
@@ -388,6 +389,7 @@ fn cov_faster_kv_conditional_insert_exists() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 
@@ -409,6 +411,7 @@ fn cov_faster_kv_rmw_not_found() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 
@@ -429,6 +432,7 @@ fn cov_faster_kv_rmw_abort() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 
@@ -462,6 +466,7 @@ fn cov_faster_kv_read_not_found() {
         log_memory_size: 1 << 16, // Small log to force disk
         page_size_bits: 12,
         mutable_fraction: 0.5,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 
@@ -486,6 +491,7 @@ fn cov_hybrid_log_through_store() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::new(config, NullDisk::new()));
 

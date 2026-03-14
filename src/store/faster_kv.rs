@@ -53,6 +53,8 @@ pub struct FasterKvConfig {
     pub page_size_bits: u32,
     /// Mutable fraction of log memory
     pub mutable_fraction: f64,
+    /// WaitPending phase timeout in seconds (default: 30)
+    pub wait_pending_timeout_secs: u64,
 }
 
 impl FasterKvConfig {
@@ -63,6 +65,7 @@ impl FasterKvConfig {
             log_memory_size,
             page_size_bits: 22, // 4 MB pages by default
             mutable_fraction: 0.9,
+            wait_pending_timeout_secs: 30,
         }
     }
 }
@@ -74,6 +77,7 @@ impl Default for FasterKvConfig {
             log_memory_size: 1 << 29, // 512 MB
             page_size_bits: 22,       // 4 MB pages
             mutable_fraction: 0.9,
+            wait_pending_timeout_secs: 30,
         }
     }
 }
@@ -171,6 +175,8 @@ where
     last_snapshot_checkpoint: RwLock<Option<CheckpointState>>,
     /// Mutual exclusion between checkpoint (write) and compaction (read).
     checkpoint_compaction_lock: RwLock<()>,
+    /// WaitPending phase timeout in seconds
+    wait_pending_timeout_secs: u64,
     /// Type markers
     _marker: PhantomData<(K, V)>,
 }
@@ -332,6 +338,7 @@ where
             default_checkpoint_durability: AtomicU32::new(CheckpointDurability::FasterLike as u32),
             last_snapshot_checkpoint: RwLock::new(None),
             checkpoint_compaction_lock: RwLock::new(()),
+            wait_pending_timeout_secs: config.wait_pending_timeout_secs,
             _marker: PhantomData,
         }
     }
@@ -371,6 +378,11 @@ where
     pub fn set_checkpoint_durability(&self, durability: CheckpointDurability) {
         self.default_checkpoint_durability
             .store(u32::from(durability as u8), Ordering::Release);
+    }
+
+    /// Get the configured WaitPending timeout in seconds.
+    pub fn wait_pending_timeout_secs(&self) -> u64 {
+        self.wait_pending_timeout_secs
     }
 
     pub(crate) fn cpr_refresh(&self, ctx: &mut ThreadContext) {

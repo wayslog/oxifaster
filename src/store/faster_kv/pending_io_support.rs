@@ -275,6 +275,7 @@ mod tests {
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         Arc::new(FasterKv::new(config, device))
@@ -286,6 +287,7 @@ mod tests {
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         Arc::new(FasterKv::new(config, device))
@@ -297,6 +299,7 @@ mod tests {
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         Arc::new(FasterKv::new(config, device))

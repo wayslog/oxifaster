@@ -146,6 +146,7 @@ fn pending_store_config() -> FasterKvConfig {
         log_memory_size: 1 << 24, // 16MiB
         page_size_bits: 14,       // 16KiB pages (reduce flush work per head shift)
         mutable_fraction: 0.2,
+        ..Default::default()
     }
 }
 

@@ -21,6 +21,7 @@ fn create_test_store(path: &std::path::Path) -> Arc<FasterKv<u64, u64, FileSyste
         log_memory_size: 1 << 20, // 1 MiB
         page_size_bits: 14,       // 16 KiB
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     Arc::new(FasterKv::new(config, device))
 }
@@ -117,6 +118,7 @@ fn test_foldover_checkpoint_under_load_recovery_prefix() {
         log_memory_size: 1 << 20, // 1 MiB
         page_size_bits: 14,       // 16 KiB
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     let token = {

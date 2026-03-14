@@ -38,6 +38,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         log_memory_size: 1 << 22, // 4 MB 日志内存
         page_size_bits: 18,       // 256 KB 页面
         mutable_fraction: 0.9,
+        ..Default::default()
     };
     let store = Arc::new(FasterKv::<u64, u64, _>::with_read_cache(
         store_config,

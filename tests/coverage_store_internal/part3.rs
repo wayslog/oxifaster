@@ -392,6 +392,7 @@ fn test_store_with_raw_bytes() {
         log_memory_size: 1 << 18,
         page_size_bits: 12,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<RawBytes, RawBytes, NullDisk>> =
         Arc::new(FasterKv::new(config, NullDisk::new()));
@@ -414,6 +415,7 @@ fn test_store_with_utf8() {
         log_memory_size: 1 << 18,
         page_size_bits: 12,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let store: Arc<FasterKv<Utf8, Utf8, NullDisk>> =
         Arc::new(FasterKv::new(config, NullDisk::new()));
@@ -438,6 +440,7 @@ fn test_compaction_with_read_cache() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let cache_config = ReadCacheConfig::new(1 << 18);
 

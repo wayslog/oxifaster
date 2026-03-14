@@ -185,6 +185,7 @@
             log_memory_size: 1 << 20, // 1 MB
             page_size_bits: 12,       // 4 KB pages
             mutable_fraction: 0.9,
+            ..Default::default()
         }
     }
 
@@ -330,6 +331,7 @@
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         let cache_config = ReadCacheConfig::new(1 << 20); // 1 MB cache
@@ -355,6 +357,7 @@
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         let cache_config = ReadCacheConfig::new(1 << 20);

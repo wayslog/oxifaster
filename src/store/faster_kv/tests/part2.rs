@@ -282,6 +282,7 @@
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         let cache_config = ReadCacheConfig::new(1 << 20);
@@ -393,6 +394,7 @@
             log_memory_size: 1 << 20,
             page_size_bits: 12,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = NullDisk::new();
         let compaction_config = CompactionConfig {

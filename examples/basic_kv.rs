@@ -21,6 +21,7 @@ fn run_with_device<D: StorageDevice>(device_name: &str, device: D) {
         log_memory_size: 1 << 24, // 16 MB 日志内存
         page_size_bits: 20,       // 1 MB 页面
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     // 3. 创建 FasterKV 存储

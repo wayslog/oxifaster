@@ -154,6 +154,7 @@ fn test_recovery_full_flow_with_filesystem() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
         let recovered: FasterKv<u64, u64, FileSystemDisk> =
@@ -196,6 +197,7 @@ fn test_recover_with_compaction_config() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let compaction_config = CompactionConfig::new().with_target_utilization(0.7);
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
@@ -241,6 +243,7 @@ fn test_recover_with_read_cache() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let cache_config = ReadCacheConfig::new(1 << 20);
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
@@ -280,6 +283,7 @@ fn test_recover_index_only() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
 
@@ -317,6 +321,7 @@ fn test_recover_log_only() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
 
@@ -354,6 +359,7 @@ fn test_recovered_sessions() {
             log_memory_size: 1 << 20,
             page_size_bits: 14,
             mutable_fraction: 0.9,
+            ..Default::default()
         };
         let device = FileSystemDisk::single_file(store_dir.join("store.dat")).unwrap();
         let recovered: FasterKv<u64, u64, FileSystemDisk> =

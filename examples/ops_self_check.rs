@@ -47,6 +47,7 @@ fn main() -> std::io::Result<()> {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     };
 
     // Create a valid checkpoint.

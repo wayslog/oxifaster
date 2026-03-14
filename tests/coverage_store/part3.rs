@@ -382,6 +382,7 @@ fn test_store_with_read_cache() {
         log_memory_size: 1 << 20,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+            ..Default::default()
     };
     let cache_config = ReadCacheConfig::new(1 << 18);
     let store: Arc<FasterKv<u64, u64, NullDisk>> = Arc::new(FasterKv::with_read_cache(

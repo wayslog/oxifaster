@@ -15,6 +15,7 @@ fn small_store_config() -> FasterKvConfig {
         log_memory_size: 1 << 24,
         page_size_bits: 14,
         mutable_fraction: 0.9,
+        ..Default::default()
     }
 }
 

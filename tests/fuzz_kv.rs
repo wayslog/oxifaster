@@ -18,6 +18,7 @@ fn small_store_config() -> FasterKvConfig {
         log_memory_size: 1 << 24, // 16MiB to reduce spurious OOM in stress tests
         page_size_bits: 14,       // 16KiB pages
         mutable_fraction: 0.9,
+        ..Default::default()
     }
 }
 
