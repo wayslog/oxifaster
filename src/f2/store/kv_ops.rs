@@ -87,6 +87,7 @@ where
     {
         let hash = KeyHash::new(hash64(bytemuck::bytes_of(&key)));
         self.track_key_access(hash.hash());
+        self.invalidate_read_cache(hash.hash());
 
         // Fast path: in-place update in the mutable region.
         if let Some(record_base) = self.try_get_mutable_record_ptr(&self.hot_store, &key, hash)? {
@@ -417,6 +418,7 @@ where
         );
 
         if status == Status::Ok {
+            self.invalidate_read_cache(hash.hash());
             Ok(())
         } else {
             Err(Status::Aborted)

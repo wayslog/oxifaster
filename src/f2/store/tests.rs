@@ -1534,3 +1534,29 @@ fn test_f2_large_dataset_with_filesystem() {
 
     f2.stop_session();
 }
+
+#[test]
+fn test_f2_rmw_invalidates_read_cache() {
+    use crate::cache::ReadCacheConfig;
+
+    let mut config = F2Config::default();
+    config.hot_store.read_cache = Some(ReadCacheConfig::default());
+    config.hot_store.mutable_fraction = 0.0;
+    let hot_device = NullDisk::new();
+    let cold_device = NullDisk::new();
+    let f2 = F2Kv::<TestKey, TestValue, NullDisk>::new(config, hot_device, cold_device).unwrap();
+
+    let _session = f2.start_session().unwrap();
+
+    let key = TestKey(42);
+    f2.upsert(key, TestValue(100)).unwrap();
+    let v = f2.read(&key).unwrap();
+    assert_eq!(v, Some(TestValue(100)));
+
+    f2.rmw(key, |v: &mut TestValue| v.0 += 1).unwrap();
+
+    let v = f2.read(&key).unwrap();
+    assert_eq!(v, Some(TestValue(101)), "RMW must invalidate read cache");
+
+    f2.stop_session();
+}
