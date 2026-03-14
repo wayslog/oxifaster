@@ -106,6 +106,24 @@ pub(crate) struct ActiveCheckpointStart {
     pub(crate) version: u32,
 }
 
+/// Iterator over pending thread IDs using efficient bit manipulation.
+struct PendingThreadsIter {
+    bits: u128,
+}
+
+impl Iterator for PendingThreadsIter {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bits == 0 {
+            return None;
+        }
+        let idx = self.bits.trailing_zeros() as usize;
+        self.bits &= !(1u128 << idx);
+        Some(idx)
+    }
+}
+
 impl ActiveCheckpoint {
     pub(crate) fn new(start: ActiveCheckpointStart) -> Self {
         Self {
@@ -168,12 +186,16 @@ impl ActiveCheckpoint {
         self.acked == self.participants
     }
 
+    /// Returns an iterator over thread IDs that have not yet acked.
+    /// More efficient than pending_threads() as it avoids allocation.
+    pub(crate) fn pending_threads_iter(&self) -> impl Iterator<Item = usize> {
+        let not_acked = self.participants & !self.acked;
+        PendingThreadsIter { bits: not_acked }
+    }
+
     /// Returns thread IDs of participants that have not yet acked.
     pub(crate) fn pending_threads(&self) -> Vec<usize> {
-        let not_acked = self.participants & !self.acked;
-        (0..MAX_THREADS)
-            .filter(|&i| (not_acked & (1u128 << i)) != 0)
-            .collect()
+        self.pending_threads_iter().collect()
     }
 
     /// Update the driver heartbeat (called by driver thread each loop iteration).
@@ -339,6 +361,19 @@ mod tests {
         // Caller observed 1, but heartbeat is now 2 -> driver is active, takeover fails
         assert!(!active.try_takeover(1, 1));
         assert_eq!(active.current_driver_thread_id(), 0);
+    }
+
+    #[test]
+    fn test_pending_threads_iter_matches_vec() {
+        let mut active = make_active(0b10110101, 0);
+        active.set_phase(Phase::WaitPending, 1);
+        active.ack(0);
+        active.ack(2);
+
+        let vec_result: Vec<usize> = active.pending_threads();
+        let iter_result: Vec<usize> = active.pending_threads_iter().collect();
+
+        assert_eq!(vec_result, iter_result);
     }
 
     #[test]
