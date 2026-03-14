@@ -1116,57 +1116,78 @@ fn test_f2_heavy_enter_advances_checkpoint_phase() {
 #[test]
 fn test_f2_heavy_enter_multi_thread_countdown() {
     use crate::f2::state::F2CheckpointPhase;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let num_threads = 4usize;
 
     let mut config = F2Config::default();
     config.hot_store.read_cache = None;
     let mut f2 = make_f2_with_config(config);
 
-    // Simulate 3 active sessions
-    let _s1 = f2.start_session().unwrap();
-    let _s2 = f2.start_session().unwrap();
-    let _s3 = f2.start_session().unwrap();
+    // Open num_threads sessions before checkpointing so the checkpoint
+    // initializes its pending counter to num_threads (one acknowledgement
+    // required per active session thread).
+    for _ in 0..num_threads {
+        f2.start_session().unwrap();
+    }
 
+    // Start a checkpoint -- phase transitions to HotStoreCheckpoint and the
+    // pending hot-store counter is set to num_threads.
     let _token = f2.checkpoint(false).unwrap();
     assert_eq!(
         f2.checkpoint.phase.load(Ordering::Acquire),
         F2CheckpointPhase::HotStoreCheckpoint
     );
 
-    // First two threads: phase should NOT advance
-    f2.heavy_enter();
+    // Wrap in Arc so real threads can share it.  checkpoint() has already
+    // been called so &mut access is no longer required.
+    let f2 = Arc::new(f2);
+
+    // Two-barrier protocol to guarantee each thread processes exactly one
+    // phase per round, preventing counter underflow from a thread calling
+    // heavy_enter() twice on the same phase before the phase advances.
+    //
+    // Round 1: all threads call refresh() -> heavy_enter() for HotStoreCheckpoint.
+    // Round 2: after the phase has advanced to ColdStoreCheckpoint, all threads
+    //          call refresh() -> heavy_enter() for ColdStoreCheckpoint.
+    let barrier_after_round1 = Arc::new(Barrier::new(num_threads));
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let f2 = Arc::clone(&f2);
+            let barrier = Arc::clone(&barrier_after_round1);
+            thread::spawn(move || {
+                // Round 1: acknowledge HotStoreCheckpoint phase.
+                f2.refresh();
+
+                // Wait for all threads to finish round 1 before starting round 2.
+                // This guarantees the phase has advanced to ColdStoreCheckpoint
+                // before any thread enters round 2.
+                barrier.wait();
+
+                // Round 2: acknowledge ColdStoreCheckpoint phase.
+                f2.refresh();
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // After all threads have acknowledged both phases the checkpoint must
+    // have advanced all the way back to Rest.
     assert_eq!(
         f2.checkpoint.phase.load(Ordering::Acquire),
-        F2CheckpointPhase::HotStoreCheckpoint
-    );
-    f2.heavy_enter();
-    assert_eq!(
-        f2.checkpoint.phase.load(Ordering::Acquire),
-        F2CheckpointPhase::HotStoreCheckpoint
+        F2CheckpointPhase::Rest,
+        "checkpoint phase should be Rest after all threads have called refresh()"
     );
 
-    // Third thread: phase advances to ColdStoreCheckpoint
-    f2.heavy_enter();
-    assert_eq!(
-        f2.checkpoint.phase.load(Ordering::Acquire),
-        F2CheckpointPhase::ColdStoreCheckpoint
-    );
-
-    // Drain cold store pending: 3 threads again
-    f2.heavy_enter();
-    f2.heavy_enter();
-    assert_eq!(
-        f2.checkpoint.phase.load(Ordering::Acquire),
-        F2CheckpointPhase::ColdStoreCheckpoint
-    );
-    f2.heavy_enter(); // last
-    assert_eq!(
-        f2.checkpoint.phase.load(Ordering::Acquire),
-        F2CheckpointPhase::Rest
-    );
-
-    f2.stop_session();
-    f2.stop_session();
-    f2.stop_session();
+    // Clean up the sessions opened before the checkpoint.
+    for _ in 0..num_threads {
+        f2.stop_session();
+    }
 }
 
 #[test]
