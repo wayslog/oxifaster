@@ -1132,6 +1132,18 @@ where
         let mut seen_guids = std::collections::HashSet::new();
 
         for session_state in &log_meta.session_states {
+            // Check for duplicate GUID FIRST, before any continue
+            if !seen_guids.insert(session_state.guid) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Duplicate session GUID {} in checkpoint",
+                        session_state.guid
+                    ),
+                ));
+            }
+
+            // Skip value range checks for serial_num == 0
             if session_state.serial_num == 0 {
                 continue;
             }
@@ -1142,16 +1154,6 @@ where
                     format!(
                         "Invalid serial number {} for session {}",
                         session_state.serial_num, session_state.guid
-                    ),
-                ));
-            }
-
-            if !seen_guids.insert(session_state.guid) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Duplicate session GUID {} in checkpoint",
-                        session_state.guid
                     ),
                 ));
             }
