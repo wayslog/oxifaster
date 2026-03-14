@@ -530,6 +530,9 @@ where
                         let _ = self.system_state.try_advance();
                         wait_pending_deadline = None;
                     } else if Instant::now() > *deadline {
+                        // Mark checkpoint as aborted so participant threads can exit cleanly
+                        let _ = self.cpr.with_active(|active| active.mark_aborted());
+
                         let stalled = self
                             .cpr
                             .with_active(|active| active.pending_threads())

@@ -398,6 +398,18 @@ where
             return;
         };
 
+        // Check if checkpoint was aborted (e.g., due to timeout)
+        if self
+            .cpr
+            .with_active(|active| active.is_aborted())
+            .unwrap_or(false)
+        {
+            // Checkpoint failed, don't participate
+            ctx.version = state.version;
+            ctx.current.version = state.version;
+            return;
+        }
+
         if !is_participant {
             if ctx.version != state.version {
                 ctx.swap_contexts_for_checkpoint(state.version);

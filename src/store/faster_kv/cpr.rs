@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
@@ -88,6 +88,10 @@ pub(crate) struct ActiveCheckpoint {
 
     /// Driver heartbeat counter (incremented each driver loop iteration).
     pub(crate) driver_heartbeat: AtomicU64,
+
+    /// Flag indicating the checkpoint has been aborted (e.g., due to timeout).
+    /// Participant threads check this to exit early from cpr_refresh.
+    aborted: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -122,6 +126,7 @@ impl ActiveCheckpoint {
             session_states: Vec::new(),
             snapshot_written: false,
             driver_heartbeat: AtomicU64::new(0),
+            aborted: AtomicBool::new(false),
         }
     }
 
@@ -212,6 +217,17 @@ impl ActiveCheckpoint {
             }
             Err(_) => false,
         }
+    }
+
+    /// Mark the checkpoint as aborted.
+    /// Called by driver thread when WaitPending times out.
+    pub(crate) fn mark_aborted(&self) {
+        self.aborted.store(true, Ordering::Release);
+    }
+
+    /// Check if the checkpoint has been aborted.
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::Acquire)
     }
 }
 
@@ -321,5 +337,18 @@ mod tests {
         // Caller observed 0, but heartbeat is 1 -> fresh, takeover fails
         assert!(!active.try_takeover(1, 0));
         assert_eq!(active.current_driver_thread_id(), 0);
+    }
+
+    #[test]
+    fn test_checkpoint_aborted_flag() {
+        let active = make_active(0b111, 0);
+        assert!(!active.is_aborted());
+
+        active.mark_aborted();
+        assert!(active.is_aborted());
+
+        // Marking aborted multiple times is idempotent
+        active.mark_aborted();
+        assert!(active.is_aborted());
     }
 }
