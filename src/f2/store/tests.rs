@@ -1596,7 +1596,10 @@ fn test_f2_concurrent_compaction_with_reads_and_writes() {
         for tid in 0..num_writers {
             let key = TestKey((tid * ops_per_writer + ops_per_writer - 1) as u64);
             let v = f2.read(&key).unwrap();
-            assert!(v.is_some(), "Key {key:?} should be readable after concurrent compaction");
+            assert!(
+                v.is_some(),
+                "Key {key:?} should be readable after concurrent compaction"
+            );
         }
         f2.stop_session();
     }
