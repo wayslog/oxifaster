@@ -197,7 +197,7 @@ where
                         } else {
                             let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
                             if self
-                                .copy_record_to_hot_tail(
+                                .copy_record_in_store(
                                     store,
                                     &index_result,
                                     record_key,
@@ -327,7 +327,7 @@ where
                             // Live record: copy to cold log tail with updated index.
                             let value = unsafe { Record::<K, V>::read_value(ptr.as_ptr()) };
                             if self
-                                .copy_record_in_cold_store(
+                                .copy_record_in_store(
                                     store,
                                     &index_result,
                                     record_key,
@@ -375,8 +375,8 @@ where
         Ok(())
     }
 
-    /// Copy a live record within the cold store (to the log tail).
-    fn copy_record_in_cold_store(
+    /// Copy a live record within a store (to the log tail), updating the index.
+    fn copy_record_in_store(
         &self,
         store: &InternalStore<D>,
         index_result: &crate::index::FindResult,
@@ -403,7 +403,6 @@ where
                 false,
             );
             ptr::write(&mut (*new_record).header, header);
-
             Record::<K, V>::write_key(record_ptr.as_ptr(), record_key);
             Record::<K, V>::write_value(record_ptr.as_ptr(), value);
         }
@@ -461,57 +460,6 @@ where
 
         if clear_status == Status::Ok {
             self.key_access.remove(hash.hash());
-            Ok(())
-        } else {
-            Err(Status::Aborted)
-        }
-    }
-
-    fn copy_record_to_hot_tail(
-        &self,
-        store: &InternalStore<D>,
-        index_result: &crate::index::FindResult,
-        record_key: K,
-        value: V,
-        hash: KeyHash,
-        old_address: Address,
-    ) -> Result<(), Status> {
-        debug_assert!(!std::mem::needs_drop::<K>());
-        debug_assert!(!std::mem::needs_drop::<V>());
-
-        let record_size = Record::<K, V>::size();
-        let new_address = unsafe { store.hlog_mut().allocate(record_size as u32) }?;
-        let record_ptr =
-            unsafe { store.hlog_mut().get_mut(new_address) }.ok_or(Status::OutOfMemory)?;
-
-        unsafe {
-            let new_record = record_ptr.as_ptr() as *mut Record<K, V>;
-            let header = RecordInfo::new(
-                old_address,
-                self.checkpoint.version() as u16,
-                false,
-                false,
-                false,
-            );
-            ptr::write(&mut (*new_record).header, header);
-
-            Record::<K, V>::write_key(record_ptr.as_ptr(), record_key);
-            Record::<K, V>::write_value(record_ptr.as_ptr(), value);
-        }
-
-        let Some(atomic_entry) = index_result.atomic_entry else {
-            return Err(Status::Aborted);
-        };
-
-        let update_status = store.hash_index.try_update_entry(
-            Some(atomic_entry),
-            index_result.entry,
-            new_address,
-            hash,
-            false,
-        );
-
-        if update_status == Status::Ok {
             Ok(())
         } else {
             Err(Status::Aborted)
