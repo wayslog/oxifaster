@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
@@ -71,7 +71,7 @@ pub(crate) struct ActiveCheckpoint {
     pub(crate) action: Action,
     pub(crate) backend: LogCheckpointBackend,
     pub(crate) durability: CheckpointDurability,
-    pub(crate) driver_thread_id: usize,
+    pub(crate) driver_thread_id: AtomicUsize,
 
     participants: u128,
     phase: Phase,
@@ -110,7 +110,7 @@ impl ActiveCheckpoint {
             action: start.action,
             backend: start.backend,
             durability: start.durability,
-            driver_thread_id: start.driver_thread_id,
+            driver_thread_id: AtomicUsize::new(start.driver_thread_id),
             participants: start.participants,
             phase: Phase::Rest,
             version: start.version,
@@ -183,29 +183,35 @@ impl ActiveCheckpoint {
 
     /// Get driver thread ID.
     pub(crate) fn current_driver_thread_id(&self) -> usize {
-        self.driver_thread_id
+        self.driver_thread_id.load(Ordering::Acquire)
     }
 
     /// Try to take over as driver if the current driver appears stalled.
     /// `last_observed_heartbeat` is the heartbeat value the caller last observed.
     /// Takeover succeeds only if the heartbeat hasn't changed since then.
-    pub(crate) fn try_takeover(
-        &mut self,
-        new_driver_id: usize,
-        last_observed_heartbeat: u64,
-    ) -> bool {
+    #[allow(dead_code)] // Reserved for future driver failover feature
+    pub(crate) fn try_takeover(&self, new_driver_id: usize, last_observed_heartbeat: u64) -> bool {
         let current = self.driver_heartbeat.load(Ordering::Acquire);
         if current != last_observed_heartbeat {
             return false;
         }
-        let old_driver = self.driver_thread_id;
-        self.driver_thread_id = new_driver_id;
-        tracing::warn!(
+        let old_driver = self.driver_thread_id.load(Ordering::Acquire);
+        match self.driver_thread_id.compare_exchange(
             old_driver,
-            new_driver = new_driver_id,
-            "Checkpoint driver takeover"
-        );
-        true
+            new_driver_id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(prev) => {
+                tracing::warn!(
+                    old_driver = prev,
+                    new_driver = new_driver_id,
+                    "Checkpoint driver takeover"
+                );
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -299,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_driver_takeover_stale_heartbeat() {
-        let mut active = make_active(0b111, 0);
+        let active = make_active(0b111, 0);
         assert_eq!(active.current_driver_thread_id(), 0);
 
         // Heartbeat is 0 and we pass 0 -> stale, takeover succeeds
@@ -309,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_driver_takeover_fresh_heartbeat_fails() {
-        let mut active = make_active(0b111, 0);
+        let active = make_active(0b111, 0);
         active.update_heartbeat(); // heartbeat is now 1
 
         // Caller observed 0, but heartbeat is 1 -> fresh, takeover fails

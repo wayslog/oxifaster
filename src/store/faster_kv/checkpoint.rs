@@ -426,7 +426,7 @@ where
 
             let is_driver = self
                 .cpr
-                .with_active(|active| active.driver_thread_id == driver_thread_id)
+                .with_active(|active| active.current_driver_thread_id() == driver_thread_id)
                 .unwrap_or(false);
             if !is_driver {
                 break;
