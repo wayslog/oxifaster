@@ -97,14 +97,7 @@ where
                 &mut stats,
             )?;
         } else if shift_begin_address {
-            if let Err(e) = store.hlog().flush_until(until_address) {
-                tracing::warn!("flush failed during compaction: {e:?}");
-                compactor.complete();
-                return Err(Status::Corruption);
-            }
-            stats.bytes_scanned = stats.bytes_reclaimed;
-            unsafe { store.hlog_mut().shift_begin_address(until_address) };
-            store.hash_index.garbage_collect(until_address);
+            unreachable!("StoreType is exhaustive with Hot and Cold");
         }
 
         stats.duration_ms = start.elapsed().as_millis() as u64;
