@@ -20,6 +20,12 @@ fn invalid_data(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io:
 /// Magic bytes for checksummed metadata files
 const CHECKSUM_MAGIC: &[u8; 4] = b"OXCK";
 
+/// Magic bytes for V2 checksummed metadata files (CRC covers header)
+const CHECKSUM_MAGIC_V2: &[u8; 4] = b"OXC2";
+
+/// V2 format version number
+const CHECKSUM_VERSION_V2: u8 = 2;
+
 fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let file_name = path
@@ -29,13 +35,20 @@ fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result
     let tmp_path = parent.join(format!(".{file_name}.tmp"));
 
     let json_bytes = serde_json::to_vec_pretty(value).map_err(invalid_data)?;
-    let crc = crc32fast::hash(&json_bytes);
+    let length = json_bytes.len() as u32;
+
+    // V2: CRC covers [VERSION][LENGTH][JSON]
+    let mut to_hash = Vec::with_capacity(1 + 4 + json_bytes.len());
+    to_hash.push(CHECKSUM_VERSION_V2);
+    to_hash.extend_from_slice(&length.to_le_bytes());
+    to_hash.extend_from_slice(&json_bytes);
+    let crc = crc32fast::hash(&to_hash);
 
     let file = File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
-    writer.write_all(CHECKSUM_MAGIC)?;
+    writer.write_all(CHECKSUM_MAGIC_V2)?;
     writer.write_all(&crc.to_le_bytes())?;
-    writer.write_all(&json_bytes)?;
+    writer.write_all(&to_hash)?; // VERSION + LENGTH + JSON
     writer.flush()?;
     writer.get_ref().sync_all()?;
 
@@ -52,7 +65,62 @@ fn write_json_pretty_to_file<T: Serialize>(value: &T, path: &Path) -> io::Result
 fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
     let data = fs::read(path)?;
 
-    // Check for truncated V1 checksum header
+    // V2 format: [MAGIC_V2: 4][CRC: 4][VERSION: 1][LENGTH: 4][JSON]
+    // Minimum size: 13 bytes (4 + 4 + 1 + 4 + 0)
+    if data.len() >= 4 && &data[0..4] == CHECKSUM_MAGIC_V2 {
+        if data.len() < 13 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Truncated V2 checksum header in {}: expected at least 13 bytes, got {}",
+                    path.display(),
+                    data.len()
+                ),
+            ));
+        }
+
+        let expected_crc = u32::from_le_bytes(
+            data[4..8]
+                .try_into()
+                .map_err(|_| invalid_data("invalid CRC bytes"))?,
+        );
+        let to_verify = &data[8..]; // VERSION + LENGTH + JSON
+        let actual_crc = crc32fast::hash(to_verify);
+
+        if expected_crc != actual_crc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Checksum mismatch in {}: expected {expected_crc:#x}, got {actual_crc:#x}",
+                    path.display()
+                ),
+            ));
+        }
+
+        let _version = data[8]; // Currently always 2, reserved for future
+        let length = u32::from_le_bytes(
+            data[9..13]
+                .try_into()
+                .map_err(|_| invalid_data("invalid length bytes"))?,
+        ) as usize;
+
+        if data.len() != 13 + length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Length mismatch in {}: header says {} bytes, file has {}",
+                    path.display(),
+                    length,
+                    data.len() - 13
+                ),
+            ));
+        }
+
+        let json = &data[13..];
+        return serde_json::from_slice(json).map_err(invalid_data);
+    }
+
+    // V1 format: [MAGIC: 4][CRC: 4][JSON]
     if data.len() >= 4 && data.len() < 8 && &data[0..4] == CHECKSUM_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -83,11 +151,11 @@ fn read_json_from_file<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
             ));
         }
 
-        serde_json::from_slice(json).map_err(invalid_data)
-    } else {
-        // Backward compatibility: old format without checksum header
-        serde_json::from_slice(&data).map_err(invalid_data)
+        return serde_json::from_slice(json).map_err(invalid_data);
     }
+
+    // Backward compatibility: old format without checksum header
+    serde_json::from_slice(&data).map_err(invalid_data)
 }
 
 /// Serializable version of IndexMetadata
@@ -909,5 +977,64 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("Truncated"));
+    }
+
+    #[test]
+    fn test_checksum_v2_format_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("v2.meta");
+
+        let mut meta = IndexMetadata::with_token(Uuid::new_v4());
+        meta.table_size = 1024;
+        meta.num_buckets = 100;
+
+        meta.write_to_file(&file_path).unwrap();
+
+        // Verify file starts with V2 magic
+        let data = std::fs::read(&file_path).unwrap();
+        assert_eq!(&data[0..4], b"OXC2");
+
+        let restored = IndexMetadata::read_from_file(&file_path).unwrap();
+        assert_eq!(meta.token, restored.token);
+        assert_eq!(meta.table_size, restored.table_size);
+    }
+
+    #[test]
+    fn test_truncated_checksum_v2_header_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("truncated_v2.meta");
+
+        // Write file with V2 magic but only 10 bytes (< 13 required)
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(b"OXC2");
+        truncated.extend_from_slice(&[0u8; 6]); // Only 6 more bytes
+        std::fs::write(&file_path, &truncated).unwrap();
+
+        let result = IndexMetadata::read_from_file(&file_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_checksum_v2_detects_header_corruption() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("corrupted_v2.meta");
+
+        let mut meta = IndexMetadata::with_token(Uuid::new_v4());
+        meta.table_size = 1024;
+        meta.write_to_file(&file_path).unwrap();
+
+        // Corrupt the VERSION byte (byte 8)
+        let mut data = std::fs::read(&file_path).unwrap();
+        data[8] ^= 0xFF;
+        std::fs::write(&file_path, &data).unwrap();
+
+        let result = IndexMetadata::read_from_file(&file_path);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Checksum mismatch"));
     }
 }
