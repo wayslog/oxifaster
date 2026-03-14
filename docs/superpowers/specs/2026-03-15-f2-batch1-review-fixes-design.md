@@ -68,6 +68,14 @@ Four specialized review agents analyzed the f2/batch1-correctness branch (24 com
 
 **Fix**: This is inherent to FASTER architecture. Add `bytes_leaked: u64` to `CompactionStats`. Increment on CAS failure paths. Add code comments documenting the tradeoff.
 
+### H5. `compact_log` cold path returns wrong `new_begin_address`
+
+**Problem**: `compact_log` forces `until_address` for the cold path's `CompactionResult.new_begin_address`, ignoring the adjusted `new_begin_address` set by `compact_cold_log_with_scan` when CAS failures occur. The hot path correctly uses `new_begin_address`. This is inconsistent and causes callers to receive incorrect compaction results.
+
+**File**: `src/f2/store/log_compaction.rs` -- `compact_log` (~line 113)
+
+**Fix**: Use `*new_begin_address` for both hot and cold paths, matching the existing pattern.
+
 ### H4. Read cache backfill race with concurrent invalidation -- document
 
 **Problem**: Thread A reads cold V1, Thread B upserts V2 and invalidates cache, Thread A backfills stale V1.
@@ -97,7 +105,7 @@ Four specialized review agents analyzed the f2/batch1-correctness branch (24 com
 
 ### S1. Merge `copy_record_to_hot_tail` and `copy_record_in_cold_store`
 
-Both functions have identical logic (allocate, write header/key/value, CAS update index). Extract `copy_record_in_store(store, ...)` and call from both paths.
+Both functions have identical logic (allocate, write header/key/value, CAS update index). Extract `copy_record_in_store(store, ...)` and call from both paths. Must preserve H3's `bytes_leaked` tracking on CAS failure paths.
 
 ### S2. Merge `upsert_into_store` and `tombstone_into_store`
 
@@ -111,17 +119,13 @@ Share 90% code. Add `value: Option<&V>` parameter (None = tombstone). Single fun
 
 ### S4. Remove dead code branch in `compact_log`
 
-Third `else if shift_begin_address` is unreachable (StoreType is exhaustive with Hot and Cold).
+Third `else if shift_begin_address` is unreachable (StoreType is exhaustive with Hot and Cold). Replace with `unreachable!("StoreType is exhaustive")` as a safety net.
 
-### S5. Fix `compact_log` cold path `new_begin`
-
-Currently forces `until_address` for cold path, ignoring `new_begin_address` set by `compact_cold_log_with_scan`. Use `*new_begin_address` instead, matching the hot path behavior.
-
-### S6. Unify `recover` phase reset
+### S5. Unify `recover` phase reset
 
 Extract phase reset to closure pattern (already used in `save_checkpoint`). Eliminates 4 duplicated reset-and-return blocks.
 
-### S7. Extract `enter_session` from `start_session` / `continue_session`
+### S6. Extract `enter_session` from `start_session` / `continue_session`
 
 Share checkpoint phase check, epoch protect, session count logic.
 
@@ -139,9 +143,9 @@ Make it truly multi-threaded: spawn N threads that call `heavy_enter()` concurre
 
 One commit per fix, ordered by priority:
 1. C1, C2, C3 (critical correctness)
-2. H1, H2, H3, H4 (high importance)
+2. H1, H2, H3, H4, H5 (high importance)
 3. M1-M5 (medium -- error tracing)
-4. S1-S7 (simplification)
+4. S1-S6 (simplification)
 5. T1-T2 (test coverage)
 
 After all fixes: create PR with review report in description.
