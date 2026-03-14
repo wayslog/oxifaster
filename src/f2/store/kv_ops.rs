@@ -122,11 +122,9 @@ where
             }
         }
 
-        // Fallback after exhausting retries: regular upsert to avoid livelock.
-        // This may lose a concurrent update but guarantees progress.
-        let mut value: V = (self.read(&key)?).unwrap_or_default();
-        modify(&mut value);
-        self.upsert(key, value)
+        // All retries exhausted: return error rather than silently falling back
+        // to a non-atomic upsert that could lose concurrent updates.
+        Err(Status::Aborted)
     }
 
     fn internal_read(
