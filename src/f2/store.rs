@@ -190,25 +190,26 @@ where
         self.checkpoint_dir.as_deref()
     }
 
+    fn enter_session(&self) -> Result<(), Status> {
+        if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
+            return Err(Status::Aborted);
+        }
+
+        let tid = get_thread_id();
+        self.hot_store.epoch.protect(tid);
+        self.cold_store.epoch.protect(tid);
+        self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
+
+        Ok(())
+    }
+
     /// Start a new session
     ///
     /// # Returns
     /// A unique session GUID
     pub fn start_session(&self) -> Result<Uuid, Status> {
-        if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
-            return Err(Status::Aborted);
-        }
-
-        let guid = Uuid::new_v4();
-
-        // Protect epoch on both stores using per-thread ID
-        let tid = get_thread_id();
-        self.hot_store.epoch.protect(tid);
-        self.cold_store.epoch.protect(tid);
-
-        self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
-
-        Ok(guid)
+        self.enter_session()?;
+        Ok(Uuid::new_v4())
     }
 
     /// Continue an existing session
@@ -219,17 +220,7 @@ where
     /// # Returns
     /// The last serial number for this session
     pub fn continue_session(&self, _session_id: Uuid) -> Result<u64, Status> {
-        if self.checkpoint.phase.load(Ordering::Acquire) != F2CheckpointPhase::Rest {
-            return Err(Status::Aborted);
-        }
-
-        // Protect epoch on both stores using per-thread ID
-        let tid = get_thread_id();
-        self.hot_store.epoch.protect(tid);
-        self.cold_store.epoch.protect(tid);
-
-        self.num_active_sessions.fetch_add(1, Ordering::AcqRel);
-
+        self.enter_session()?;
         Ok(0)
     }
 
