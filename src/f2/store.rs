@@ -689,12 +689,16 @@ where
 
         // Hot-cold compaction
         if let Some(until_addr) = self.should_compact_hot_log() {
-            let _ = self.compact_hot_log(until_addr);
+            if let Err(e) = self.compact_hot_log(until_addr) {
+                tracing::warn!("hot log compaction failed: {e:?}");
+            }
         }
 
         // Cold-cold compaction
         if let Some(until_addr) = self.should_compact_cold_log() {
-            let _ = self.compact_cold_log(until_addr);
+            if let Err(e) = self.compact_cold_log(until_addr) {
+                tracing::warn!("cold log compaction failed: {e:?}");
+            }
         }
     }
 
